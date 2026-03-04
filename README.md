@@ -1,7 +1,7 @@
 # ROF — RelateLang Orchestration Framework
 
 > **Structured, testable, versionable LLM workflows.**
-> Write your business logic once in RelateLang. Run it on any LLM.
+> Declare your rules in [RelateLang](https://github.com/fischerf/relatelang/). ROF executes them on any LLM.
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
@@ -20,24 +20,50 @@
 
 ---
 
+## What is ROF?
+
+ROF is a **business logic runtime for LLM workflows**. It occupies a fundamentally different layer from agent orchestration frameworks like LangChain, AutoGen, or CrewAI. Rather than answering *"how do I wire agents together in Python?"*, ROF answers a different question entirely:
+
+> **How do I make business logic LLM-executable, testable, and version-controlled?**
+
+This is the same shift SQL made for databases. You don't write loops to retrieve data — you declare what you want, and the runtime figures out how. ROF applies that principle to LLM workflows.
+
+| Framework | Core Question |
+|---|---|
+| LangChain / LangGraph | "How do I chain LLM calls and tool invocations in Python?" |
+| AutoGen | "How do I coordinate multiple agents conversing with each other?" |
+| CrewAI | "How do I assign roles and tasks to a team of agents?" |
+| DSPy | "How do I optimise prompt effectiveness automatically?" |
+| **ROF** | **"How do I make business logic LLM-executable, testable, and version-controlled?"** |
+
+ROF is not a better agent wiring library — it is a **declarative business logic runtime**.
+
+---
+
 ## The Problem
 
-LLM prompts embedded in application code are fragile, inconsistent, and untestable.
-When a team writes the same business logic as natural language prompts, drift is inevitable:
+In every other framework, business rules are embedded as natural language strings inside Python code. They cannot be linted, unit-tested in isolation, or reviewed by non-engineers. When a team encodes the same rule as prompts, drift is inevitable:
 
-```java
-// Developer 1  (German native speaker)
-"Check if customer is premium when purchases exceed 1000 euros."
+```python
+# LangChain — business rule as a string inside a function
+chain = (
+    {"context": retriever, "question": RunnablePassthrough()}
+    | PromptTemplate.from_template(
+        "If customer purchases exceed 1000 euros, classify as Premium. "
+        "Given: {context}. Question: {question}"
+    )
+    | llm
+)
 
-// Developer 2  (non-native English)
-"Kindly verify premium status for purchases exceeding 1000 euros."
-
-// Developer 3  (after refactoring)
-"Given: customer with $1500. Task: determine premium status (threshold: $1000)."
+# CrewAI — business logic embedded in a natural language role definition
+analyst = Agent(
+    role="Senior Financial Analyst",
+    goal="Determine if customer qualifies for premium tier",
+    backstory="You are an expert at customer segmentation..."
+)
 ```
 
-All three encode the same rule — but inconsistently, with different currency assumptions,
-and none of them are unit-testable or code-reviewable in any meaningful way.
+Three developers will write three different strings encoding the same rule. None are diffable. None are machine-lintable. None can be signed off by a product manager or domain expert.
 
 ---
 
@@ -59,9 +85,117 @@ if Customer has total_purchases > 10000 and account_age_days > 365,
 ensure determine Customer segment.
 ```
 
-Same logic. One format. Every developer. Every time.
+One canonical format. Machine-lintable (`rof lint`). AST-inspectable (`rof inspect`). Diffable in Git. Readable by non-engineers.
 
 > **RelateLang language reference and full specification →** [github.com/fischerf/relatelang](https://github.com/fischerf/relatelang/)
+
+---
+
+## Why ROF?
+
+### The `.rl` file as the deployable artifact
+
+In every other framework, the deployable artifact is Python code. In ROF, it is a `.rl` file:
+
+- **Reviewable** — business stakeholders can read and sign off on `.rl` files
+- **Lintable** — CI pipelines run `rof lint --strict` and fail the build on invalid specs
+- **Diffable** — Git diffs on `.rl` files are human-readable business logic changes
+- **Canonical** — `rof inspect --format rl` emits a normalised version of the parsed spec
+
+### Static analysis without an LLM
+
+```
+E001  ParseError / SyntaxError          E003  Condition references undefined entity
+E002  Duplicate entity definition        E004  Goal references undefined entity
+W001  No goals defined                   W003  Orphaned definition
+```
+
+`rof lint` catches entire classes of workflow bugs **before a single LLM call is made**. This is the difference between *"we test by running it"* and *"we test with static analysis"*. No other orchestration framework offers a linter with machine-readable output and structured exit codes for CI integration.
+
+### Progressive, immutable snapshot accumulation
+
+```
+snapshot₁ → snapshot₂ → snapshot₃ → final_result
+```
+
+Each pipeline stage adds to the snapshot; nothing is ever discarded. The final snapshot is a complete, replayable audit trail of every fact the system knew and every decision it made — without any custom logging code. It is not a log — it is an **immutable typed record** that can be fed back into `rof run --seed-snapshot` to replay or resume any execution.
+
+### Per-stage model routing
+
+ROF pipelines route different stages to different LLM providers and models:
+
+```yaml
+stages:
+  - name: gather
+    rl_file: 01_gather.rl
+    model: gemma3:12b          # cheap local model for extraction
+  - name: decide
+    rl_file: 03_decide.rl
+    model: claude-opus-4-5     # powerful model for final reasoning
+```
+
+This enables cost optimisation (cheap model for simple extraction, expensive model for critical decisions) and capability routing (local model for sensitive data, cloud model for complex reasoning).
+
+### Strict separation of concerns
+
+| Layer | Owns | Nothing Else |
+|---|---|---|
+| `.rl` file | Business logic | — |
+| `rof-pipeline` | Stage topology & snapshot threading | — |
+| `rof-core` | Goal execution loop & tool routing | — |
+| `rof-llm` | LLM calls, retry, response parsing | — |
+| `rof-tools` | Deterministic tool execution | — |
+
+Each module can be understood, tested, and replaced independently. Extensibility requires zero modifications to the ROF codebase:
+
+```python
+parser.register(MyStatementParser())          # Custom statement parser
+registry.register("my-llm", MyLLMProvider())  # Custom LLM provider
+
+@rof_tool(tags=["custom", "domain-specific"]) # Custom tool
+def my_tool(context: ToolContext) -> ToolResult: ...
+```
+
+### When to use ROF
+
+**Choose ROF when:**
+- Business rules must be canonical, reviewable, and auditable
+- Non-technical stakeholders need to read and approve the logic
+- You need `rof lint` in CI before any LLM costs are incurred
+- You require a replayable, typed audit trail of every execution
+- The same spec must be runnable against multiple LLM providers
+- You want to version-control business logic the same way you version-control SQL schemas
+
+**Choose other frameworks when:**
+- You need LangChain's large ecosystem of pre-built integrations immediately
+- Your problem requires multiple agents debating or checking each other (AutoGen)
+- You need role-based task delegation for content generation (CrewAI)
+- Your workflow topology is highly dynamic and runtime-determined
+
+```
+                        Declarative Logic Layer
+                               ▲
+                               │
+                          ┌────┤ ROF ├────┐
+                          │   RelateLang  │
+                          │   .rl files   │
+                          └───────────────┘
+                               │
+               ────────────────┼────────────────
+                               │
+        ┌──────────────────────┼──────────────────────┐
+        │                      │                      │
+   ┌────▼────┐          ┌──────▼──────┐        ┌──────▼──────┐
+   │LangChain│          │   AutoGen   │        │   CrewAI    │
+   │LangGraph│          │  MS Agents  │        │  SuperAGI   │
+   └─────────┘          └─────────────┘        └─────────────┘
+   Code-first chains    Multi-agent dialogue    Role-based crews
+   & tool pipelines     & coordination          & task delegation
+
+                        Imperative Python Layer
+```
+
+ROF does not replace these frameworks — it operates at a **higher level of abstraction**. The `.rl` declaration layer and the execution layer are separable concerns. What ROF provides that none of the others do is the **canonical, lintable, versionable declaration layer itself**.
 
 ---
 
