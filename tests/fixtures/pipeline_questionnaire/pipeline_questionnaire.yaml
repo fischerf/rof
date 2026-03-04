@@ -1,0 +1,44 @@
+# pipeline_questionnaire.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# ROF  –  Lua CLI Questionnaire Pipeline
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Stages
+#   1. generate   LLM writes a Lua questionnaire → saved to /tmp/*.lua
+#   2. interact   lua <script> runs in your terminal → you answer live
+#   3. evaluate   LLM reads your answers → produces score, level, feedback
+#
+# Usage (ROF CLI)
+#   rof pipeline run tests/fixtures/pipeline_questionnaire/pipeline_questionnaire.yaml \
+#       --provider anthropic --model claude-sonnet-4-5
+#
+# Usage (Ollama — local, no API key)
+#   rof pipeline run tests/fixtures/pipeline_questionnaire/pipeline_questionnaire.yaml \
+#       --provider ollama --model gemma3:12b --json
+
+stages:
+
+  - name: generate
+    rl_file: 01_generate.rl
+    description: >
+      LLM generates an interactive Lua questionnaire on the configured topic.
+      LuaSaveTool saves the script to /tmp/ and writes the path into the snapshot.
+
+  - name: interact
+    rl_file: 02_interact.rl
+    description: >
+      LuaRunTool executes the saved Lua script with full terminal inheritance.
+      The human answers questions live in the CLI. Answers are captured from
+      the Lua process and written to the snapshot as HumanResponses attributes.
+
+  - name: evaluate
+    rl_file: 03_evaluate.rl
+    description: >
+      The LLM receives the full answer set and produces a structured evaluation:
+      score (0-100), level, strengths, knowledge gaps, and learning recommendations.
+
+config:
+  on_failure:             halt    # stop immediately on any stage failure
+  retry_count:            1       # one retry on transient LLM errors
+  inject_prior_context:   true    # thread snapshot forward through all stages
+  max_snapshot_entities:  50      # guard against context window overflow

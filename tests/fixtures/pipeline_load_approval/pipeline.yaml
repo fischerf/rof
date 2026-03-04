@@ -1,0 +1,50 @@
+# pipeline.yaml
+# ROF — Loan Approval Pipeline
+#
+# Run with:
+#   rof pipeline run tests/fixtures/pipeline_load_approval/pipeline.yaml
+#
+# Override provider via flags:
+#   rof pipeline run tests/fixtures/pipeline_load_approval/pipeline.yaml \
+#       --provider anthropic --model claude-sonnet-4-5
+#
+# Or set environment variables:
+#   export ROF_PROVIDER=openai
+#   export ROF_API_KEY=sk-...
+#   rof pipeline run tests/fixtures/pipeline_load_approval/pipeline.yaml
+#
+# Save the final snapshot for inspection or replay:
+#   rof pipeline run tests/fixtures/pipeline_load_approval/pipeline.yaml --json > result.json
+
+# ── LLM provider (all optional — CLI flags and env vars take precedence) ──
+# provider: openai          # openai | anthropic | gemini | ollama
+# model:    gpt-4o          # omit to use per-provider default
+# api_key:  sk-...          # prefer ROF_API_KEY / OPENAI_API_KEY env vars
+
+# ── Pipeline stages ───────────────────────────────────────────────────────
+stages:
+
+  - name: gather
+    rl_file: 01_gather.rl
+    description: >
+      Collect and validate all loan application inputs:
+      applicant profile, loan request details, and credit history.
+
+  - name: analyse
+    rl_file: 02_analyse.rl
+    description: >
+      Compute risk score, evaluate creditworthiness, and assess
+      repayment feasibility using data from the gather stage.
+
+  - name: decide
+    rl_file: 03_decide.rl
+    description: >
+      Apply approval business rules and produce a final decision
+      with interest rate and monthly payment calculation.
+
+# ── Pipeline-level configuration ─────────────────────────────────────────
+config:
+  on_failure:             halt      # halt | continue | retry
+  retry_count:            2         # retries before giving up (OnFailure.RETRY)
+  inject_prior_context:   true      # pass accumulated snapshot into each stage
+  max_snapshot_entities:  50        # cap to avoid context window overflow

@@ -1,0 +1,1806 @@
+"""
+rof-cli: RelateLang Orchestration Framework — Command Line Interface
+====================================================================
+
+Commands
+--------
+  rof lint    <file.rl>   Parse + semantic validation (zero LLM deps)
+  rof inspect <file.rl>   Show AST structure (tree, json, or rl)
+  rof run     <file.rl>   Execute workflow against a real LLM
+  rof debug   <file.rl>   Step-through execution with prompt/response
+  rof version             Print version and dependency info
+
+Provider resolution for `run` / `debug`
+----------------------------------------
+  1. --provider / --model / --api-key  CLI flags
+  2. ROF_PROVIDER / ROF_MODEL / ROF_API_KEY  environment variables
+  3. Detected from available installed SDKs (openai / anthropic / etc.)
+
+Exit codes
+----------
+  0  success / no issues
+  1  lint warnings (--strict) or lint errors
+  2  runtime / parse error
+  3  bad CLI usage
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+_console_fixed = False
+
+
+def _fix_win32_console() -> None:
+    """Reconfigure stdout/stderr for UTF-8 on Windows.
+
+    Called from main() only — never at import time — so pytest's capture
+    infrastructure is not disturbed when rof_cli is imported as a library.
+
+    Guard: if sys.stdout has no real file descriptor (e.g. it is a StringIO
+    used by test helpers), fileno() raises UnsupportedOperation and we return
+    immediately without touching either stream.  This prevents pytest's
+    teardown from seeing a replaced sys.stderr and crashing with
+    "I/O operation on closed file".
+    """
+    global _console_fixed
+    if _console_fixed or sys.platform != "win32":
+        return
+    import io
+
+    # StringIO and pytest capture objects raise UnsupportedOperation on
+    # fileno().  Real console/file streams return an integer fd.
+    try:
+        sys.stdout.fileno()
+    except (AttributeError, io.UnsupportedOperation):
+        return  # test / redirected context — leave streams alone
+
+    _console_fixed = True  # only set after we know we'll actually fix things
+    if hasattr(sys.stdout, "buffer"):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "buffer"):
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
+
+import textwrap
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Any, Optional
+
+# ─── Version ────────────────────────────────────────────────────────────────
+
+__version__ = "0.1.0"
+
+# ─── Colour helpers (no deps) ───────────────────────────────────────────────
+
+
+def _c(text: str, code: str) -> str:
+    if not _use_color():
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _use_color() -> bool:
+    return sys.stdout.isatty() and os.environ.get("NO_COLOR", "") == ""
+
+
+def red(t: str) -> str:
+    return _c(t, "91")
+
+
+def yellow(t: str) -> str:
+    return _c(t, "93")
+
+
+def green(t: str) -> str:
+    return _c(t, "92")
+
+
+def cyan(t: str) -> str:
+    return _c(t, "96")
+
+
+def blue(t: str) -> str:
+    return _c(t, "94")
+
+
+def bold(t: str) -> str:
+    return _c(t, "1")
+
+
+def dim(t: str) -> str:
+    return _c(t, "2")
+
+
+def magenta(t: str) -> str:
+    return _c(t, "95")
+
+
+def _banner(title: str, width: int = 68) -> None:
+    bar = "─" * width
+    print(f"\n{bar}")
+    print(f"  {bold(title)}")
+    print(bar)
+
+
+def _section(label: str) -> None:
+    print(f"\n{bold(cyan(f'▸ {label}'))}")
+
+
+def _ok(msg: str) -> None:
+    print(f"  {green('✓')} {msg}")
+
+
+def _warn(msg: str) -> None:
+    print(f"  {yellow('⚠')} {msg}")
+
+
+def _err(msg: str) -> None:
+    print(f"  {red('✗')} {msg}", file=sys.stderr)
+
+
+def _info(msg: str) -> None:
+    print(f"  {dim('·')} {msg}")
+
+
+# ─── Core imports ────────────────────────────────────────────────────────────
+
+
+def _import_core() -> Any:
+    """Import rof_core; print a helpful error if missing."""
+    try:
+        from rof_framework import rof_core as core  # type: ignore
+
+        return core
+    except ImportError:
+        _err("rof_core not found. Make sure rof_framework is installed.")
+        sys.exit(2)
+
+
+def _import_llm() -> Any:
+    """Import rof_llm; print a helpful error if missing."""
+    try:
+        from rof_framework import rof_llm as llm  # type: ignore
+
+        return llm
+    except ImportError:
+        _err("rof_llm not found. Make sure rof_framework is installed.")
+        sys.exit(2)
+
+
+# ─── Linter ──────────────────────────────────────────────────────────────────
+
+
+class Severity(Enum):
+    ERROR = "error"
+    WARNING = "warning"
+    INFO = "info"
+
+
+@dataclass
+class LintIssue:
+    severity: Severity
+    code: str
+    message: str
+    line: int = 0
+
+    def __str__(self) -> str:
+        loc = f"line {self.line}: " if self.line else ""
+        sev = {
+            Severity.ERROR: red("error"),
+            Severity.WARNING: yellow("warning"),
+            Severity.INFO: dim("info"),
+        }[self.severity]
+        return f"  [{sev}] {loc}{self.message}  ({dim(self.code)})"
+
+    def to_dict(self) -> dict:
+        return {
+            "severity": self.severity.value,
+            "code": self.code,
+            "message": self.message,
+            "line": self.line,
+        }
+
+
+class Linter:
+    """
+    Static semantic analysis for .rl files.
+
+    Checks performed
+    ----------------
+    E001  ParseError / SyntaxError
+    E002  Duplicate entity definition
+    E003  Condition references undefined entity
+    E004  Goal references undefined entity
+    W001  No goals defined (workflow will do nothing)
+    W002  Condition action references undefined entity
+    W003  Orphaned definition (defined but never used)
+    W004  Empty workflow (no statements at all)
+    I001  Attribute defined without prior entity definition
+    """
+
+    def lint(self, source: str, filename: str = "<input>") -> list[LintIssue]:
+        core = _import_core()
+        issues: list[LintIssue] = []
+
+        # ── E001: Syntax / parse error ─────────────────────────────────────
+        try:
+            ast = core.RLParser().parse(source)
+        except core.ParseError as exc:
+            issues.append(
+                LintIssue(
+                    severity=Severity.ERROR,
+                    code="E001",
+                    message=str(exc),
+                    line=exc.line,
+                )
+            )
+            return issues  # can't continue without a valid AST
+
+        # ── W004: Completely empty ─────────────────────────────────────────
+        total = (
+            len(ast.definitions)
+            + len(ast.attributes)
+            + len(ast.predicates)
+            + len(ast.relations)
+            + len(ast.conditions)
+            + len(ast.goals)
+        )
+        if total == 0:
+            issues.append(
+                LintIssue(
+                    severity=Severity.WARNING,
+                    code="W004",
+                    message="Workflow contains no statements.",
+                )
+            )
+            return issues
+
+        defined_entities: dict[str, int] = {}  # entity → first-definition line
+        used_entities: set[str] = set()
+
+        # ── E002: Duplicate definitions ────────────────────────────────────
+        for d in ast.definitions:
+            if d.entity in defined_entities:
+                issues.append(
+                    LintIssue(
+                        severity=Severity.ERROR,
+                        code="E002",
+                        message=(
+                            f"Entity '{d.entity}' is defined more than once "
+                            f"(first at line {defined_entities[d.entity]})."
+                        ),
+                        line=d.source_line,
+                    )
+                )
+            else:
+                defined_entities[d.entity] = d.source_line
+
+        known = set(defined_entities.keys())
+
+        # Helper: extract PascalCase words that look like entity names.
+        # This catches both defined entities and undefined references.
+        import re as _re
+
+        _ENTITY_PATTERN = _re.compile(r"\b[A-Z][A-Za-z0-9_]*\b")
+        # Reserved RL/Python words to ignore in entity detection
+        _RESERVED = frozenset(
+            {
+                "True",
+                "False",
+                "None",
+                "And",
+                "Or",
+                "Not",
+                "If",
+                "Then",
+                "Ensure",
+                "Define",
+                "Relate",
+                "Has",
+                "Is",
+            }
+        )
+
+        def _candidate_entities(expr: str) -> set[str]:
+            """PascalCase words in expr — candidate entity references."""
+            return {w for w in _ENTITY_PATTERN.findall(expr) if w not in _RESERVED}
+
+        def _undefined_in(expr: str) -> set[str]:
+            """Candidate entity names in expr that are NOT defined."""
+            return _candidate_entities(expr) - known
+
+        def _defined_in(expr: str) -> set[str]:
+            """Candidate entity names in expr that ARE defined."""
+            return _candidate_entities(expr) & known
+
+        # ── Attribute / predicate usage tracking ──────────────────────────
+        for a in ast.attributes:
+            used_entities.add(a.entity)
+            if a.entity not in known:
+                issues.append(
+                    LintIssue(
+                        severity=Severity.INFO,
+                        code="I001",
+                        message=(
+                            f"Attribute set on '{a.entity}' but no prior 'define {a.entity}' found."
+                        ),
+                        line=a.source_line,
+                    )
+                )
+
+        for p in ast.predicates:
+            used_entities.add(p.entity)
+
+        # ── E003: Condition references undefined entity ────────────────────
+        for cond in ast.conditions:
+            used_entities |= _defined_in(cond.condition_expr)
+            for ref in sorted(_undefined_in(cond.condition_expr)):
+                issues.append(
+                    LintIssue(
+                        severity=Severity.ERROR,
+                        code="E003",
+                        message=(
+                            f"Condition references undefined entity '{ref}'. "
+                            f"Add 'define {ref} as ...' before this condition."
+                        ),
+                        line=cond.source_line,
+                    )
+                )
+            # ── W002: action entity ───────────────────────────────────────
+            used_entities |= _defined_in(cond.action)
+            for ref in sorted(_undefined_in(cond.action)):
+                issues.append(
+                    LintIssue(
+                        severity=Severity.WARNING,
+                        code="W002",
+                        message=(f"Condition action references undefined entity '{ref}'."),
+                        line=cond.source_line,
+                    )
+                )
+
+        # ── W001: No goals ─────────────────────────────────────────────────
+        if not ast.goals:
+            issues.append(
+                LintIssue(
+                    severity=Severity.WARNING,
+                    code="W001",
+                    message=(
+                        "No 'ensure' goals found. The workflow will parse but "
+                        "nothing will be executed."
+                    ),
+                )
+            )
+        else:
+            # ── E004: Goal references undefined entity ─────────────────────
+            for goal in ast.goals:
+                used_entities |= _defined_in(goal.goal_expr)
+                for ref in sorted(_undefined_in(goal.goal_expr)):
+                    issues.append(
+                        LintIssue(
+                            severity=Severity.ERROR,
+                            code="E004",
+                            message=(
+                                f"Goal references undefined entity '{ref}'. "
+                                f"Add 'define {ref} as ...' before this goal."
+                            ),
+                            line=goal.source_line,
+                        )
+                    )
+
+        # ── W003: Orphaned definitions ─────────────────────────────────────
+        # Also scan relations for usage
+        for r in ast.relations:
+            used_entities.add(r.entity1)
+            used_entities.add(r.entity2)
+        for entity, def_line in defined_entities.items():
+            if entity not in used_entities:
+                issues.append(
+                    LintIssue(
+                        severity=Severity.WARNING,
+                        code="W003",
+                        message=(
+                            f"Entity '{entity}' is defined but never referenced "
+                            f"in attributes, conditions, or goals."
+                        ),
+                        line=def_line,
+                    )
+                )
+
+        return sorted(issues, key=lambda i: (i.line, i.severity.value))
+
+
+# ─── Provider factory ─────────────────────────────────────────────────────────
+
+
+def _make_provider(args: argparse.Namespace) -> Any:
+    """
+    Resolve provider, model, and API key from CLI args → env vars → SDK detection.
+    Returns an LLMProvider instance.
+    """
+    llm = _import_llm()
+
+    provider_name = (getattr(args, "provider", None) or os.environ.get("ROF_PROVIDER", "")).lower()
+
+    api_key = getattr(args, "api_key", None) or os.environ.get("ROF_API_KEY", "")
+
+    model = getattr(args, "model", None) or os.environ.get("ROF_MODEL", "")
+
+    # ── Auto-detect provider from installed SDKs ──────────────────────────
+    if not provider_name:
+        for probe, name in [
+            ("openai", "openai"),
+            ("anthropic", "anthropic"),
+            ("google.generativeai", "gemini"),
+            ("ollama", "ollama"),
+        ]:
+            try:
+                __import__(probe)
+                provider_name = name
+                break
+            except ImportError:
+                pass
+
+    if not provider_name:
+        _err("No LLM provider found.")
+        _err("  Set ROF_PROVIDER (openai / anthropic / gemini / ollama)")
+        _err("  and ROF_API_KEY, or install one of:")
+        _err("    pip install openai          # OpenAI / GPT")
+        _err("    pip install anthropic        # Claude")
+        _err("    pip install google-generativeai  # Gemini")
+        sys.exit(2)
+
+    # ── Construct provider ────────────────────────────────────────────────
+    if provider_name == "openai":
+        key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        if not key:
+            _err("OpenAI requires an API key.")
+            _err("  Set ROF_API_KEY or OPENAI_API_KEY.")
+            sys.exit(2)
+        return llm.OpenAIProvider(
+            api_key=key,
+            model=model or "gpt-4o",
+        )
+
+    if provider_name == "anthropic":
+        key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        if not key:
+            _err("Anthropic requires an API key.")
+            _err("  Set ROF_API_KEY or ANTHROPIC_API_KEY.")
+            sys.exit(2)
+        return llm.AnthropicProvider(
+            api_key=key,
+            model=model or "claude-sonnet-4-5",
+        )
+
+    if provider_name == "gemini":
+        key = api_key or os.environ.get("GOOGLE_API_KEY", "")
+        if not key:
+            _err("Gemini requires an API key.")
+            _err("  Set ROF_API_KEY or GOOGLE_API_KEY.")
+            sys.exit(2)
+        return llm.GeminiProvider(
+            api_key=key,
+            model=model or "gemini-1.5-pro",
+        )
+
+    if provider_name in ("ollama", "local", "vllm"):
+        base_url = os.environ.get("ROF_BASE_URL", "http://localhost:11434")
+        _timeout = float(os.environ.get("ROF_TIMEOUT", "300"))
+        return llm.OllamaProvider(
+            model=model or "llama3",
+            base_url=base_url,
+            timeout=_timeout,
+        )
+
+    _err(f"Unknown provider: '{provider_name}'")
+    _err("  Supported: openai, anthropic, gemini, ollama")
+    sys.exit(2)
+
+
+# ─── Command: version ─────────────────────────────────────────────────────────
+
+
+def cmd_version(args: argparse.Namespace) -> int:
+    if getattr(args, "json", False):
+        core = _import_core()
+        deps: dict[str, str] = {}
+        for name, pkg in [
+            ("openai", "openai"),
+            ("anthropic", "anthropic"),
+            ("google-generativeai", "google.generativeai"),
+            ("ollama", "ollama"),
+            ("httpx", "httpx"),
+            ("tiktoken", "tiktoken"),
+        ]:
+            try:
+                m = __import__(pkg.split(".")[0])
+                deps[name] = getattr(m, "__version__", "installed")
+            except ImportError:
+                deps[name] = "not installed"
+
+        print(
+            json.dumps(
+                {
+                    "rof_version": __version__,
+                    "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+                    "rof_core": "ok",
+                    "dependencies": deps,
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    _banner(f"ROF — RelateLang Orchestration Framework  v{__version__}")
+    print(f"  Python   {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
+
+    _section("LLM provider SDKs")
+    for label, pkg in [
+        ("openai       (OpenAI / Azure / Copilot)", "openai"),
+        ("anthropic    (Claude)", "anthropic"),
+        ("google-generativeai (Gemini)", "google.generativeai"),
+        ("httpx        (Ollama / vLLM)", "httpx"),
+        ("tiktoken     (token counting)", "tiktoken"),
+    ]:
+        try:
+            m = __import__(pkg.split(".")[0])
+            ver = getattr(m, "__version__", "?")
+            _ok(f"{label}  {dim(ver)}")
+        except ImportError:
+            _info(f"{label}  {dim('not installed')}")
+
+    _section("Core modules")
+    for label, mod in [
+        ("rof_core", "rof_framework.rof_core"),
+        ("rof_llm", "rof_framework.rof_llm"),
+        ("rof_tools", "rof_framework.rof_tools"),
+        ("rof_pipeline", "rof_framework.rof_pipeline"),
+    ]:
+        try:
+            __import__(mod)
+            _ok(label)
+        except ImportError:
+            _info(f"{label}  {dim('not found on path')}")
+
+    print()
+    return 0
+
+
+# ─── Command: lint ────────────────────────────────────────────────────────────
+
+
+def cmd_lint(args: argparse.Namespace) -> int:
+    rl_file = Path(args.file)
+    strict = getattr(args, "strict", False)
+    as_json = getattr(args, "json", False)
+
+    if not rl_file.exists():
+        _err(f"File not found: {rl_file}")
+        return 2
+    if rl_file.suffix.lower() not in (".rl", ".relatelang", ""):
+        _warn(f"Unexpected extension '{rl_file.suffix}' — expected .rl")
+
+    source = rl_file.read_text(encoding="utf-8")
+    linter = Linter()
+    issues = linter.lint(source, filename=str(rl_file))
+
+    errors = [i for i in issues if i.severity == Severity.ERROR]
+    warnings = [i for i in issues if i.severity == Severity.WARNING]
+    infos = [i for i in issues if i.severity == Severity.INFO]
+
+    # ── JSON output ───────────────────────────────────────────────────────
+    if as_json:
+        # also include AST summary if clean
+        summary: dict[str, Any] = {
+            "file": str(rl_file),
+            "issues": [i.to_dict() for i in issues],
+            "counts": {
+                "errors": len(errors),
+                "warnings": len(warnings),
+                "info": len(infos),
+            },
+            "passed": len(errors) == 0 and (not strict or len(warnings) == 0),
+        }
+        if not errors:
+            core = _import_core()
+            ast = core.RLParser().parse(source)
+            summary["ast_summary"] = {
+                "definitions": len(ast.definitions),
+                "attributes": len(ast.attributes),
+                "predicates": len(ast.predicates),
+                "conditions": len(ast.conditions),
+                "goals": len(ast.goals),
+                "relations": len(ast.relations),
+            }
+        print(json.dumps(summary, indent=2))
+        return 0 if summary["passed"] else 1
+
+    # ── Human output ─────────────────────────────────────────────────────
+    _banner(f"ROF Lint  →  {rl_file.name}")
+
+    line_count = source.count("\n") + 1
+    print(f"  File: {dim(str(rl_file.resolve()))}")
+    print(f"  Size: {dim(f'{line_count} lines, {len(source)} bytes')}")
+
+    if not issues:
+        print()
+        _ok(green("No issues found. Workflow spec is valid."))
+        _show_ast_summary(source)
+        print()
+        return 0
+
+    # ── Display issues grouped by severity ────────────────────────────────
+    if errors:
+        _section(f"Errors ({len(errors)})")
+        for issue in errors:
+            print(str(issue))
+
+    if warnings:
+        _section(f"Warnings ({len(warnings)})")
+        for issue in warnings:
+            print(str(issue))
+
+    if infos:
+        _section(f"Info ({len(infos)})")
+        for issue in infos:
+            print(str(issue))
+
+    # ── Summary ───────────────────────────────────────────────────────────
+    print()
+    passed = len(errors) == 0 and (not strict or len(warnings) == 0)
+    parts = []
+    if errors:
+        parts.append(red(f"{len(errors)} error{'s' if len(errors) != 1 else ''}"))
+    if warnings:
+        parts.append(yellow(f"{len(warnings)} warning{'s' if len(warnings) != 1 else ''}"))
+    if infos:
+        parts.append(dim(f"{len(infos)} info"))
+
+    label = "  " + "  ".join(parts)
+    if passed:
+        print(label + "  " + green("✓ passed"))
+    else:
+        print(label + "  " + red("✗ failed"))
+        if strict and warnings and not errors:
+            print(f"  {dim('(--strict: warnings treated as errors)')}")
+    print()
+
+    if not errors:
+        _show_ast_summary(source)
+        print()
+
+    return 0 if passed else 1
+
+
+def _show_ast_summary(source: str) -> None:
+    core = _import_core()
+    try:
+        ast = core.RLParser().parse(source)
+        _section("AST summary")
+        rows = [
+            ("Definitions", len(ast.definitions)),
+            ("Attributes", len(ast.attributes)),
+            ("Predicates", len(ast.predicates)),
+            ("Conditions", len(ast.conditions)),
+            ("Goals", len(ast.goals)),
+            ("Relations", len(ast.relations)),
+        ]
+        for label, count in rows:
+            bar = "█" * count
+            colour = green if count > 0 else dim
+            _info(f"{label:<14} {colour(str(count).rjust(3))}  {dim(bar)}")
+    except Exception:
+        pass
+
+
+# ─── Command: inspect ─────────────────────────────────────────────────────────
+
+
+def cmd_inspect(args: argparse.Namespace) -> int:
+    rl_file = Path(args.file)
+    fmt = getattr(args, "format", "tree")
+    as_json = getattr(args, "json", False)
+    if as_json:
+        fmt = "json"
+
+    if not rl_file.exists():
+        _err(f"File not found: {rl_file}")
+        return 2
+
+    core = _import_core()
+    source = rl_file.read_text(encoding="utf-8")
+
+    try:
+        ast = core.RLParser().parse(source)
+    except core.ParseError as exc:
+        _err(f"Parse error: {exc}")
+        return 1
+
+    # ── JSON ──────────────────────────────────────────────────────────────
+    if fmt == "json":
+
+        def _node(n: Any) -> dict:
+            d = {k: v for k, v in vars(n).items() if not k.startswith("_")}
+            d["__type__"] = type(n).__name__
+            return d
+
+        print(
+            json.dumps(
+                {
+                    "definitions": [_node(d) for d in ast.definitions],
+                    "attributes": [_node(a) for a in ast.attributes],
+                    "predicates": [_node(p) for p in ast.predicates],
+                    "relations": [_node(r) for r in ast.relations],
+                    "conditions": [_node(c) for c in ast.conditions],
+                    "goals": [_node(g) for g in ast.goals],
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    # ── RL (re-emit) ──────────────────────────────────────────────────────
+    if fmt == "rl":
+        _emit_rl(ast)
+        return 0
+
+    # ── Tree (default) ────────────────────────────────────────────────────
+    _banner(f"ROF Inspect  →  {rl_file.name}")
+    _section("Definitions")
+    if ast.definitions:
+        for d in ast.definitions:
+            print(f"  {cyan(d.entity):<28} {dim(repr(d.description))}")
+    else:
+        _info("none")
+
+    _section("Attributes")
+    if ast.attributes:
+        for a in ast.attributes:
+            print(
+                f"  {cyan(a.entity)}.{blue(a.name):<28} = {green(repr(a.value))}"
+                f"  {dim(f'(line {a.source_line})')}"
+            )
+    else:
+        _info("none")
+
+    _section("Predicates")
+    if ast.predicates:
+        for p in ast.predicates:
+            print(f"  {cyan(p.entity)} is {green(p.value)}  {dim(f'(line {p.source_line})')}")
+    else:
+        _info("none")
+
+    _section("Relations")
+    if ast.relations:
+        for r in ast.relations:
+            cond = f"  if {dim(r.condition)}" if r.condition else ""
+            print(
+                f"  {cyan(r.entity1)} ↔ {cyan(r.entity2)}  "
+                f"as {blue(repr(r.relation_type))}{cond}  "
+                f"{dim(f'(line {r.source_line})')}"
+            )
+    else:
+        _info("none")
+
+    _section("Conditions")
+    if ast.conditions:
+        for c in ast.conditions:
+            print(f"  {dim('if')}    {yellow(c.condition_expr)}")
+            print(f"  {dim('then')}  {green(c.action)}  {dim(f'(line {c.source_line})')}")
+            print()
+    else:
+        _info("none")
+
+    _section("Goals")
+    if ast.goals:
+        for g in ast.goals:
+            print(f"  {bold('ensure')} {green(g.goal_expr)}  {dim(f'(line {g.source_line})')}")
+    else:
+        _info("none — workflow will do nothing")
+
+    print()
+    return 0
+
+
+def _emit_rl(ast: Any) -> None:
+    """Re-emit a normalised .rl file from the AST."""
+    for d in ast.definitions:
+        print(f'define {d.entity} as "{d.description}".')
+    if ast.definitions:
+        print()
+    for a in ast.attributes:
+        v = f'"{a.value}"' if isinstance(a.value, str) else str(a.value)
+        print(f"{a.entity} has {a.name} of {v}.")
+    for p in ast.predicates:
+        print(f'{p.entity} is "{p.value}".')
+    if ast.attributes or ast.predicates:
+        print()
+    for r in ast.relations:
+        cond = f" if {r.condition}" if r.condition else ""
+        print(f'relate {r.entity1} and {r.entity2} as "{r.relation_type}"{cond}.')
+    if ast.relations:
+        print()
+    for c in ast.conditions:
+        print(f"if {c.condition_expr},")
+        print(f"    then ensure {c.action}.")
+    if ast.conditions:
+        print()
+    for g in ast.goals:
+        print(f"ensure {g.goal_expr}.")
+
+
+# ─── Command: run ─────────────────────────────────────────────────────────────
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    rl_file = Path(args.file)
+    as_json = getattr(args, "json", False)
+    verbose = getattr(args, "verbose", False)
+    out_snap = getattr(args, "output_snapshot", None)
+
+    if not rl_file.exists():
+        _err(f"File not found: {rl_file}")
+        return 2
+
+    core = _import_core()
+    source = rl_file.read_text(encoding="utf-8")
+
+    # Always lint first — fast fail on syntax errors
+    issues = Linter().lint(source)
+    errors = [i for i in issues if i.severity == Severity.ERROR]
+    if errors:
+        if as_json:
+            print(json.dumps({"success": False, "lint_errors": [i.to_dict() for i in errors]}))
+        else:
+            _err("Lint errors prevent execution:")
+            for issue in errors:
+                print(str(issue), file=sys.stderr)
+        return 1
+
+    try:
+        ast = core.RLParser().parse(source)
+    except core.ParseError as exc:
+        _err(f"Parse error: {exc}")
+        return 1
+
+    provider = _make_provider(args)
+
+    if not as_json:
+        prov_name = type(provider).__name__.replace("Provider", "")
+        _banner(f"ROF Run  →  {rl_file.name}  [{dim(prov_name)}]")
+        print(f"  Goals to execute: {bold(str(len(ast.goals)))}")
+        print()
+
+    # ── Wire event bus for live progress ──────────────────────────────────
+    bus = core.EventBus()
+    steps_log: list[dict] = []
+
+    if not as_json:
+
+        def on_step_started(e: Any) -> None:
+            goal = e.payload.get("goal", "?")
+            print(f"  {dim('→')} {bold('goal')}  {cyan(goal)}")
+
+        def on_step_completed(e: Any) -> None:
+            goal = e.payload.get("goal", "?")
+            resp = e.payload.get("response", "")[:120]
+            print(f"  {green('✓')} {bold('done')}  {dim(resp)}")
+            if verbose:
+                print(f"       {dim('response preview:')} {dim(resp)}")
+            print()
+
+        def on_step_failed(e: Any) -> None:
+            goal = e.payload.get("goal", "?")
+            error = e.payload.get("error", "?")
+            print(f"  {red('✗')} {bold('failed')} {goal}: {error}")
+            print()
+
+        def on_tool_executed(e: Any) -> None:
+            tool = e.payload.get("tool", "?")
+            ok = e.payload.get("success", False)
+            error = e.payload.get("error", "")
+            mark = green("✓") if ok else red("✗")
+            print(f"  {mark} {bold('tool')}   {magenta(tool)}")
+            if not ok and error:
+                print(f"       {red('error:')} {dim(error)}")
+
+        bus.subscribe("step.started", on_step_started)
+        bus.subscribe("step.completed", on_step_completed)
+        bus.subscribe("step.failed", on_step_failed)
+        bus.subscribe("tool.executed", on_tool_executed)
+
+    # Capture all events for JSON mode / verbose
+    if as_json or verbose:
+
+        def capture(e: Any) -> None:
+            steps_log.append({"event": e.name, "payload": e.payload})
+
+        bus.subscribe("*", capture)
+
+    config = core.OrchestratorConfig(
+        max_iterations=getattr(args, "max_iter", 25),
+        auto_save_state=False,
+        pause_on_error=False,
+    )
+
+    # ── Inject tools ──────────────────────────────────────────────────────
+    run_tools: list[Any] = []
+    try:
+        from .rof_tools import (  # type: ignore
+            AICodeGenTool,
+            LLMPlayerTool,
+            LuaSaveTool,
+            create_default_registry,
+        )
+
+        output_dir = Path(getattr(args, "output_dir", None) or "rof_output")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        run_tools = list(create_default_registry().all_tools().values())
+        # LLM-dependent tools added after registry (require provider instance)
+        run_tools.append(AICodeGenTool(llm=provider, output_dir=output_dir))
+        run_tools.append(LuaSaveTool(llm_provider=provider))
+        run_tools.append(LLMPlayerTool(llm=provider, output_dir=output_dir))
+    except ImportError:
+        pass
+
+    orch = core.Orchestrator(
+        llm_provider=provider,
+        tools=run_tools,
+        bus=bus,
+        config=config,
+    )
+
+    t0 = time.perf_counter()
+    result = orch.run(ast)
+    elapsed = round(time.perf_counter() - t0, 3)
+
+    # ── Save snapshot ─────────────────────────────────────────────────────
+    if out_snap:
+        snap_path = Path(out_snap)
+        snap_path.write_text(json.dumps(result.snapshot, indent=2), encoding="utf-8")
+        if not as_json:
+            _ok(f"Snapshot saved to {snap_path}")
+
+    # ── JSON output ───────────────────────────────────────────────────────
+    if as_json:
+        out: dict[str, Any] = {
+            "success": result.success,
+            "run_id": result.run_id,
+            "elapsed_s": elapsed,
+            "steps": len(result.steps),
+            "snapshot": result.snapshot,
+        }
+        if result.error:
+            out["error"] = result.error
+        if verbose:
+            out["events"] = steps_log
+        print(json.dumps(out, indent=2))
+        return 0 if result.success else 1
+
+    # ── Human summary ─────────────────────────────────────────────────────
+    status_line = green("✓  SUCCESS") if result.success else red("✗  FAILED")
+    print(f"  {bold(status_line)}")
+    print(f"  {dim('run_id:')} {dim(result.run_id[:12])}...")
+    print(f"  {dim('elapsed:')} {elapsed}s   {dim('steps:')} {len(result.steps)}")
+
+    if result.error:
+        print(f"  {red('error:')} {result.error}")
+
+    _section("Final state")
+    snap = result.snapshot
+    for ent_name, ent in snap.get("entities", {}).items():
+        attrs = ent.get("attributes", {})
+        preds = ent.get("predicates", [])
+        desc = ent.get("description", "")
+        print(f"  {bold(cyan(ent_name))}" + (f"  {dim(repr(desc))}" if desc else ""))
+        for k, v in attrs.items():
+            print(f"    {blue(k)} = {green(repr(v))}")
+        for p in preds:
+            print(f"    {dim('is')} {yellow(p)}")
+        if not attrs and not preds:
+            print(f"    {dim('(no state)')}")
+
+    if verbose:
+        _section("Goal results")
+        for g in snap.get("goals", []):
+            status = g["status"]
+            colour = green if status == "ACHIEVED" else (red if status == "FAILED" else dim)
+            print(f"  {colour('●')} {g['expr']}")
+            print(f"    {dim('status:')} {colour(status)}")
+            if g.get("result") and verbose:
+                snippet = str(g["result"])[:200]
+                print(f"    {dim('result:')} {dim(snippet)}")
+
+    print()
+    return 0 if result.success else 1
+
+
+# ─── Command: debug ───────────────────────────────────────────────────────────
+
+
+def cmd_debug(args: argparse.Namespace) -> int:
+    """
+    Step-through execution: shows every LLM prompt + raw response.
+    Optionally pauses after each step (--step).
+    """
+    rl_file = Path(args.file)
+    step = getattr(args, "step", False)
+    as_json = getattr(args, "json", False)
+
+    if not rl_file.exists():
+        _err(f"File not found: {rl_file}")
+        return 2
+
+    core = _import_core()
+    source = rl_file.read_text(encoding="utf-8")
+
+    issues = Linter().lint(source)
+    errors = [i for i in issues if i.severity == Severity.ERROR]
+    if errors:
+        for issue in errors:
+            _err(str(issue))
+        return 1
+
+    ast = core.RLParser().parse(source)
+    provider = _make_provider(args)
+
+    if not as_json:
+        _banner(f"ROF Debug  →  {rl_file.name}")
+        print(f"  Provider : {type(provider).__name__}")
+        print(f"  Goals    : {len(ast.goals)}")
+        if step:
+            print(f"  Mode     : {yellow('step-through')}  (press Enter after each step)")
+        print()
+
+    debug_log: list[dict] = []
+    step_index = [0]
+
+    bus = core.EventBus()
+
+    def on_step_started(e: Any) -> None:
+        step_index[0] += 1
+        goal = e.payload.get("goal", "?")
+        if as_json:
+            return
+        _section(f"Step {step_index[0]}  —  {goal}")
+
+    def on_step_completed(e: Any) -> None:
+        if as_json:
+            return
+        goal = e.payload.get("goal", "?")
+        resp = e.payload.get("response", "")
+        print(f"  {green('✓')} {bold('achieved')}")
+        if resp:
+            print(f"\n  {bold('LLM Response')}")
+            for line in textwrap.wrap(resp, width=72):
+                print(f"    {dim(line)}")
+        print()
+        if step:
+            try:
+                input(f"  {dim('Press Enter for next step…')}")
+            except (EOFError, KeyboardInterrupt):
+                pass
+
+    def on_step_failed(e: Any) -> None:
+        if as_json:
+            return
+        error = e.payload.get("error", "?")
+        print(f"  {red('✗')} {bold('failed')}:  {error}")
+        print()
+
+    bus.subscribe("step.started", on_step_started)
+    bus.subscribe("step.completed", on_step_completed)
+    bus.subscribe("step.failed", on_step_failed)
+
+    if as_json:
+
+        def capture(e: Any) -> None:
+            debug_log.append({"event": e.name, "payload": e.payload})
+
+        bus.subscribe("*", capture)
+
+    # Wrap provider to capture prompts/responses in debug mode
+    class _DebugProvider:
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        def complete(self, req: Any) -> Any:
+            resp = self._inner.complete(req)
+            if not as_json:
+                _show_prompt_debug(req.prompt, req.system)
+            else:
+                debug_log.append(
+                    {
+                        "event": "llm.request",
+                        "system": req.system,
+                        "prompt": req.prompt,
+                    }
+                )
+                debug_log.append(
+                    {
+                        "event": "llm.response",
+                        "content": resp.content,
+                    }
+                )
+            return resp
+
+        def supports_tool_calling(self) -> bool:
+            return self._inner.supports_tool_calling()
+
+        @property
+        def context_limit(self) -> int:
+            return self._inner.context_limit
+
+    config = core.OrchestratorConfig(auto_save_state=False, pause_on_error=False)
+    orch = core.Orchestrator(
+        llm_provider=_DebugProvider(provider),
+        bus=bus,
+        config=config,
+    )
+
+    t0 = time.perf_counter()
+    result = orch.run(ast)
+    elapsed = round(time.perf_counter() - t0, 3)
+
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "success": result.success,
+                    "run_id": result.run_id,
+                    "elapsed_s": elapsed,
+                    "trace": debug_log,
+                    "snapshot": result.snapshot,
+                },
+                indent=2,
+            )
+        )
+        return 0 if result.success else 1
+
+    status = green("SUCCESS") if result.success else red("FAILED")
+    print(f"  {bold(status)}  {dim(f'run_id={result.run_id[:12]}...')}  {elapsed}s")
+    print()
+    return 0 if result.success else 1
+
+
+def _show_prompt_debug(prompt: str, system: str) -> None:
+    """Pretty-print the LLM prompt for debug mode."""
+    print(f"\n  {bold('─── LLM Prompt ───────────────────────────────────────────')}")
+    if system:
+        print(f"  {bold('System:')}")
+        for line in system.splitlines():
+            print(f"    {dim(line)}")
+        print()
+    print(f"  {bold('Prompt:')}")
+    for line in prompt.splitlines():
+        print(f"    {dim(line)}")
+    print(f"  {bold('─────────────────────────────────────────────────────────')}\n")
+
+
+# ─── Command: pipeline ────────────────────────────────────────────────────────
+
+
+def cmd_pipeline_run(args: argparse.Namespace) -> int:
+    """
+    Execute a pipeline defined in a YAML config file.
+
+    YAML shape
+    ----------
+    provider: openai          # optional; overrides env
+    model: gpt-4o             # optional
+    api_key: sk-...           # optional (prefer env)
+
+    stages:
+      - name: gather
+        rl_file: 01_gather.rl
+      - name: analyse
+        rl_file: 02_analyse.rl
+      - name: decide
+        rl_file: 03_decide.rl
+
+    config:
+      on_failure: halt         # halt | continue | retry
+      retry_count: 2
+      inject_prior_context: true
+    """
+    config_path = Path(args.config)
+    as_json = getattr(args, "json", False)
+
+    if not config_path.exists():
+        _err(f"Config file not found: {config_path}")
+        return 2
+
+    try:
+        import yaml  # type: ignore
+    except ImportError:
+        _err("PyYAML is required for 'pipeline run'.")
+        _err("  pip install pyyaml")
+        return 2
+
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        _err("Pipeline config must be a YAML mapping.")
+        return 2
+
+    # ── Inject CLI provider args into namespace so _make_provider works ───
+    for key in ("provider", "model", "api_key"):
+        if not getattr(args, key, None):
+            setattr(args, key, raw.get(key))
+
+    try:
+        from .rof_pipeline import OnFailure, PipelineBuilder, PipelineConfig  # type: ignore
+    except ImportError:
+        _err("rof_pipeline not found. Ensure rof_pipeline.py is on PYTHONPATH.")
+        return 2
+
+    provider = _make_provider(args)
+
+    # ── Questionnaire-specific tools + LLMPlayerTool ──────────────────────
+    pipeline_tools: list[Any] = []
+    try:
+        from .rof_tools import LLMPlayerTool, LuaRunTool, LuaSaveTool  # type: ignore
+
+        pipeline_tools = [
+            LuaSaveTool(llm_provider=provider),
+            LuaRunTool(),
+            LLMPlayerTool(llm=provider),
+        ]
+    except ImportError:
+        _warn("rof_tools not found – pipeline will run without built-in tools.")
+
+    # ── Build stage list ──────────────────────────────────────────────────
+    stages_cfg = raw.get("stages", [])
+    if not stages_cfg:
+        _err("No stages defined in pipeline config.")
+        return 2
+
+    # Resolve paths relative to config file location
+    base_dir = config_path.parent
+
+    builder = PipelineBuilder(llm=provider, tools=pipeline_tools)
+
+    for s in stages_cfg:
+        rl_file = s.get("rl_file", "")
+        if rl_file:
+            resolved = str(base_dir / rl_file)
+        else:
+            rl_source = s.get("rl_source", "")
+            if not rl_source:
+                _err(f"Stage '{s.get('name', '?')}' needs rl_file or rl_source.")
+                return 2
+            resolved = ""
+
+        if rl_file:
+            builder.stage(name=s["name"], rl_file=resolved, description=s.get("description", ""))
+        else:
+            builder.stage(name=s["name"], rl_source=rl_source, description=s.get("description", ""))
+
+    # ── Pipeline-level config ─────────────────────────────────────────────
+    cfg_raw = raw.get("config", {})
+    on_fail_str = cfg_raw.get("on_failure", "halt").upper()
+    on_fail = OnFailure[on_fail_str] if on_fail_str in OnFailure.__members__ else OnFailure.HALT
+
+    builder.config(
+        on_failure=on_fail,
+        retry_count=cfg_raw.get("retry_count", 2),
+        inject_prior_context=cfg_raw.get("inject_prior_context", True),
+    )
+
+    pipeline = builder.build()
+
+    if not as_json:
+        _banner(f"ROF Pipeline  →  {config_path.name}")
+        print(f"  Stages   : {len(stages_cfg)}")
+        print(f"  Provider : {type(provider).__name__}")
+        print()
+
+    t0 = time.perf_counter()
+    result = pipeline.run()
+    elapsed = round(time.perf_counter() - t0, 3)
+
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "success": result.success,
+                    "pipeline_id": result.pipeline_id,
+                    "elapsed_s": elapsed,
+                    "stages": len(result.steps),
+                    "final_snapshot": result.final_snapshot,
+                    "error": result.error,
+                },
+                indent=2,
+            )
+        )
+        return 0 if result.success else 1
+
+    status = green("SUCCESS") if result.success else red("FAILED")
+    print(f"  {bold(status)}  {dim(f'pipeline_id={result.pipeline_id[:12]}...')}  {elapsed}s")
+    print()
+
+    if result.error:
+        _err(result.error)
+
+    _section("Stage results")
+    for i, step in enumerate(result.steps):
+        ok = step.success if hasattr(step, "success") else True
+        mark = green("✓") if ok else red("✗")
+        name = getattr(step, "stage_name", f"stage_{i}")
+        ela = getattr(step, "elapsed_s", "?")
+        print(f"  {mark} {bold(name)}  {dim(f'{ela}s')}")
+        if not ok and hasattr(step, "error") and step.error:
+            print(f"    {red(step.error)}")
+
+    print()
+    return 0 if result.success else 1
+
+
+def cmd_pipeline_debug(args: argparse.Namespace) -> int:
+    """
+    Debug a pipeline: prints every stage header, every LLM prompt and raw
+    response.  Optionally pauses after each step (--step).
+    """
+    config_path = Path(args.config)
+    step = getattr(args, "step", False)
+    as_json = getattr(args, "json", False)
+
+    if not config_path.exists():
+        _err(f"Config file not found: {config_path}")
+        return 2
+
+    try:
+        import yaml  # type: ignore
+    except ImportError:
+        _err("PyYAML is required for 'pipeline debug'.")
+        _err("  pip install pyyaml")
+        return 2
+
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        _err("Pipeline config must be a YAML mapping.")
+        return 2
+
+    for key in ("provider", "model", "api_key"):
+        if not getattr(args, key, None):
+            setattr(args, key, raw.get(key))
+
+    try:
+        from .rof_pipeline import OnFailure, PipelineBuilder  # type: ignore
+    except ImportError:
+        _err("rof_pipeline not found. Ensure rof_pipeline.py is on PYTHONPATH.")
+        return 2
+
+    provider = _make_provider(args)
+
+    # ── Debug LLM wrapper ─────────────────────────────────────────────────
+    debug_log: list[dict] = []
+    step_index = [0]
+    current_stage = ["?"]
+
+    class _DebugProvider:
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        def complete(self, req: Any) -> Any:
+            resp = self._inner.complete(req)
+            if not as_json:
+                _show_prompt_debug(req.prompt, req.system)
+            else:
+                debug_log.append(
+                    {
+                        "event": "llm.request",
+                        "stage": current_stage[0],
+                        "system": req.system,
+                        "prompt": req.prompt,
+                    }
+                )
+                debug_log.append(
+                    {
+                        "event": "llm.response",
+                        "stage": current_stage[0],
+                        "content": resp.content,
+                    }
+                )
+            return resp
+
+        def supports_tool_calling(self) -> bool:
+            return self._inner.supports_tool_calling()
+
+        @property
+        def context_limit(self) -> int:
+            return self._inner.context_limit
+
+    debug_provider = _DebugProvider(provider)
+
+    # ── Tools ─────────────────────────────────────────────────────────────
+    pipeline_tools: list[Any] = []
+    try:
+        from .rof_tools import LLMPlayerTool, LuaRunTool, LuaSaveTool  # type: ignore
+
+        pipeline_tools = [
+            LuaSaveTool(llm_provider=debug_provider),
+            LuaRunTool(),
+            LLMPlayerTool(llm=debug_provider),
+        ]
+    except ImportError:
+        _warn("rof_tools not found – pipeline will run without built-in tools.")
+
+    # ── Build stage list ──────────────────────────────────────────────────
+    stages_cfg = raw.get("stages", [])
+    if not stages_cfg:
+        _err("No stages defined in pipeline config.")
+        return 2
+
+    base_dir = config_path.parent
+    builder = PipelineBuilder(llm=debug_provider, tools=pipeline_tools)
+
+    for s in stages_cfg:
+        rl_file = s.get("rl_file", "")
+        if rl_file:
+            resolved = str(base_dir / rl_file)
+            builder.stage(name=s["name"], rl_file=resolved, description=s.get("description", ""))
+        else:
+            rl_source = s.get("rl_source", "")
+            if not rl_source:
+                _err(f"Stage '{s.get('name', '?')}' needs rl_file or rl_source.")
+                return 2
+            builder.stage(name=s["name"], rl_source=rl_source, description=s.get("description", ""))
+
+    cfg_raw = raw.get("config", {})
+    on_fail_str = cfg_raw.get("on_failure", "halt").upper()
+    on_fail = OnFailure[on_fail_str] if on_fail_str in OnFailure.__members__ else OnFailure.HALT
+    builder.config(
+        on_failure=on_fail,
+        retry_count=cfg_raw.get("retry_count", 2),
+        inject_prior_context=cfg_raw.get("inject_prior_context", True),
+    )
+
+    pipeline = builder.build()
+    bus = pipeline.bus
+
+    # ── Event subscriptions ───────────────────────────────────────────────
+    def on_stage_started(e: Any) -> None:
+        name = e.payload.get("stage_name", "?")
+        current_stage[0] = name
+        step_index[0] = 0  # reset per-stage step counter
+        if as_json:
+            return
+        idx = e.payload.get("stage_index", 0)
+        print()
+        _banner(f"Stage {idx + 1}  —  {name}")
+
+    def on_stage_completed(e: Any) -> None:
+        if as_json:
+            return
+        name = e.payload.get("stage_name", "?")
+        ela = e.payload.get("elapsed_s", "?")
+        print(f"\n  {green('✓')} Stage {bold(name)} completed  {dim(f'{ela}s')}")
+
+    def on_stage_failed(e: Any) -> None:
+        if as_json:
+            return
+        name = e.payload.get("stage_name", "?")
+        err = e.payload.get("error", "?")
+        print(f"\n  {red('✗')} Stage {bold(name)} failed:  {err}")
+
+    def on_step_started(e: Any) -> None:
+        step_index[0] += 1
+        goal = e.payload.get("goal", "?")
+        if as_json:
+            return
+        _section(f"Step {step_index[0]}  —  {goal}")
+
+    def on_step_completed(e: Any) -> None:
+        resp = e.payload.get("response", "")
+        if as_json:
+            return
+        print(f"  {green('✓')} {bold('achieved')}")
+        if resp:
+            print(f"\n  {bold('LLM Response')}")
+            for line in textwrap.wrap(resp, width=72):
+                print(f"    {dim(line)}")
+        print()
+        if step:
+            try:
+                input(f"  {dim('Press Enter for next step…')}")
+            except (EOFError, KeyboardInterrupt):
+                pass
+
+    def on_step_failed(e: Any) -> None:
+        if as_json:
+            return
+        error = e.payload.get("error", "?")
+        print(f"  {red('✗')} {bold('failed')}:  {error}")
+        print()
+
+    bus.subscribe("stage.started", on_stage_started)
+    bus.subscribe("stage.completed", on_stage_completed)
+    bus.subscribe("stage.failed", on_stage_failed)
+    bus.subscribe("step.started", on_step_started)
+    bus.subscribe("step.completed", on_step_completed)
+    bus.subscribe("step.failed", on_step_failed)
+
+    if as_json:
+        bus.subscribe("*", lambda e: debug_log.append({"event": e.name, "payload": e.payload}))
+
+    if not as_json:
+        _banner(f"ROF Pipeline Debug  →  {config_path.name}")
+        print(f"  Stages   : {len(stages_cfg)}")
+        print(f"  Provider : {type(provider).__name__}")
+        if step:
+            print(f"  Mode     : {yellow('step-through')}  (press Enter after each step)")
+        print()
+
+    t0 = time.perf_counter()
+    result = pipeline.run()
+    elapsed = round(time.perf_counter() - t0, 3)
+
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "success": result.success,
+                    "pipeline_id": result.pipeline_id,
+                    "elapsed_s": elapsed,
+                    "trace": debug_log,
+                    "final_snapshot": result.final_snapshot,
+                    "error": result.error,
+                },
+                indent=2,
+            )
+        )
+        return 0 if result.success else 1
+
+    print()
+    status = green("SUCCESS") if result.success else red("FAILED")
+    print(f"  {bold(status)}  {dim(f'pipeline_id={result.pipeline_id[:12]}...')}  {elapsed}s")
+    print()
+
+    if result.error:
+        _err(result.error)
+
+    _section("Stage results")
+    for i, step_res in enumerate(result.steps):
+        ok = step_res.success if hasattr(step_res, "success") else True
+        mark = green("✓") if ok else red("✗")
+        name = getattr(step_res, "stage_name", f"stage_{i}")
+        ela = getattr(step_res, "elapsed_s", "?")
+        print(f"  {mark} {bold(name)}  {dim(f'{ela}s')}")
+        if not ok and hasattr(step_res, "error") and step_res.error:
+            print(f"    {red(step_res.error)}")
+
+    print()
+    return 0 if result.success else 1
+
+
+# ─── Argument parser ──────────────────────────────────────────────────────────
+
+
+def _provider_args(p: argparse.ArgumentParser) -> None:
+    """Add shared LLM provider flags to a subcommand parser."""
+    g = p.add_argument_group("LLM provider")
+    g.add_argument(
+        "--provider",
+        metavar="NAME",
+        help="openai | anthropic | gemini | ollama "
+        "(default: auto-detect from installed SDKs or ROF_PROVIDER)",
+    )
+    g.add_argument(
+        "--model", metavar="NAME", help="Model name (default: per-provider default or ROF_MODEL)"
+    )
+    g.add_argument(
+        "--api-key",
+        metavar="KEY",
+        dest="api_key",
+        help="API key (default: ROF_API_KEY or provider-specific env var)",
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="rof",
+        description="ROF — RelateLang Orchestration Framework CLI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""\
+            Examples:
+              rof lint customer.rl
+              rof lint customer.rl --strict --json
+              rof inspect customer.rl
+              rof inspect customer.rl --format json
+              rof run customer.rl --provider anthropic --model claude-sonnet-4-5
+              rof run customer.rl --json --output-snapshot snap.json
+              rof debug customer.rl --step
+              rof pipeline run pipeline.yaml
+              rof pipeline run pipeline.yaml --verbose
+              rof pipeline debug pipeline.yaml
+              rof pipeline debug pipeline.yaml --step
+              rof version
+
+            Environment variables:
+              ROF_PROVIDER   openai | anthropic | gemini | ollama
+              ROF_API_KEY    API key (overridden by provider-specific vars)
+              ROF_MODEL      Model name
+              ROF_BASE_URL   Base URL for Ollama / vLLM (default: http://localhost:11434)
+              OPENAI_API_KEY
+              ANTHROPIC_API_KEY
+              GOOGLE_API_KEY
+        """),
+    )
+    parser.add_argument("--version", action="version", version=f"rof {__version__}")
+
+    sub = parser.add_subparsers(dest="command", metavar="<command>")
+
+    # ── lint ──────────────────────────────────────────────────────────────
+    p_lint = sub.add_parser("lint", help="Parse and validate a .rl file")
+    p_lint.add_argument("file", metavar="FILE.rl", help="Path to the .rl workflow spec")
+    p_lint.add_argument("--strict", action="store_true", help="Treat warnings as errors (exit 1)")
+    p_lint.add_argument("--json", action="store_true", help="Output results as JSON")
+
+    # ── inspect ───────────────────────────────────────────────────────────
+    p_insp = sub.add_parser("inspect", help="Show AST structure of a .rl file")
+    p_insp.add_argument("file", metavar="FILE.rl")
+    p_insp.add_argument(
+        "--format",
+        choices=["tree", "json", "rl"],
+        default="tree",
+        help="Output format: tree (default), json, rl (re-emit)",
+    )
+    p_insp.add_argument("--json", action="store_true", help="Alias for --format json")
+
+    # ── run ───────────────────────────────────────────────────────────────
+    p_run = sub.add_parser("run", help="Execute a .rl workflow against an LLM")
+    p_run.add_argument("file", metavar="FILE.rl")
+    p_run.add_argument(
+        "--verbose", "-v", action="store_true", help="Show goal results and event trace"
+    )
+    p_run.add_argument("--json", action="store_true", help="Output result as JSON")
+    p_run.add_argument(
+        "--max-iter",
+        dest="max_iter",
+        type=int,
+        default=25,
+        help="Maximum orchestrator iterations (default: 25)",
+    )
+    p_run.add_argument(
+        "--output-snapshot",
+        metavar="FILE.json",
+        dest="output_snapshot",
+        help="Save final snapshot to a JSON file",
+    )
+    p_run.add_argument(
+        "--seed-snapshot",
+        metavar="FILE.json",
+        dest="seed_snapshot",
+        help="Load initial snapshot from a JSON file",
+    )
+    _provider_args(p_run)
+
+    # ── debug ─────────────────────────────────────────────────────────────
+    p_dbg = sub.add_parser("debug", help="Step-through execution with prompt/response")
+    p_dbg.add_argument("file", metavar="FILE.rl")
+    p_dbg.add_argument(
+        "--step", action="store_true", help="Pause and wait for Enter after each step"
+    )
+    p_dbg.add_argument("--json", action="store_true", help="Output full trace as JSON")
+    _provider_args(p_dbg)
+
+    # ── pipeline ──────────────────────────────────────────────────────────
+    p_pip = sub.add_parser("pipeline", help="Multi-stage pipeline commands")
+    pip_sub = p_pip.add_subparsers(dest="pipeline_command", metavar="<subcommand>")
+
+    p_pip_run = pip_sub.add_parser("run", help="Execute a pipeline from a YAML config")
+    p_pip_run.add_argument(
+        "config", metavar="PIPELINE.yaml", help="Path to the pipeline YAML config file"
+    )
+    p_pip_run.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable DEBUG logging (show parser, orchestrator, and LLM events)",
+    )
+    p_pip_run.add_argument("--json", action="store_true")
+    _provider_args(p_pip_run)
+
+    p_pip_dbg = pip_sub.add_parser("debug", help="Debug a pipeline with full prompt/response trace")
+    p_pip_dbg.add_argument(
+        "config", metavar="PIPELINE.yaml", help="Path to the pipeline YAML config file"
+    )
+    p_pip_dbg.add_argument(
+        "--step",
+        action="store_true",
+        help="Pause and wait for Enter after each LLM step",
+    )
+    p_pip_dbg.add_argument("--json", action="store_true", help="Output full trace as JSON")
+    _provider_args(p_pip_dbg)
+
+    # ── version ───────────────────────────────────────────────────────────
+    p_ver = sub.add_parser("version", help="Show version and dependency info")
+    p_ver.add_argument("--json", action="store_true")
+
+    return parser
+
+
+# ─── Entry point ─────────────────────────────────────────────────────────────
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    _fix_win32_console()
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    # Silence rof.* loggers unless verbose
+    verbose = getattr(args, "verbose", False)
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+
+    if args.command is None:
+        parser.print_help()
+        return 3
+
+    dispatch = {
+        "lint": cmd_lint,
+        "inspect": cmd_inspect,
+        "run": cmd_run,
+        "debug": cmd_debug,
+        "version": cmd_version,
+    }
+
+    if args.command == "pipeline":
+        if not getattr(args, "pipeline_command", None):
+            # print pipeline help
+            parser._subparsers._actions[-1].choices["pipeline"].print_help()
+            return 3
+        _pipeline_handlers = {
+            "run": cmd_pipeline_run,
+            "debug": cmd_pipeline_debug,
+        }
+        handler = _pipeline_handlers.get(args.pipeline_command)
+        if not handler:
+            return 3
+        try:
+            return handler(args) or 0
+        except KeyboardInterrupt:
+            print(f"\n{dim('Interrupted.')}")
+            return 2
+        except Exception as exc:
+            _err(f"Unexpected error: {exc}")
+            if verbose:
+                import traceback
+
+                traceback.print_exc()
+            return 2
+
+    handler = dispatch.get(args.command)
+    if not handler:
+        _err(f"Unknown command: '{args.command}'")
+        return 3
+
+    try:
+        return handler(args) or 0
+    except KeyboardInterrupt:
+        print(f"\n{dim('Interrupted.')}")
+        return 2
+    except Exception as exc:
+        _err(f"Unexpected error: {exc}")
+        if verbose:
+            import traceback
+
+            traceback.print_exc()
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

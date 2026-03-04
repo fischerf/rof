@@ -1,0 +1,2 @@
+[console_scripts]
+rof = rof_framework.rof_cli:main

@@ -1,3 +1,53 @@
+Metadata-Version: 2.4
+Name: rof
+Version: 0.1.0
+Summary: RelateLang Orchestration Framework — run structured LLM workflows from .rl files
+License-Expression: Apache-2.0
+Project-URL: Homepage, https://github.com/fischerf/rof
+Project-URL: Repository, https://github.com/fischerf/rof
+Project-URL: Issues, https://github.com/fischerf/rof/issues
+Keywords: llm,workflow,relatelang,orchestration,ai
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Provides-Extra: openai
+Requires-Dist: openai>=1.0; extra == "openai"
+Provides-Extra: anthropic
+Requires-Dist: anthropic>=0.20; extra == "anthropic"
+Provides-Extra: gemini
+Requires-Dist: google-generativeai>=0.5; extra == "gemini"
+Provides-Extra: ollama
+Requires-Dist: httpx>=0.25; extra == "ollama"
+Provides-Extra: pipeline
+Requires-Dist: pyyaml>=6.0; extra == "pipeline"
+Provides-Extra: routing
+Requires-Dist: sentence-transformers>=2.2; extra == "routing"
+Requires-Dist: nvidia-ml-py; extra == "routing"
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: pytest-cov>=5.0; extra == "dev"
+Requires-Dist: ruff>=0.4; extra == "dev"
+Requires-Dist: mypy>=1.10; extra == "dev"
+Requires-Dist: pyyaml>=6.0; extra == "dev"
+Requires-Dist: nvidia-ml-py; extra == "dev"
+Provides-Extra: all
+Requires-Dist: openai>=1.0; extra == "all"
+Requires-Dist: anthropic>=0.20; extra == "all"
+Requires-Dist: google-generativeai>=0.5; extra == "all"
+Requires-Dist: httpx>=0.25; extra == "all"
+Requires-Dist: tiktoken>=0.7; extra == "all"
+Requires-Dist: pyyaml>=6.0; extra == "all"
+Requires-Dist: sentence-transformers>=2.2; extra == "all"
+Requires-Dist: nvidia-ml-py; extra == "all"
+Dynamic: license-file
+
 # ROF — RelateLang Orchestration Framework
 
 > **Structured, testable, versionable LLM workflows.**

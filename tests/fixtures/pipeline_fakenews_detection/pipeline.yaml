@@ -1,0 +1,49 @@
+# factcheck/pipeline.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Fact-Check Pipeline — ROF Pipeline Configuration
+#
+# Usage:
+#   rof pipeline run tests/fixtures/pipeline_fakenews_detection/pipeline.yaml --provider anthropic
+#   rof pipeline run tests/fixtures/pipeline_fakenews_detection/pipeline.yaml --provider openai
+#   rof pipeline run tests/fixtures/pipeline_fakenews_detection/pipeline.yaml --provider ollama
+#
+# This YAML configures the standard (non-routing-aware) Pipeline for
+# quick CLI testing. For production with learned routing confidence,
+# run: python tests/fixtures/pipeline_fakenews_detection/run_factcheck.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Optional: override via --provider / --model / ROF_PROVIDER / ROF_MODEL
+# provider: anthropic
+# model: claude-haiku-4-5-20251001
+# api_key: sk-...   # prefer ROF_API_KEY env var
+
+stages:
+  - name: extract
+    rl_file: 01_extract.rl
+    description: "Extract factual claims and source metadata from the article"
+
+  - name: verify_source
+    rl_file: 02_verify_source.rl
+    description: "Look up publisher credibility and author history"
+
+  - name: cross_reference
+    rl_file: 03_cross_reference.rl
+    description: "Cross-reference extracted claims against the fact database"
+
+  - name: bias_analysis
+    rl_file: 04_bias_analysis.rl
+    description: "Detect political bias, emotional language, and clickbait signals"
+
+  - name: decide
+    rl_file: 05_decide.rl
+    description: "Aggregate all signals into a final credibility verdict"
+
+  - name: report
+    rl_file: 06_report.rl
+    description: "Generate the human-readable fact-check report"
+
+config:
+  on_failure: continue        # continue even if one stage fails
+  retry_count: 1              # one retry per failed stage
+  inject_prior_context: true  # each stage sees the accumulated entity state
+  max_snapshot_entities: 80

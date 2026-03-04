@@ -1,0 +1,92 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name            = "rof"
+version         = "0.1.0"
+description     = "RelateLang Orchestration Framework — run structured LLM workflows from .rl files"
+readme          = "README.md"
+license         = "Apache-2.0"
+requires-python = ">=3.10"
+keywords        = ["llm", "workflow", "relatelang", "orchestration", "ai"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# No mandatory runtime deps — each LLM SDK is optional.
+dependencies = []
+
+[project.optional-dependencies]
+openai    = ["openai>=1.0"]
+anthropic = ["anthropic>=0.20"]
+gemini    = ["google-generativeai>=0.5"]
+ollama    = ["httpx>=0.25"]
+pipeline  = ["pyyaml>=6.0"]
+routing   = [
+    "sentence-transformers>=2.2",   # embedding-based ToolRouter strategy
+    "nvidia-ml-py",                 # replaces deprecated pynvml; silences PyTorch FutureWarning
+]
+dev       = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "pyyaml>=6.0",
+    "nvidia-ml-py",                 # silences PyTorch/pynvml FutureWarning in routing tests
+]
+all = [
+    "openai>=1.0",
+    "anthropic>=0.20",
+    "google-generativeai>=0.5",
+    "httpx>=0.25",
+    "tiktoken>=0.7",
+    "pyyaml>=6.0",
+    "sentence-transformers>=2.2",
+    "nvidia-ml-py",
+]
+
+[project.scripts]
+rof = "rof_framework.rof_cli:main"
+
+[project.urls]
+Homepage   = "https://github.com/fischerf/rof"
+Repository = "https://github.com/fischerf/rof"
+Issues     = "https://github.com/fischerf/rof/issues"
+
+# ─── Tool configuration ──────────────────────────────────────────────────────
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.pytest.ini_options]
+testpaths     = ["tests"]
+addopts       = "-v --tb=short"
+python_files  = ["test_*.py"]
+python_classes= ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "live_integration: tests that require a real LLM backend (set ROF_TEST_PROVIDER + ROF_TEST_API_KEY to enable)",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length    = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP"]
+ignore = ["E501"]  # long lines tolerated in tests
+
+[tool.mypy]
+python_version        = "3.10"
+ignore_missing_imports = true
+strict                 = false
