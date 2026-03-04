@@ -145,6 +145,7 @@ This enables cost optimisation (cheap model for simple extraction, expensive mod
 | `rof-core` | Goal execution loop & tool routing | — |
 | `rof-llm` | LLM calls, retry, response parsing | — |
 | `rof-tools` | Deterministic tool execution | — |
+| `rof-routing` | Learned routing confidence (session + historical) | — |
 
 Each module can be understood, tested, and replaced independently. Extensibility requires zero modifications to the ROF codebase:
 
@@ -218,6 +219,23 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
             └───────┬────────┘      └─────────────────────────────────┘
                     │
   ┌─────────────────▼───────────────────────────────────────────────────┐
+  │              rof-routing  Learned Routing Layer          (optional) │
+  │                                                                     │
+  │  ConfidentPipeline    drop-in replacement for Pipeline              │
+  │  ConfidentOrchestrator  drop-in replacement for Orchestrator        │
+  │                                                                     │
+  │  ConfidentToolRouter  ← 3-tier composite confidence                 │
+  │    Tier 1 – static       keyword / embedding (ToolRouter)           │
+  │    Tier 2 – session      within-run observations (SessionMemory)    │
+  │    Tier 3 – historical   cross-run EMA learning (RoutingMemory)     │
+  │                                                                     │
+  │  RoutingMemoryUpdater  ← EventBus-driven feedback loop             │
+  │  RoutingHintExtractor  ← declarative hints from .rl files          │
+  │  RoutingMemoryInspector ← human-readable confidence summaries      │
+  │  RoutingTraceWriter    ← writes RoutingTrace entities to snapshot  │
+  └──────────────────────────────┬──────────────────────────────────────┘
+                                 │
+  ┌──────────────────────────────▼──────────────────────────────────────┐
   │              rof-pipeline  Pipeline Runner                          │
   │                                                                     │
   │  PipelineBuilder → [stage₁] → [stage₂] → [fan-out] → [stage₄]       │
@@ -587,6 +605,115 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
       .has_predicate("Decision", "block_transaction")
       .stage("gather")              → StageResult
       .summary()                    → one-line status string
+```
+
+### rof-routing
+
+```
+  ConfidentOrchestrator
+  │   Drop-in replacement for rof-core Orchestrator.
+  │   Adds three-tier learned routing confidence without touching any
+  │   existing module.  Zero changes to rof_core, rof_tools, or rof_pipeline.
+  │
+  │   from rof_routing import ConfidentOrchestrator, RoutingMemory
+  │   memory = RoutingMemory()           # persist and reuse across runs
+  │   orch   = ConfidentOrchestrator(
+  │       llm_provider=llm,
+  │       tools=tools,
+  │       routing_memory=memory,
+  │   )
+  │   result = orch.run(ast)
+  │
+  ConfidentPipeline
+  │   Drop-in replacement for rof-pipeline Pipeline.
+  │   Shares a single RoutingMemory instance across all stages.
+  │
+  │   pipeline = ConfidentPipeline(
+  │       steps=[stage_gather, stage_analyse, stage_decide],
+  │       llm_provider=llm,
+  │       tools=tools,
+  │       routing_memory=memory,
+  │   )
+  │
+  ConfidentToolRouter
+  │   Fuses static similarity with session and historical confidence.
+  │   Three-tier composite (weights scale with per-tier reliability):
+  │
+  │   Tier 1 – Static      keyword / embedding score  (always available)
+  │   Tier 2 – Session     within-run observations    (SessionMemory)
+  │   Tier 3 – Historical  cross-run EMA learning     (RoutingMemory)
+  │
+  │   composite = weighted_avg(static, session, historical)
+  │   When composite < uncertainty_threshold → RoutingDecision.is_uncertain = True
+  │   and a routing.uncertain event is published on the EventBus.
+  │
+  RoutingMemory
+  │   Persisted cross-run confidence store.
+  │   Keyed by normalised goal pattern + tool name.
+  │   Updated via exponential moving average (EMA) after each step outcome.
+  │   Backed by any StateAdapter (in-memory, Redis, Postgres, …).
+  │   memory.save(adapter) / RoutingMemory.load(adapter)
+  │   memory.get_stats("WebSearchTool", "retrieve web_information")
+  │
+  SessionMemory
+  │   Ephemeral within-run confidence store.
+  │   Cleared between pipeline runs.  Contributes Tier-2 signal.
+  │
+  RoutingMemoryUpdater
+  │   EventBus-driven feedback loop — no direct coupling to the orchestrator.
+  │   Subscribes to step.completed / step.failed events and updates both
+  │   SessionMemory and RoutingMemory with GoalSatisfactionScorer results.
+  │
+  GoalSatisfactionScorer
+  │   Scores how well a tool outcome satisfied a goal (0.0 – 1.0).
+  │   Inspects attribute_deltas and predicate_deltas in the StepResult.
+  │
+  RoutingHintExtractor
+  │   Reads declarative routing constraints from .rl files:
+  │     route goal "retrieve web" via WebSearchTool with min_confidence 0.6.
+  │   Extracts hints before the main parser sees them; strips them from
+  │   the AST so RLParser does not emit unknown-statement warnings.
+  │
+  GoalPatternNormalizer
+  │   Converts free-form goal expressions into stable, reusable lookup keys.
+  │   Strips entity names, numeric literals, and stop-words so that
+  │   "retrieve web_information about Python" and "retrieve web_information
+  │   about climate change" map to the same routing key.
+  │
+  RoutingDecision
+  │   Extended RouteResult carrying all three tier scores, the dominant tier,
+  │   is_uncertain flag, and a human-readable summary() string.
+  │   decision.to_route_result()  — converts back to a plain RouteResult
+  │                                 for use with any standard ToolRouter consumer.
+  │
+  RoutingTraceWriter
+  │   Writes one RoutingTrace_<stage>_<hash6> entity into the snapshot
+  │   for every routing decision, giving a fully replayable audit trail:
+  │     goal_expr, goal_pattern, tool_selected,
+  │     static_confidence, session_confidence, historical_confidence,
+  │     composite_confidence, dominant_tier, satisfaction_score,
+  │     is_uncertain, stage, run_id
+  │
+  RoutingMemoryInspector
+  │   Human-readable confidence summaries over a RoutingMemory store.
+  │   inspector.summary()                     → per-tool stats table
+  │   inspector.best_tool_for("retrieve web") → (tool_name, confidence)
+  │   inspector.confidence_evolution(tool, pattern) → list of EMA snapshots
+  │
+  RoutingStats
+      Per (tool, pattern) statistics record:
+        call_count, success_count, avg_satisfaction (EMA),
+        success_rate, reliability (sample-size proxy)
+      Serialisable: RoutingStats.to_dict() / RoutingStats.from_dict()
+
+  New EventBus events
+      routing.decided    { goal, tool, composite_confidence, dominant_tier,
+                           is_uncertain, pattern }
+      routing.uncertain  { goal, tool, composite_confidence, threshold, pattern }
+
+  Optional dependencies
+      pip install numpy                  # faster embedding distance
+      pip install sentence-transformers  # real embeddings (TF-IDF fallback otherwise)
 ```
 
 ### rof-cli
