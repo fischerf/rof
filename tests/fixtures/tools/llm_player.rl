@@ -1,25 +1,20 @@
 // llm_player.rl
-// Demonstrates LLMPlayerTool: generate a Python game and let the LLM play it.
+// Demonstrates LLMPlayerTool: generate a Python program and let the LLM drive it.
 // Trigger phrases:
-//   "generate python code for <game>"  → AICodeGenTool (stage 1)
-//   "play text adventure game with llm player"  → LLMPlayerTool (stage 2)
+//   "generate python code for <program>"  → AICodeGenTool (stage 1)
+//   "run interactively with llm"          → LLMPlayerTool (stage 2)
 
-define Game as "A small text adventure game implemented in Python".
-define Player as "The LLM-powered automated player making in-game decisions".
-define Transcript as "The recorded sequence of game prompts and LLM responses".
+define Program as "A small interactive Python quiz with multiple-choice questions".
+define Session as "The recorded sequence of program prompts and LLM responses".
 
-Game has language of "python".
-Game has genre of "text adventure".
-Game has description of "A two-room dungeon with a key, a locked door, and a dragon".
-Game has max_turns of 20.
+Program has language of "python".
+Program has description of "A three-question multiple-choice quiz about general knowledge. Each question shows numbered options and reads a number from stdin. Print the final score at the end.".
+Program has max_turns of 10.
 
-Player has strategy of "Explore cautiously, pick up every item, avoid direct combat".
+Session has format of "json".
 
-Transcript has format of "json".
+relate Session and Program as "captures output of".
 
-relate Player and Game as "plays interactively".
-relate Player and Transcript as "produces".
-
-ensure generate python code for a small two-room text adventure with a key and a dragon.
-ensure play text adventure game with llm player and record choices.
-ensure determine Transcript turn_count.
+ensure generate python code for a three-question multiple-choice general knowledge quiz.
+ensure run interactively with llm and record responses.
+ensure determine Session turn_count.

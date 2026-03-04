@@ -68,6 +68,73 @@ where = ["src"]
 [tool.setuptools.package-dir]
 "" = "src"
 
+[tool.setuptools.data-files]
+"tests" = [
+    "tests/conftest.py",
+    "tests/quick_test.py",
+    "tests/run_all_tests.py",
+    "tests/run_tests.bat",
+    "tests/run_tests.sh",
+    "tests/README.md",
+    "tests/test_cli.py",
+    "tests/test_core_ast.py",
+    "tests/test_core_integration.py",
+    "tests/test_core_parsing.py",
+    "tests/test_lint.py",
+    "tests/test_llm_providers.py",
+    "tests/test_parser.py",
+    "tests/test_pipeline_runner.py",
+    "tests/test_routing.py",
+    "tests/test_tools_live_integration.py",
+    "tests/test_tools_registry.py",
+]
+"tests/fixtures" = [
+    "tests/fixtures/customer_segmentation.rl",
+    "tests/fixtures/lint_errors.rl",
+    "tests/fixtures/loan_approval.rl",
+    "tests/fixtures/no_goals.rl",
+    "tests/fixtures/syntax_error.rl",
+]
+"tests/fixtures/tools" = [
+    "tests/fixtures/tools/README.md",
+    "tests/fixtures/tools/ai_codegen.rl",
+    "tests/fixtures/tools/api_call.rl",
+    "tests/fixtures/tools/code_runner.rl",
+    "tests/fixtures/tools/database_query.rl",
+    "tests/fixtures/tools/file_reader.rl",
+    "tests/fixtures/tools/human_in_loop.rl",
+    "tests/fixtures/tools/llm_player.rl",
+    "tests/fixtures/tools/lua_run.rl",
+    "tests/fixtures/tools/lua_save.rl",
+    "tests/fixtures/tools/rag_retrieval.rl",
+    "tests/fixtures/tools/validator.rl",
+    "tests/fixtures/tools/web_search.rl",
+]
+"tests/fixtures/pipeline_fakenews_detection" = [
+    "tests/fixtures/pipeline_fakenews_detection/01_extract.rl",
+    "tests/fixtures/pipeline_fakenews_detection/02_verify_source.rl",
+    "tests/fixtures/pipeline_fakenews_detection/03_cross_reference.rl",
+    "tests/fixtures/pipeline_fakenews_detection/04_bias_analysis.rl",
+    "tests/fixtures/pipeline_fakenews_detection/05_decide.rl",
+    "tests/fixtures/pipeline_fakenews_detection/06_report.rl",
+    "tests/fixtures/pipeline_fakenews_detection/pipeline.yaml",
+    "tests/fixtures/pipeline_fakenews_detection/run_factcheck.py",
+]
+"tests/fixtures/pipeline_load_approval" = [
+    "tests/fixtures/pipeline_load_approval/01_gather.rl",
+    "tests/fixtures/pipeline_load_approval/02_analyse.rl",
+    "tests/fixtures/pipeline_load_approval/03_decide.rl",
+    "tests/fixtures/pipeline_load_approval/README.md",
+    "tests/fixtures/pipeline_load_approval/pipeline.yaml",
+]
+"tests/fixtures/pipeline_questionnaire" = [
+    "tests/fixtures/pipeline_questionnaire/01_generate.rl",
+    "tests/fixtures/pipeline_questionnaire/02_interact.rl",
+    "tests/fixtures/pipeline_questionnaire/03_evaluate.rl",
+    "tests/fixtures/pipeline_questionnaire/README.md",
+    "tests/fixtures/pipeline_questionnaire/pipeline_questionnaire.yaml",
+]
+
 [tool.pytest.ini_options]
 testpaths     = ["tests"]
 addopts       = "-v --tb=short"

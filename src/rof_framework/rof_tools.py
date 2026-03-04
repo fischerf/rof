@@ -2737,7 +2737,8 @@ class LuaRunTool(ToolProvider):
 
 # ===========================================================================
 # LLMPlayerTool
-# Runs an interactive program and uses the LLM to answer its prompts.
+# Drives any interactive subprocess through its stdin/stdout pipe, using the
+# LLM to respond to every input prompt.
 # ===========================================================================
 
 # ANSI colour helpers (used by LLMPlayerTool console output)
@@ -2794,32 +2795,51 @@ def _t_warn(text: str) -> None:
 
 class LLMPlayerTool(ToolProvider):
     """
-    Drives an interactive program (Python, Lua, JS) through its stdin/stdout
-    pipe, using the LLM to answer every input prompt — simulating a player.
+    Drives any interactive program (Python, Lua, JS) through its stdin/stdout
+    pipe, using the LLM to respond to every input prompt.
 
     How it works
     ------------
     1. Start the script as a subprocess with stdin/stdout piped.
     2. A background thread reads stdout char-by-char into a queue.
     3. When no new characters arrive for `idle_wait` seconds we assume the
-       program is blocked on an input() call.
-    4. Ask the LLM: "given this output, what would a player type?"
+       program is blocked waiting for input.
+    4. Show the LLM everything the program has printed and ask what to type.
     5. Write the LLM's answer back to the process stdin.
     6. Repeat until the process exits or `max_turns` is reached.
     7. Save the full transcript to a .txt file in output_dir.
 
+    Parameters
+    ----------
+    llm : LLMProvider
+        The LLM used to decide what to type at each prompt.
+    output_dir : Path, optional
+        Directory where the transcript .txt file is written.
+    idle_wait : float
+        Seconds of stdout silence before assuming the program is waiting for input.
+    timeout_per_turn : float
+        Maximum seconds to wait for the LLM to respond per turn.
+    max_turns : int
+        Hard cap on the number of input turns.
+    system_prompt : str, optional
+        Override the default system prompt sent to the LLM.  When omitted a
+        generic prompt is used that instructs the LLM to answer input prompts
+        with a single line and nothing else.
+
     Trigger keywords
     ----------------
-    "play game" / "play text adventure" / "play python game"
-    "play adventure" / "play and record choices" / "let llm play"
+    "run interactively" / "run with llm" / "let llm drive"
+    "automate program" / "llm player" / "simulate input"
+    "play interactively" / "play and record" / "run and record"
     """
 
-    _PLAYER_SYSTEM = (
-        "You are playing a text adventure / interactive game. "
-        "Read the game's output carefully. If it's asking you to press ENTER to continue, "
-        "reply with just 'ENTER'. Otherwise, reply with ONLY the exact text the game is "
-        "asking for (e.g. 'left', '1', 'yes', a character name). "
-        "No explanation, no extra punctuation — just the bare answer."
+    _DEFAULT_SYSTEM = (
+        "You are controlling an interactive command-line program by typing responses to its prompts. "
+        "Read the program's output carefully and decide what to type next. "
+        "If the program is waiting for you to press ENTER to continue (e.g. 'Press ENTER…'), "
+        "reply with just the word ENTER. "
+        "Otherwise reply with ONLY the exact text the program is asking for — one line, "
+        "no explanation, no surrounding quotes, no extra punctuation."
     )
 
     def __init__(
@@ -2829,12 +2849,14 @@ class LLMPlayerTool(ToolProvider):
         idle_wait: float = 0.8,
         timeout_per_turn: float = 15.0,
         max_turns: int = 30,
+        system_prompt: Optional[str] = None,
     ):
         self._llm = llm
         self._output_dir = output_dir or Path(tempfile.gettempdir()) / "rof_codegen"
         self._idle_wait = idle_wait
         self._timeout_per_turn = timeout_per_turn
         self._max_turns = max_turns
+        self._system_prompt = system_prompt or self._DEFAULT_SYSTEM
         self._output_dir.mkdir(parents=True, exist_ok=True)
 
     @property
@@ -2844,15 +2866,19 @@ class LLMPlayerTool(ToolProvider):
     @property
     def trigger_keywords(self) -> list[str]:
         return [
-            "play game",
-            "play text adventure",
-            "play python game",
-            "play adventure",
-            "play and record choices",
-            "let llm play",
+            "run interactively",
+            "run with llm",
+            "let llm drive",
+            "automate program",
             "llm player",
-            "simulate player",
+            "simulate input",
             "play interactively",
+            "play and record",
+            "run and record",
+            # kept for backwards-compatibility
+            "play game",
+            "let llm play",
+            "simulate player",
         ]
 
     # ------------------------------------------------------------------
@@ -2876,23 +2902,29 @@ class LLMPlayerTool(ToolProvider):
                 ),
             )
 
-        # Extract Player attributes (strategy, max_turns)
-        player_strategy = None
+        # Extract optional per-run overrides from the entity graph.
+        # Any entity may carry:
+        #   • "system_prompt"  – override the LLM system prompt for this run
+        #   • "instructions"   – extra guidance appended to the system prompt
+        #   • "max_turns"      – integer cap on input turns
+        system_prompt = self._system_prompt
         max_turns = self._max_turns
-        for ent_name, ent_data in request.input.items():
-            if isinstance(ent_data, dict) and "Player" in ent_name:
-                player_strategy = ent_data.get("strategy")
-                if "max_turns" in ent_data:
-                    try:
-                        max_turns = int(ent_data["max_turns"])
-                    except (ValueError, TypeError):
-                        pass
+        for ent_data in request.input.values():
+            if not isinstance(ent_data, dict):
+                continue
+            if ent_data.get("system_prompt"):
+                system_prompt = str(ent_data["system_prompt"])
+            if ent_data.get("instructions"):
+                system_prompt = system_prompt + "\n\n" + str(ent_data["instructions"])
+            if ent_data.get("max_turns"):
+                try:
+                    max_turns = int(ent_data["max_turns"])
+                except (ValueError, TypeError):
+                    pass
 
-        _t_section("LLMPlayerTool  ->  playing the game")
-        _t_info(f"Script : {script_path}")
-        _t_info(f"Lang   : {lang}")
-        if player_strategy:
-            _t_info(f"Strategy: {player_strategy}")
+        _t_section("LLMPlayerTool  ->  running program")
+        _t_info(f"Script   : {script_path}")
+        _t_info(f"Lang     : {lang}")
         _t_info(f"Max turns: {max_turns}")
         print()
 
@@ -2904,9 +2936,9 @@ class LLMPlayerTool(ToolProvider):
         log_lines: list[str] = []
 
         try:
-            returncode = self._play(cmd, transcript, log_lines, player_strategy, max_turns)
+            returncode = self._play(cmd, transcript, log_lines, system_prompt, max_turns)
         except Exception as exc:
-            return ToolResponse(success=False, error=f"Playthrough error: {exc}")
+            return ToolResponse(success=False, error=f"LLMPlayerTool error: {exc}")
 
         # ── Save transcript ──────────────────────────────────────────
         ts_text = "\n".join(log_lines)
@@ -2993,23 +3025,14 @@ class LLMPlayerTool(ToolProvider):
         cmd: list,
         transcript: list,
         log_lines: list,
-        player_strategy: Optional[str] = None,
+        system_prompt: Optional[str] = None,
         max_turns: Optional[int] = None,
     ) -> int:
         """Drive the subprocess interactively. Returns the process exit code."""
         if max_turns is None:
             max_turns = self._max_turns
-
-        # Build the system prompt with player strategy if provided
-        system_prompt = self._PLAYER_SYSTEM
-        if player_strategy:
-            system_prompt = (
-                f"You are playing a text adventure / interactive game. {player_strategy}. "
-                f"Read the game's output carefully. If it's asking you to press ENTER to continue, "
-                f"reply with just 'ENTER'. Otherwise, reply with ONLY the exact text the game is "
-                f"asking for (e.g. 'left', '1', 'yes', a character name). "
-                f"No explanation, no extra punctuation — just the bare answer."
-            )
+        if system_prompt is None:
+            system_prompt = self._system_prompt
 
         # Force UTF-8 encoding for subprocess (especially important on Windows)
         env = os.environ.copy()
@@ -3064,8 +3087,8 @@ class LLMPlayerTool(ToolProvider):
             game_output = "".join(buf).rstrip()
 
             if game_output:
-                print(f"  {_t_cyan('[GAME]')} {game_output}")
-                log_lines.append(f"[GAME] {game_output}")
+                print(f"  {_t_cyan('[OUT]')}  {game_output}")
+                log_lines.append(f"[OUT]  {game_output}")
 
             if proc.poll() is not None:
                 break
@@ -3075,13 +3098,14 @@ class LLMPlayerTool(ToolProvider):
                 turns += 1
                 continue
 
-            # Let LLM decide what to input for ALL prompts
+            # Show the LLM what the program printed and ask what to type.
             prompt = (
-                f"The text adventure game just showed:\n\n"
+                f"The program printed the following:\n\n"
                 f"{game_output}\n\n"
-                f"What do you type? If the game is just asking you to press ENTER to continue, "
-                f"reply with just 'ENTER' (nothing else). Otherwise, reply with ONLY the exact "
-                f"answer the game is asking for (e.g. '1', 'left', 'yes', a character name, etc.). "
+                f"What do you type in response? "
+                f"If the program is only asking you to press ENTER to continue, "
+                f"reply with just the word ENTER (nothing else). "
+                f"Otherwise reply with ONLY the exact input the program is asking for. "
                 f"One line only, no explanation."
             )
             try:

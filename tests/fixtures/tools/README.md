@@ -16,7 +16,7 @@ Each script exercises exactly the trigger phrase(s) that route to that tool.
 | `rag_retrieval.rl` | `RAGTool` | `retrieve information about … from the knowledge base` |
 | `lua_save.rl` | `LuaSaveTool` | `generate Questionnaire lua_script and save lua_script to file` |
 | `lua_run.rl` | `LuaRunTool` | `run lua questionnaire interactively` |
-| `llm_player.rl` | `LLMPlayerTool` | `play text adventure game with llm player and record choices` |
+| `llm_player.rl` | `LLMPlayerTool` | `run interactively with llm and record responses` |
 
 ## Running a single script
 
@@ -37,7 +37,7 @@ rof run     tests/fixtures/tools/web_search.rl --provider ollama --model gemma3:
 - `lua_save.rl` and `lua_run.rl` are designed to be run in sequence (save first,
   then run). The combined questionnaire pipeline lives in
   `tests/fixtures/pipeline_questionnaire/`.
-- `llm_player.rl` uses two goals: `AICodeGenTool` generates the game, then
-  `LLMPlayerTool` plays it in the same session.
+- `llm_player.rl` uses two goals: `AICodeGenTool` generates the program, then
+  `LLMPlayerTool` drives it interactively in the same session.
 - `human_in_loop.rl` will block for terminal input unless the orchestrator is
   configured with `HumanInLoopMode.AUTO_MOCK`.
