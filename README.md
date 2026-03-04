@@ -26,7 +26,7 @@ ROF is a **business logic runtime for LLM workflows**. It occupies a fundamental
 
 > **How do I make business logic LLM-executable, testable, and version-controlled?**
 
-This is the same shift SQL made for databases. You don't write loops to retrieve data — you declare what you want, and the runtime figures out how. ROF applies that principle to LLM workflows.
+This is the same shift SQL made for databases. Think of the comparison as “SQL : databases :: RelateLang/rof : LLM-driven workflow execution”. ROF applies that principle to LLM workflows.
 
 | Framework | Core Question |
 |---|---|
@@ -206,25 +206,25 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
 ```
   ┌────────────────────────────────────────────────────────────────────┐
   │                      .rl  Workflow Specs                           │
-  │        define  ·  relate  ·  if / then  ·  ensure                 │
+  │        define  ·  relate  ·  if / then  ·  ensure                  │
   └──────────────────────────────┬─────────────────────────────────────┘
                                  │
                     ┌────────────┴────────────┐
                     │                         │
             ┌───────▼────────┐      ┌─────────▼──────────────────────┐
             │   RL Parser    │      │   rof_cli  (CLI entry point)    │
-            │tokenise·validate│      │  lint · inspect · run · debug   │
+            │tokenise·validate│      │  lint · inspect · run · debug  │
             │      · AST     │      │  pipeline run · pipeline debug  │
-            └───────┬────────┘      └────────────────────────────────┘
+            └───────┬────────┘      └─────────────────────────────────┘
                     │
   ┌─────────────────▼───────────────────────────────────────────────────┐
   │              rof-pipeline  Pipeline Runner                          │
   │                                                                     │
-  │  PipelineBuilder → [stage₁] → [stage₂] → [fan-out] → [stage₄]    │
+  │  PipelineBuilder → [stage₁] → [stage₂] → [fan-out] → [stage₄]       │
   │                                    ↑                                │
-  │            accumulated snapshot injected as RL context             │
+  │            accumulated snapshot injected as RL context              │
   │                                                                     │
-  │  SnapshotSerializer  ·  PipelineConfig  ·  OnFailure  ·  FanOut   │
+  │  SnapshotSerializer  ·  PipelineConfig  ·  OnFailure  ·  FanOut     │
   └──────────────────────────────┬──────────────────────────────────────┘
                                  │  WorkflowAST per stage
   ┌──────────────────────────────▼──────────────────────────────────────┐
@@ -232,31 +232,31 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   │                                                                     │
   │  1. ROUTE ────► keyword/embedding match → ToolProvider             │
   │  2. INJECT ───► ContextInjector (minimal, no overflow)             │
-  │  3. EXECUTE ──► ToolProvider.execute()  OR  LLM.complete()        │
+  │  3. EXECUTE ──► ToolProvider.execute()  OR  LLM.complete()         │
   │  4. PARSE ────► ResponseParser → attribute + predicate deltas      │
-  │  5. COMMIT ───► WorkflowGraph.apply(deltas)                       │
-  │  6. EMIT ─────► EventBus                                          │
-  │  7. SNAPSHOT ─► StateManager.save()                               │
+  │  5. COMMIT ───► WorkflowGraph.apply(deltas)                        │
+  │  6. EMIT ─────► EventBus                                           │
+  │  7. SNAPSHOT ─► StateManager.save()                                │
   └──────────┬──────────────────────────────┬───────────────────────────┘
              │                              │
   ┌──────────▼──────────┐       ┌───────────▼──────────────────────────┐
   │    rof-llm          │       │    rof-tools  Tool Layer              │
   │    LLM Gateway      │       │                                       │
-  │                     │       │  ToolRegistry  ← tags, lookup        │
-  │  AnthropicProvider  │       │  ToolRouter    ← 3 strategies        │
+  │                     │       │  ToolRegistry  ← tags, lookup         │
+  │  AnthropicProvider  │       │  ToolRouter    ← 3 strategies         │
   │  OpenAIProvider     │       │                                       │
-  │  GeminiProvider     │       │  WebSearchTool   ddgs/serpapi/brave  │
-  │  OllamaProvider     │       │  RAGTool         chroma/memory       │
-  │  GitHubCopilot      │       │  CodeRunnerTool  py/js/lua/sh        │
-  │  Provider           │       │  APICallTool     httpx REST          │
-  │                     │       │  DatabaseTool    sqlite/SA           │
-  │  RetryManager       │       │  FileReaderTool  pdf/csv/docx/…      │
-  │  PromptRenderer     │       │  ValidatorTool   RL schema check     │
-  │  ResponseParser     │       │  HumanInLoopTool stdin/cb/file       │
-  └─────────────────────┘       │  LuaSaveTool     Lua codegen + save  │
-                                │  LuaRunTool      interactive Lua run │
+  │  GeminiProvider     │       │  WebSearchTool   ddgs/serpapi/brave   │
+  │  OllamaProvider     │       │  RAGTool         chroma/memory        │
+  │  GitHubCopilot      │       │  CodeRunnerTool  py/js/lua/sh         │
+  │  Provider           │       │  APICallTool     httpx REST           │
+  │                     │       │  DatabaseTool    sqlite/SA            │
+  │  RetryManager       │       │  FileReaderTool  pdf/csv/docx/…       │
+  │  PromptRenderer     │       │  ValidatorTool   RL schema check      │
+  │  ResponseParser     │       │  HumanInLoopTool stdin/cb/file        │
+  └─────────────────────┘       │  LuaSaveTool     Lua codegen + save   │
+                                │  LuaRunTool      interactive Lua run  │
                                 │                                       │
-                                │  SDK: @rof_tool · LuaScriptTool      │
+                                │  SDK: @rof_tool · LuaScriptTool       │
                                 │       JavaScriptTool                  │
                                 └───────────────────────────────────────┘
 ```
