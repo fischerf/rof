@@ -129,12 +129,24 @@ stages:
   - name: gather
     rl_file: 01_gather.rl
     model: gemma3:12b          # cheap local model for extraction
+    output_mode: rl            # Ollama: no structured output → RL + regex fallback
   - name: decide
     rl_file: 03_decide.rl
     model: claude-opus-4-5     # powerful model for final reasoning
+    output_mode: json          # Anthropic: JSON schema enforced for reliability
 ```
 
 This enables cost optimisation (cheap model for simple extraction, expensive model for critical decisions) and capability routing (local model for sensitive data, cloud model for complex reasoning).
+
+`output_mode` controls how ROF interprets each stage's LLM response — and how the Orchestrator asks for one:
+
+| `output_mode` | Best for | How it works |
+|---|---|---|
+| `"auto"` *(default)* | Any provider | Uses `"json"` if `provider.supports_structured_output()`, otherwise `"rl"` |
+| `"json"` | OpenAI, Anthropic, Gemini, Ollama ≥ 0.4 | JSON schema enforced; response parsed as structured object; re-emitted as RL for the audit trail |
+| `"rl"` | Ollama local models, older APIs | Full RLParser attempt; regex line-by-line fallback; RetryManager re-prompts with an RL hint on failure |
+
+Both paths produce the same graph delta (entity / attribute / predicate updates) and the same immutable RL audit snapshot — the output mode only affects how the LLM is asked to respond and how the response is decoded.
 
 ### Strict separation of concerns
 
@@ -250,8 +262,14 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   │                                                                     │
   │  1. ROUTE ────► keyword/embedding match → ToolProvider             │
   │  2. INJECT ───► ContextInjector (minimal, no overflow)             │
-  │  3. EXECUTE ──► ToolProvider.execute()  OR  LLM.complete()         │
-  │  4. PARSE ────► ResponseParser → attribute + predicate deltas      │
+  │  3. EXECUTE ──► resolve output_mode ("auto"→json|rl) →            │
+  │                 ToolProvider.execute()  OR  LLM.complete()         │
+  │  4. PARSE ────► dual strategy:                                     │
+  │                   json mode → JSON schema enforced → parse JSON    │
+  │                     (fallback: RL extraction if model misbehaves)  │
+  │                   rl mode   → full RLParser → regex fallback       │
+  │                 → attribute + predicate deltas (graph delta)       │
+  │                 → re-emit as RL statements → audit snapshot        │
   │  5. COMMIT ───► WorkflowGraph.apply(deltas)                        │
   │  6. EMIT ─────► EventBus                                           │
   │  7. SNAPSHOT ─► StateManager.save()                                │
@@ -368,8 +386,16 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   │   bus.subscribe("*", catch_all_logger)
   │
   StateManager
-      Saves / loads WorkflowGraph snapshots via a swappable adapter.
-      mgr.swap_adapter(RedisStateAdapter())
+  │   Saves / loads WorkflowGraph snapshots via a swappable adapter.
+  │   mgr.swap_adapter(RedisStateAdapter())
+  │
+  OrchestratorConfig
+      Controls the Orchestrator execution loop.
+      output_mode: "auto" | "json" | "rl"
+        "auto"  → use "json" if provider.supports_structured_output(), else "rl"
+        "json"  → enforce JSON schema output (structured, schema-validated)
+        "rl"    → ask for RelateLang text output (legacy, regex fallback)
+      system_preamble / system_preamble_json — swapped automatically by mode.
 ```
 
 ### rof-llm
@@ -414,7 +440,8 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   │   Wraps any provider transparently.
   │   CONSTANT | LINEAR | EXPONENTIAL | JITTERED backoff strategies.
   │   AuthError + ContextLimitError are never retried.
-  │   Parse-retry: re-prompts with a hint when RL is not returned.
+  │   Parse-retry: re-prompts with a mode-aware hint when the expected
+  │     output (RL or JSON) is not returned — works in both output modes.
   │
   PromptRenderer
   │   Assembles the final LLMRequest for a single Orchestrator step.
@@ -426,6 +453,12 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   │
   ResponseParser
   │   Extracts RL state deltas from any model output — even mixed prose+RL.
+  │   Dual-strategy via output_mode parameter:
+  │     "json" → parse structured JSON object first; falls back to RL
+  │              extraction if the model ignores the schema instruction.
+  │     "rl"   → full RLParser attempt; regex line-by-line fallback.
+  │   JSON deltas are always re-emitted as RL statements so the audit
+  │   snapshot stays in a single, uniform RelateLang format.
   │   → attribute_deltas  { "Customer": { "segment": "HighValue" } }
   │   → predicate_deltas  { "Customer": ["premium"] }
   │   → tool_intent       "WebSearchTool"  (if detected)
@@ -433,7 +466,7 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   │   → warnings          list of non-fatal parse notes
   │
   ParsedResponse
-      Structured result of ResponseParser.parse(content):
+      Structured result of ResponseParser.parse(content, output_mode):
         raw_content, rl_statements, attribute_deltas, predicate_deltas,
         tool_intent, tool_args, is_valid_rl, warnings
 ```

@@ -142,6 +142,7 @@ except ImportError:
         pause_on_error: bool = False
         auto_save_state: bool = False
         system_preamble: str = ""
+        output_mode: str = "auto"  # "auto" | "json" | "rl"
 
 
 # ===========================================================================

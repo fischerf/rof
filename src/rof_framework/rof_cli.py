@@ -974,10 +974,12 @@ def cmd_pipeline_run(args: argparse.Namespace) -> int:
     stages:
       - name: gather
         rl_file: 01_gather.rl
+        output_mode: rl        # optional: "auto" | "rl" | "json" (default: "auto")
       - name: analyse
         rl_file: 02_analyse.rl
       - name: decide
         rl_file: 03_decide.rl
+        output_mode: json      # enforce JSON schema for this stage
 
     config:
       on_failure: halt         # halt | continue | retry
@@ -1038,20 +1040,43 @@ def cmd_pipeline_run(args: argparse.Namespace) -> int:
     # Resolve paths relative to config file location
     base_dir = config_path.parent
 
+    core = _import_core()
     builder = PipelineBuilder(llm=provider, tools=pipeline_tools)
 
     for s in stages_cfg:
         rl_file = s.get("rl_file", "")
+        stage_output_mode = s.get("output_mode", "auto")
+
+        # Build a per-stage OrchestratorConfig only when the stage explicitly
+        # overrides output_mode.  "auto" means: let the pipeline-level config
+        # (or the provider's supports_structured_output()) decide at runtime.
+        stage_orch_cfg = None
+        if stage_output_mode != "auto":
+            stage_orch_cfg = core.OrchestratorConfig(
+                auto_save_state=False,
+                pause_on_error=False,
+                output_mode=stage_output_mode,
+            )
+
         if rl_file:
             resolved = str(base_dir / rl_file)
-            builder.stage(name=s["name"], rl_file=resolved, description=s.get("description", ""))
+            builder.stage(
+                name=s["name"],
+                rl_file=resolved,
+                description=s.get("description", ""),
+                orch_config=stage_orch_cfg,
+            )
         else:
             rl_source = s.get("rl_source", "")
             if not rl_source:
                 _err(f"Stage '{s.get('name', '?')}' needs rl_file or rl_source.")
                 return 2
-            resolved = ""
-            builder.stage(name=s["name"], rl_source=rl_source, description=s.get("description", ""))
+            builder.stage(
+                name=s["name"],
+                rl_source=rl_source,
+                description=s.get("description", ""),
+                orch_config=stage_orch_cfg,
+            )
 
     # ── Pipeline-level config ─────────────────────────────────────────────
     cfg_raw = raw.get("config", {})
