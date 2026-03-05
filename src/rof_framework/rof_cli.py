@@ -30,10 +30,14 @@ import argparse
 import json
 import logging
 import os
+import re as _re
 import sys
+import textwrap
+import time
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+from typing import Any
 
 _console_fixed = False
 
@@ -68,13 +72,6 @@ def _fix_win32_console() -> None:
     if hasattr(sys.stderr, "buffer"):
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-
-import textwrap
-import time
-from dataclasses import dataclass, field
-from enum import Enum
-from pathlib import Path
-from typing import Any, Optional
 
 # ─── Version ────────────────────────────────────────────────────────────────
 
@@ -231,6 +228,7 @@ class Linter:
     def lint(self, source: str, filename: str = "<input>") -> list[LintIssue]:
         core = _import_core()
         issues: list[LintIssue] = []
+        _ = filename  # acknowledged; reserved for future use in error messages
 
         # ── E001: Syntax / parse error ─────────────────────────────────────
         try:
@@ -289,11 +287,9 @@ class Linter:
 
         # Helper: extract PascalCase words that look like entity names.
         # This catches both defined entities and undefined references.
-        import re as _re
-
-        _ENTITY_PATTERN = _re.compile(r"\b[A-Z][A-Za-z0-9_]*\b")
+        _entity_pattern = _re.compile(r"\b[A-Z][A-Za-z0-9_]*\b")
         # Reserved RL/Python words to ignore in entity detection
-        _RESERVED = frozenset(
+        _reserved = frozenset(
             {
                 "True",
                 "False",
@@ -313,7 +309,7 @@ class Linter:
 
         def _candidate_entities(expr: str) -> set[str]:
             """PascalCase words in expr — candidate entity references."""
-            return {w for w in _ENTITY_PATTERN.findall(expr) if w not in _RESERVED}
+            return {w for w in _entity_pattern.findall(expr) if w not in _reserved}
 
         def _undefined_in(expr: str) -> set[str]:
             """Candidate entity names in expr that are NOT defined."""
@@ -1111,7 +1107,7 @@ def cmd_debug(args: argparse.Namespace) -> int:
         bus.subscribe("*", capture)
 
     # Wrap provider to capture prompts/responses in debug mode
-    class _DebugProvider:
+    class _DebugProvider(core.LLMProvider):
         def __init__(self, inner: Any) -> None:
             self._inner = inner
 
@@ -1274,16 +1270,13 @@ def cmd_pipeline_run(args: argparse.Namespace) -> int:
         rl_file = s.get("rl_file", "")
         if rl_file:
             resolved = str(base_dir / rl_file)
+            builder.stage(name=s["name"], rl_file=resolved, description=s.get("description", ""))
         else:
             rl_source = s.get("rl_source", "")
             if not rl_source:
                 _err(f"Stage '{s.get('name', '?')}' needs rl_file or rl_source.")
                 return 2
             resolved = ""
-
-        if rl_file:
-            builder.stage(name=s["name"], rl_file=resolved, description=s.get("description", ""))
-        else:
             builder.stage(name=s["name"], rl_source=rl_source, description=s.get("description", ""))
 
     # ── Pipeline-level config ─────────────────────────────────────────────
@@ -1382,13 +1375,14 @@ def cmd_pipeline_debug(args: argparse.Namespace) -> int:
         return 2
 
     provider = _make_provider(args)
+    core = _import_core()
 
     # ── Debug LLM wrapper ─────────────────────────────────────────────────
     debug_log: list[dict] = []
     step_index = [0]
     current_stage = ["?"]
 
-    class _DebugProvider:
+    class _DebugProvider(core.LLMProvider):
         def __init__(self, inner: Any) -> None:
             self._inner = inner
 
@@ -1607,7 +1601,7 @@ def _provider_args(p: argparse.ArgumentParser) -> None:
     )
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
     parser = argparse.ArgumentParser(
         prog="rof",
         description="ROF — RelateLang Orchestration Framework CLI",
@@ -1734,9 +1728,22 @@ def build_parser() -> argparse.ArgumentParser:
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     _fix_win32_console()
     parser = build_parser()
+    # Retrieve the pipeline sub-parser so we can print its help when no
+    # pipeline sub-command is given.  Walk the parser's registered actions
+    # to find the "pipeline" sub-parser without changing the public API.
+    pipeline_parser = None
+    for action in parser._actions:
+        if hasattr(action, "_name_parser_map"):
+            pip = action._name_parser_map.get("pipeline")
+            if pip is not None:
+                for sub_action in pip._actions:
+                    if hasattr(sub_action, "_name_parser_map"):
+                        pipeline_parser = pip
+                        break
+            break
     args = parser.parse_args(argv)
 
     # Silence rof.* loggers unless verbose
@@ -1761,7 +1768,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.command == "pipeline":
         if not getattr(args, "pipeline_command", None):
             # print pipeline help
-            parser._subparsers._actions[-1].choices["pipeline"].print_help()
+            if pipeline_parser:
+                pipeline_parser.print_help()
             return 3
         _pipeline_handlers = {
             "run": cmd_pipeline_run,
