@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from rof_framework.rof_cli import Linter, LintIssue, Severity
+from rof_framework.rof_core import Linter, LintIssue, Severity
 
 EXAMPLES = Path(__file__).parent / "fixtures"
 
