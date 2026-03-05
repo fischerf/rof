@@ -52,10 +52,11 @@ import random
 import re
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 logger = logging.getLogger("rof.llm")
 
@@ -67,15 +68,9 @@ logger = logging.getLogger("rof.llm")
 try:
     # Attempt real import first
     from .rof_core import (  # type: ignore
-        GoalState,
-        GoalStatus,
         LLMProvider,
         LLMRequest,
         LLMResponse,
-        ParseError,
-        RLParser,
-        WorkflowAST,
-        WorkflowGraph,
     )
 
     _CORE_IMPORTED = True
@@ -105,6 +100,9 @@ except ImportError:
         def complete(self, request: LLMRequest) -> LLMResponse: ...
         @abstractmethod
         def supports_tool_calling(self) -> bool: ...
+        def supports_structured_output(self) -> bool:
+            return False
+
         @property
         @abstractmethod
         def context_limit(self) -> int: ...
@@ -255,7 +253,7 @@ class GitHubCopilotProvider(LLMProvider):
     _TOKEN_REFRESH_BUFFER_S: int = 120
 
     # Default OAuth token cache location
-    _DEFAULT_CACHE_PATH: "Path" = Path.home() / ".config" / "rof" / "copilot_oauth.json"
+    _DEFAULT_CACHE_PATH: Path = Path.home() / ".config" / "rof" / "copilot_oauth.json"
 
     # Context window limits per model prefix
     _CONTEXT_LIMITS: dict[str, int] = {
@@ -282,9 +280,9 @@ class GitHubCopilotProvider(LLMProvider):
         editor_version: str = "vscode/1.96.0",
         editor_plugin: str = "copilot-chat/0.24.0",
         integration_id: str = "vscode-chat",
-        token_endpoint: Optional[str] = None,
-        api_base_url: Optional[str] = None,
-        cache_path: Optional[Any] = None,  # Path | str | None
+        token_endpoint: str | None = None,
+        api_base_url: str | None = None,
+        cache_path: Any | None = None,  # Path | str | None
         default_max_tokens: int = 1024,
         default_temperature: float = 0.0,
         timeout: float = 60.0,
@@ -307,12 +305,12 @@ class GitHubCopilotProvider(LLMProvider):
         self._timeout = timeout
 
         # In-memory Copilot session token (short-lived, refreshed automatically)
-        self._session_token: Optional[str] = None
+        self._session_token: str | None = None
         self._token_expires_at: float = 0.0
 
         # Eagerly verify required packages
         try:
-            import httpx as _httpx
+            import httpx as _httpx  # type: ignore[import-untyped,import-not-found]
 
             self._httpx = _httpx
         except ImportError as exc:
@@ -321,7 +319,7 @@ class GitHubCopilotProvider(LLMProvider):
             ) from exc
 
         try:
-            import openai as _openai
+            import openai as _openai  # type: ignore[import-untyped,import-not-found]
 
             self._openai = _openai
         except ImportError as exc:
@@ -512,6 +510,16 @@ class GitHubCopilotProvider(LLMProvider):
             ),
         }
 
+        # ── JSON structured output ────────────────────────────────────────────
+        if getattr(request, "output_mode", "rl") == "json":
+            params["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "rof_graph_update",
+                    "schema": ROF_GRAPH_UPDATE_SCHEMA,
+                },
+            }
+
         try:
             resp = client.chat.completions.create(**params)
         except self._openai.RateLimitError as exc:
@@ -540,6 +548,9 @@ class GitHubCopilotProvider(LLMProvider):
 
     def supports_tool_calling(self) -> bool:
         return self._model.startswith(("gpt-4", "o1", "o3"))
+
+    def supports_structured_output(self) -> bool:
+        return True
 
     @property
     def context_limit(self) -> int:
@@ -583,7 +594,7 @@ class GitHubCopilotProvider(LLMProvider):
         import sys as _sys
 
         try:
-            import httpx as _httpx
+            import httpx as _httpx  # type: ignore[import-untyped,import-not-found]
         except ImportError as exc:
             raise ImportError("pip install httpx") from exc
 
@@ -998,7 +1009,7 @@ class OpenAIProvider(LLMProvider):
         self._azure = azure_endpoint is not None
 
         try:
-            import openai as _openai
+            import openai as _openai  # type: ignore[import-untyped,import-not-found]
         except ImportError as e:
             raise ImportError("openai package not installed. Run: pip install openai") from e
 
@@ -1036,9 +1047,22 @@ class OpenAIProvider(LLMProvider):
             else self._default_temperature,
         }
 
-        try:
-            import openai as _openai
+        # ── JSON structured output ────────────────────────────────────────────
+        if getattr(request, "output_mode", "rl") == "json":
+            params["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "rof_graph_update",
+                    "schema": ROF_GRAPH_UPDATE_SCHEMA,
+                },
+            }
 
+        try:
+            import openai as _openai  # type: ignore[import-untyped,import-not-found]
+        except ImportError as e:
+            raise ImportError("openai package not installed. Run: pip install openai") from e
+
+        try:
             resp = self._client.chat.completions.create(**params)
         except _openai.RateLimitError as e:
             raise RateLimitError(str(e), 429) from e
@@ -1062,6 +1086,9 @@ class OpenAIProvider(LLMProvider):
         )
 
     def supports_tool_calling(self) -> bool:
+        return True
+
+    def supports_structured_output(self) -> bool:
         return True
 
     @property
@@ -1136,7 +1163,7 @@ class AnthropicProvider(LLMProvider):
         self._default_temperature = default_temperature
 
         try:
-            import anthropic as _anthropic
+            import anthropic as _anthropic  # type: ignore[import-untyped,import-not-found]
 
             self._client = _anthropic.Anthropic(
                 api_key=api_key or None,
@@ -1148,7 +1175,7 @@ class AnthropicProvider(LLMProvider):
         logger.info("AnthropicProvider initialized: model=%s", model)
 
     def complete(self, request: LLMRequest) -> LLMResponse:
-        import anthropic as _anthropic
+        import anthropic as _anthropic  # type: ignore[import-untyped,import-not-found]
 
         params: dict[str, Any] = {
             "model": self._model,
@@ -1160,6 +1187,11 @@ class AnthropicProvider(LLMProvider):
         }
         if request.system:
             params["system"] = request.system
+
+        # ── JSON structured output via forced tool_use ────────────────────────
+        if getattr(request, "output_mode", "rl") == "json":
+            params["tools"] = [_ROF_TOOL_DEFINITION]
+            params["tool_choice"] = {"type": "tool", "name": "rof_graph_update"}
 
         try:
             resp = self._client.messages.create(**params)
@@ -1184,6 +1216,9 @@ class AnthropicProvider(LLMProvider):
         )
 
     def supports_tool_calling(self) -> bool:
+        return True
+
+    def supports_structured_output(self) -> bool:
         return True
 
     @property
@@ -1256,12 +1291,19 @@ class GeminiProvider(LLMProvider):
         logger.info("GeminiProvider initialized: model=%s", model)
 
     def complete(self, request: LLMRequest) -> LLMResponse:
-        generation_config = self._genai.types.GenerationConfig(
-            max_output_tokens=request.max_tokens or self._default_max_tokens,
-            temperature=request.temperature
+        generation_config_kwargs: dict[str, Any] = {
+            "max_output_tokens": request.max_tokens or self._default_max_tokens,
+            "temperature": request.temperature
             if request.temperature is not None
             else self._default_temperature,
-        )
+        }
+
+        # ── JSON structured output ────────────────────────────────────────────
+        if getattr(request, "output_mode", "rl") == "json":
+            generation_config_kwargs["response_mime_type"] = "application/json"
+            generation_config_kwargs["response_schema"] = ROF_GRAPH_UPDATE_SCHEMA
+
+        generation_config = self._genai.types.GenerationConfig(**generation_config_kwargs)
 
         # Gemini doesn't have a dedicated system role in all versions;
         # prepend it to the user turn when present.
@@ -1293,6 +1335,9 @@ class GeminiProvider(LLMProvider):
         # Gemini supports function calling but we leave tool_calls empty
         # until rof-tools provides the function-schema integration.
         return False
+
+    def supports_structured_output(self) -> bool:
+        return True
 
     @property
     def context_limit(self) -> int:
@@ -1345,7 +1390,7 @@ class OllamaProvider(LLMProvider):
         # Try openai SDK for openai-compatible endpoints
         if use_openai_compat:
             try:
-                import openai as _openai
+                import openai as _openai  # type: ignore[import-untyped,import-not-found]
 
                 self._openai_client = _openai.OpenAI(
                     api_key=api_key,
@@ -1373,15 +1418,20 @@ class OllamaProvider(LLMProvider):
             messages.append({"role": "system", "content": request.system})
         messages.append({"role": "user", "content": request.prompt})
 
+        params: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "max_tokens": request.max_tokens or self._default_max_tokens,
+            "temperature": request.temperature
+            if request.temperature is not None
+            else self._default_temperature,
+        }
+        # Ollama OpenAI-compat supports response_format json_object
+        if getattr(request, "output_mode", "rl") == "json":
+            params["response_format"] = {"type": "json_object"}
+
         try:
-            resp = self._openai_client.chat.completions.create(  # type: ignore[union-attr]
-                model=self._model,
-                messages=messages,
-                max_tokens=request.max_tokens or self._default_max_tokens,
-                temperature=request.temperature
-                if request.temperature is not None
-                else self._default_temperature,
-            )
+            resp = self._openai_client.chat.completions.create(**params)  # type: ignore[union-attr]
         except Exception as e:
             raise ProviderError(f"Ollama/vLLM call failed: {e}") from e
 
@@ -1391,11 +1441,11 @@ class OllamaProvider(LLMProvider):
     def _complete_via_httpx(self, request: LLMRequest) -> LLMResponse:
         """Direct Ollama API call without the openai SDK."""
         try:
-            import httpx
+            import httpx  # type: ignore[import-untyped,import-not-found]
         except ImportError as e:
             raise ImportError("httpx not installed. Run: pip install httpx") from e
 
-        payload = {
+        payload: dict[str, Any] = {
             "model": self._model,
             "prompt": request.prompt,
             "stream": False,
@@ -1408,6 +1458,10 @@ class OllamaProvider(LLMProvider):
         }
         if request.system:
             payload["system"] = request.system
+
+        # Ollama native API supports a `format` field for JSON schema enforcement
+        if getattr(request, "output_mode", "rl") == "json":
+            payload["format"] = ROF_GRAPH_UPDATE_SCHEMA
 
         try:
             r = httpx.post(
@@ -1427,6 +1481,9 @@ class OllamaProvider(LLMProvider):
 
     def supports_tool_calling(self) -> bool:
         return self._use_openai_compat
+
+    def supports_structured_output(self) -> bool:
+        return True
 
     @property
     def context_limit(self) -> int:
@@ -1456,6 +1513,79 @@ When responding:
 4. Keep the response focused on the current `ensure` goal.
 """
 
+# JSON-mode system preamble — used when the provider enforces structured output
+_DEFAULT_SYSTEM_PREAMBLE_JSON = """\
+You are a RelateLang workflow executor.
+You receive context as RelateLang statements describing entities, attributes, and goals.
+Respond ONLY with a valid JSON object — no prose, no markdown, no text outside the JSON.
+
+Required schema:
+{
+  "attributes": [{"entity": "<EntityName>", "name": "<attr_name>", "value": <string|number|bool>}],
+  "predicates": [{"entity": "<EntityName>", "value": "<predicate_label>"}],
+  "reasoning": "<optional chain-of-thought — stored but not executed>"
+}
+
+Rules:
+- Populate `attributes` to record numeric, string, or boolean findings.
+- Populate `predicates` to record categorical conclusions (e.g. "HighValue", "approved").
+- Leave arrays empty [] if nothing applies to the current goal.
+- `reasoning` is your scratchpad — write your chain-of-thought here.
+- Keep entity names exactly as they appear in the context.
+"""
+
+# JSON Schema for structured LLM responses (used by all providers in JSON mode)
+ROF_GRAPH_UPDATE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "attributes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "entity": {"type": "string"},
+                    "name": {"type": "string"},
+                    "value": {
+                        "anyOf": [
+                            {"type": "string"},
+                            {"type": "number"},
+                            {"type": "boolean"},
+                            {"type": "null"},
+                        ]
+                    },
+                },
+                "required": ["entity", "name", "value"],
+                "additionalProperties": False,
+            },
+        },
+        "predicates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "entity": {"type": "string"},
+                    "value": {"type": "string"},
+                },
+                "required": ["entity", "value"],
+                "additionalProperties": False,
+            },
+        },
+        "reasoning": {"type": "string"},
+    },
+    "required": ["attributes", "predicates"],
+    "additionalProperties": False,
+}
+
+# Anthropic tool definition for forced structured output
+_ROF_TOOL_DEFINITION: dict = {
+    "name": "rof_graph_update",
+    "description": (
+        "Record attribute and predicate updates to the RelateLang workflow graph. "
+        "Always call this tool to respond — never return plain text."
+    ),
+    "input_schema": ROF_GRAPH_UPDATE_SCHEMA,
+}
+
 
 @dataclass
 class RendererConfig:
@@ -1472,6 +1602,9 @@ class RendererConfig:
     max_prompt_chars: int = 0
     # Prefix printed before the goal section
     goal_section_header: str = "\n// Current Goal"
+    # Output mode: mirrors OrchestratorConfig.output_mode
+    # "rl" → RL preamble; "json" → JSON preamble; "auto" → defer to caller
+    output_mode: str = "rl"
 
 
 class PromptRenderer:
@@ -1569,9 +1702,14 @@ class PromptRenderer:
 
     def _build_system(self, caller_system: str) -> str:
         if self._config.inject_rl_preamble:
+            preamble = (
+                _DEFAULT_SYSTEM_PREAMBLE_JSON
+                if self._config.output_mode == "json"
+                else _DEFAULT_SYSTEM_PREAMBLE
+            )
             if caller_system:
-                return f"{_DEFAULT_SYSTEM_PREAMBLE}\n\n{caller_system}"
-            return _DEFAULT_SYSTEM_PREAMBLE
+                return f"{preamble}\n\n{caller_system}"
+            return preamble
         return caller_system
 
     def _build_prompt(self, context: str, goal_expr: str) -> str:
@@ -1662,12 +1800,22 @@ class ResponseParser:
         self._rof_parser: Any = None
         if _CORE_IMPORTED:
             try:
-                self._rof_parser = RLParser()  # type: ignore[name-defined]
+                from rof_core import RLParser  # type: ignore[import-untyped,import-not-found]
+
+                self._rof_parser = RLParser()
             except Exception:
                 pass
 
-    def parse(self, content: str) -> ParsedResponse:
+    def parse(self, content: str, output_mode: str = "rl") -> ParsedResponse:
         result = ParsedResponse(raw_content=content)
+
+        # ── JSON mode: parse structured response first ────────────────────────
+        if output_mode == "json":
+            if self._try_json_parse(content, result):
+                self._detect_tool_intent(content, result)
+                return result
+            # Fall through to RL parse if JSON parsing fails
+            logger.debug("ResponseParser: JSON mode parse failed, falling back to RL extraction")
 
         # 1. Try full RL parse
         if self._rof_parser is not None:
@@ -1681,6 +1829,52 @@ class ResponseParser:
         self._detect_tool_intent(content, result)
 
         return result
+
+    def _try_json_parse(self, content: str, result: ParsedResponse) -> bool:
+        """
+        Parse a JSON structured response (from json_schema / tool_use / format modes).
+        Populates attribute_deltas, predicate_deltas, and rl_statements.
+        Returns True on success.
+        """
+        import json as _json
+
+        raw = content.strip()
+        raw = re.sub(r"```[a-zA-Z]*\n?", "", raw).strip()
+        # Extract outermost {...} block to tolerate minor text wrapping
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if m:
+            raw = m.group(0)
+
+        try:
+            data = _json.loads(raw)
+        except (_json.JSONDecodeError, ValueError) as exc:
+            result.warnings.append(f"JSON parse failed: {exc}")
+            return False
+
+        if not isinstance(data, dict):
+            result.warnings.append("JSON response is not an object")
+            return False
+
+        # Extract attributes
+        for attr in data.get("attributes", []):
+            entity = str(attr.get("entity", "")).strip()
+            name = str(attr.get("name", "")).strip()
+            value = attr.get("value")
+            if entity and name and value is not None:
+                result.attribute_deltas.setdefault(entity, {})[name] = value
+                v_repr = f'"{value}"' if isinstance(value, str) else str(value)
+                result.rl_statements.append(f"{entity} has {name} of {v_repr}.")
+
+        # Extract predicates
+        for pred in data.get("predicates", []):
+            entity = str(pred.get("entity", "")).strip()
+            value = str(pred.get("value", "")).strip()
+            if entity and value:
+                result.predicate_deltas.setdefault(entity, []).append(value)
+                result.rl_statements.append(f'{entity} is "{value}".')
+
+        result.is_valid_rl = True  # JSON was valid — mark as successfully parsed
+        return True
 
     # ------------------------------------------------------------------
     # Internals
@@ -1830,7 +2024,7 @@ class RetryConfig:
     max_parse_retries: int = 2
 
 
-class RetryManager:
+class RetryManager(LLMProvider):
     """
     Wraps any LLMProvider with configurable retry, backoff, and fallback logic.
 
@@ -1956,6 +2150,9 @@ class RetryManager:
     def supports_tool_calling(self) -> bool:
         return self._provider.supports_tool_calling()
 
+    def supports_structured_output(self) -> bool:
+        return self._provider.supports_structured_output()
+
     @property
     def context_limit(self) -> int:
         return self._provider.context_limit
@@ -1970,30 +2167,37 @@ class RetryManager:
         response: LLMResponse,
         attempt: int,
     ) -> LLMResponse:
-        """Retry the LLM call if the response is not valid RL."""
-        parsed = self._parser.parse(response.content)
+        """Retry the LLM call if the response is not valid RL/JSON."""
+        output_mode = getattr(request, "output_mode", "rl")
+        parsed = self._parser.parse(response.content, output_mode)
         if parsed.is_valid_rl:
             return response
 
         for parse_attempt in range(self._config.max_parse_retries):
             logger.warning(
-                "Response is not valid RL (parse attempt %d/%d). Retrying LLM call…",
+                "Response is not valid %s (parse attempt %d/%d). Retrying LLM call…",
+                output_mode.upper(),
                 parse_attempt + 1,
                 self._config.max_parse_retries,
             )
-            # Add a targeted hint: ask for plain (unfenced) RL statements.
-            # Avoid "respond ONLY with RL" instructions that can produce empty
-            # responses when the model is uncertain; ask for RL + explanation.
             amended = copy.copy(request)
-            amended.prompt = (
-                request.prompt
-                + "\n\n// Important: include your answer as plain RelateLang statements "
-                "(no markdown code fences, no preamble). "
-                "Example: RiskProfile has score of 0.82."
-            )
+            if output_mode == "json":
+                amended.prompt = (
+                    request.prompt
+                    + "\n\n// Important: respond ONLY with a valid JSON object matching the schema. "
+                    'Example: {"attributes": [{"entity": "Customer", "name": "segment", "value": "HighValue"}], '
+                    '"predicates": [{"entity": "Customer", "value": "HighValue"}], "reasoning": "..."}'
+                )
+            else:
+                amended.prompt = (
+                    request.prompt
+                    + "\n\n// Important: include your answer as plain RelateLang statements "
+                    "(no markdown code fences, no preamble). "
+                    "Example: RiskProfile has score of 0.82."
+                )
             try:
                 response = self._provider.complete(amended)
-                parsed = self._parser.parse(response.content)
+                parsed = self._parser.parse(response.content, output_mode)
                 if parsed.is_valid_rl:
                     return response
             except Exception as e:
@@ -2001,7 +2205,8 @@ class RetryManager:
 
         # Give up on parse validation — return best effort
         logger.warning(
-            "Response still not valid RL after %d retries; using as-is.",
+            "Response still not valid %s after %d retries; using as-is.",
+            output_mode.upper(),
             self._config.max_parse_retries,
         )
         return response
@@ -2224,7 +2429,7 @@ define HighValue as "Premium customer segment".\
 
         _call_count = 0
 
-        def complete(self, req: LLMRequest) -> LLMResponse:
+        def complete(self, request: LLMRequest) -> LLMResponse:
             self._call_count += 1
             if self._call_count <= 2:
                 raise RateLimitError(f"Simulated rate limit (call {self._call_count})", 429)

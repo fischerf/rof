@@ -42,7 +42,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Optional
+from typing import Any
 
 
 class StatementType(Enum):
@@ -93,7 +93,7 @@ class Relation(RLNode):
     entity1: str = ""
     entity2: str = ""
     relation_type: str = ""
-    condition: Optional[str] = None  # raw natural expression
+    condition: str | None = None  # raw natural expression
 
 
 @dataclass
@@ -478,11 +478,9 @@ class RLParser:
         start_line = 0
 
         for i, line in enumerate(lines, 1):
-            # Kommentare entfernen (aber :// in URLs nicht anfassen)
+            # Kommentare entfernen
             if "//" in line:
-                m = re.search(r"(?<!:)//", line)
-                if m:
-                    line = line[: m.start()]
+                line = line[: line.index("//")]
             line = line.strip()
             if not line:
                 continue
@@ -503,7 +501,7 @@ class RLParser:
 
         return cleaned
 
-    def _parse_statement(self, line: str, lineno: int) -> Optional[RLNode]:
+    def _parse_statement(self, line: str, lineno: int) -> RLNode | None:
         for p in self._parsers:
             if p.matches(line):
                 return p.parse(line, lineno)
@@ -528,9 +526,9 @@ class RLParser:
 # Leichtgewichtiger synchroner Pub/Sub Bus.
 # Async-Adapter kann darüber gelegt werden.
 # ==============================================================================
+from collections.abc import Callable
 from dataclasses import dataclass as _dc
 from dataclasses import field as _f
-from typing import Callable
 
 
 @_dc
@@ -634,7 +632,7 @@ class WorkflowGraph:
     def ast(self) -> WorkflowAST:
         return self._ast
 
-    def entity(self, name: str) -> Optional[EntityState]:
+    def entity(self, name: str) -> EntityState | None:
         return self._entities.get(name)
 
     def all_entities(self) -> dict[str, EntityState]:
@@ -756,7 +754,7 @@ class StateAdapter(ABC):
     def save(self, run_id: str, data: dict) -> None: ...
 
     @abstractmethod
-    def load(self, run_id: str) -> Optional[dict]: ...
+    def load(self, run_id: str) -> dict | None: ...
 
     @abstractmethod
     def delete(self, run_id: str) -> None: ...
@@ -774,7 +772,7 @@ class InMemoryStateAdapter(StateAdapter):
     def save(self, run_id: str, data: dict) -> None:
         self._store[run_id] = json.loads(json.dumps(data))  # deep copy
 
-    def load(self, run_id: str) -> Optional[dict]:
+    def load(self, run_id: str) -> dict | None:
         return self._store.get(run_id)
 
     def delete(self, run_id: str) -> None:
@@ -790,14 +788,14 @@ class StateManager:
     Ermöglicht Pause, Replay und Wiederaufnahme von Runs.
     """
 
-    def __init__(self, adapter: Optional[StateAdapter] = None):
+    def __init__(self, adapter: StateAdapter | None = None):
         self._adapter = adapter or InMemoryStateAdapter()
 
     def save(self, run_id: str, graph: WorkflowGraph) -> None:
         self._adapter.save(run_id, graph.snapshot())
         logger.debug("State gespeichert: run_id=%s", run_id)
 
-    def load(self, run_id: str) -> Optional[dict]:
+    def load(self, run_id: str) -> dict | None:
         return self._adapter.load(run_id)
 
     def exists(self, run_id: str) -> bool:
@@ -828,9 +826,9 @@ class ContextInjector:
     """
 
     def __init__(self):
-        self._providers: list["ContextProvider"] = []
+        self._providers: list[ContextProvider] = []
 
-    def register_provider(self, provider: "ContextProvider") -> None:
+    def register_provider(self, provider: ContextProvider) -> None:
         self._providers.append(provider)
 
     def build(self, graph: WorkflowGraph, goal: GoalState) -> str:
@@ -915,9 +913,7 @@ class ContextProvider(ABC):
     """
 
     @abstractmethod
-    def provide(
-        self, graph: WorkflowGraph, goal: GoalState, entities: set[str]
-    ) -> Optional[str]: ...
+    def provide(self, graph: WorkflowGraph, goal: GoalState, entities: set[str]) -> str | None: ...
 
 
 # ==============================================================================
@@ -963,7 +959,7 @@ class ConditionEvaluator:
     # bare "attr OP value" – entity implied from preceding clause
     _BARE_OP = re.compile(r"^(\w+)\s*([><=!]+)\s*([^\s,]+)", re.I)
 
-    def evaluate(self, graph: "WorkflowGraph") -> None:
+    def evaluate(self, graph: WorkflowGraph) -> None:
         """
         Evaluate all conditions in ``graph.ast.conditions`` and apply
         any whose predicates are currently satisfied.
@@ -983,10 +979,10 @@ class ConditionEvaluator:
     # Internals
     # ------------------------------------------------------------------
 
-    def _eval_expr(self, expr: str, graph: "WorkflowGraph") -> bool:
+    def _eval_expr(self, expr: str, graph: WorkflowGraph) -> bool:
         """Split on ' and ', evaluate each clause; all must be true."""
         clauses = re.split(r"\s+and\s+", expr, flags=re.I)
-        last_entity: Optional[str] = None
+        last_entity: str | None = None
         for raw_clause in clauses:
             clause = raw_clause.strip()
             result, last_entity = self._eval_clause(clause, last_entity, graph)
@@ -997,9 +993,9 @@ class ConditionEvaluator:
     def _eval_clause(
         self,
         clause: str,
-        last_entity: Optional[str],
-        graph: "WorkflowGraph",
-    ) -> tuple[bool, Optional[str]]:
+        last_entity: str | None,
+        graph: WorkflowGraph,
+    ) -> tuple[bool, str | None]:
         """
         Evaluate a single clause.  Returns (result, entity_name_seen).
         ``last_entity`` is passed in so bare "attr OP value" clauses can
@@ -1032,7 +1028,7 @@ class ConditionEvaluator:
 
     def _check_attr(
         self,
-        graph: "WorkflowGraph",
+        graph: WorkflowGraph,
         entity: str,
         attr: str,
         op: str,
@@ -1073,7 +1069,7 @@ class ConditionEvaluator:
         except (TypeError, ValueError):
             return fn(str(a), str(b))
 
-    def _apply_action(self, action: str, graph: "WorkflowGraph") -> None:
+    def _apply_action(self, action: str, graph: WorkflowGraph) -> None:
         """
         Apply a condition's ``then ensure <action>`` to the graph.
         Currently handles: ``Entity is <predicate>``
@@ -1102,7 +1098,8 @@ class LLMRequest:
     max_tokens: int = 1024
     temperature: float = 0.0
     metadata: dict = _f(default_factory=dict)
-    timeout: Optional[float] = None  # per-call override; None → provider default
+    timeout: float | None = None  # per-call override; None → provider default
+    output_mode: str = "rl"  # "rl" | "json" — controls response format enforcement
 
 
 @_dc
@@ -1127,6 +1124,14 @@ class LLMProvider(ABC):
 
     @abstractmethod
     def supports_tool_calling(self) -> bool: ...
+
+    def supports_structured_output(self) -> bool:
+        """
+        Return True if this provider can enforce JSON schema output
+        (OpenAI json_schema mode, Anthropic tool_use, Gemini response_schema, Ollama format).
+        Override in concrete providers. Default: False (safe fallback to RL mode).
+        """
+        return False
 
     @property
     @abstractmethod
@@ -1192,9 +1197,24 @@ class OrchestratorConfig:
     max_iterations: int = 50  # Schutz vor Endlosschleifen
     pause_on_error: bool = False  # Workflow bei Fehler anhalten?
     auto_save_state: bool = True  # Nach jedem Step State speichern?
+
+    # Output mode: how the LLM is asked to respond.
+    # "auto"  → use "json" if provider.supports_structured_output(), else "rl"
+    # "json"  → enforce JSON schema output (reliable, schema-validated)
+    # "rl"    → ask for RelateLang text output (legacy, regex fallback)
+    output_mode: str = "auto"
+
     system_preamble: str = (
         "You are a RelateLang workflow executor. "
         "Interpret the following structured prompt and respond in RelateLang format."
+    )
+    system_preamble_json: str = (
+        "You are a RelateLang workflow executor. "
+        "Interpret the RelateLang context and respond ONLY with a valid JSON object — "
+        "no prose, no markdown, no text outside the JSON. "
+        'Required schema: {"attributes": [{"entity": "...", "name": "...", "value": ...}], '
+        '"predicates": [{"entity": "...", "value": "..."}], "reasoning": "..."}. '
+        "Use `reasoning` for chain-of-thought. Leave arrays empty if nothing applies."
     )
 
 
@@ -1202,10 +1222,10 @@ class OrchestratorConfig:
 class StepResult:
     goal_expr: str
     status: GoalStatus
-    llm_request: Optional[LLMRequest] = None
-    llm_response: Optional[LLMResponse] = None
-    tool_response: Optional[ToolResponse] = None
-    error: Optional[str] = None
+    llm_request: LLMRequest | None = None
+    llm_response: LLMResponse | None = None
+    tool_response: ToolResponse | None = None
+    error: str | None = None
 
 
 @_dc3
@@ -1214,7 +1234,7 @@ class RunResult:
     success: bool
     steps: list[StepResult] = _f3(default_factory=list)
     snapshot: dict = _f3(default_factory=dict)
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class Orchestrator:
@@ -1248,11 +1268,11 @@ class Orchestrator:
     def __init__(
         self,
         llm_provider: LLMProvider,
-        tools: Optional[list[ToolProvider]] = None,
-        config: Optional[OrchestratorConfig] = None,
-        bus: Optional[EventBus] = None,
-        state_manager: Optional[StateManager] = None,
-        injector: Optional[ContextInjector] = None,
+        tools: list[ToolProvider] | None = None,
+        config: OrchestratorConfig | None = None,
+        bus: EventBus | None = None,
+        state_manager: StateManager | None = None,
+        injector: ContextInjector | None = None,
     ):
         self.llm_provider = llm_provider
         self.tools = {t.name: t for t in (tools or [])}
@@ -1264,7 +1284,7 @@ class Orchestrator:
         # Standard-Logging über Event Bus
         self.bus.subscribe("*", lambda e: logger.debug("EVENT %s: %s", e.name, e.payload))
 
-    def run(self, ast: WorkflowAST, run_id: Optional[str] = None) -> RunResult:
+    def run(self, ast: WorkflowAST, run_id: str | None = None) -> RunResult:
         """
         Führt einen vollständigen Workflow aus.
         Gibt RunResult mit allen Steps zurück.
@@ -1343,14 +1363,23 @@ class Orchestrator:
     def _execute_llm_step(self, graph: WorkflowGraph, goal: GoalState, run_id: str) -> StepResult:
 
         context = self.injector.build(graph, goal)
+
+        # ── Resolve output mode ───────────────────────────────────────────────
+        mode = self.config.output_mode
+        if mode == "auto":
+            mode = "json" if self.llm_provider.supports_structured_output() else "rl"
+
+        system = self.config.system_preamble_json if mode == "json" else self.config.system_preamble
+
         request = LLMRequest(
             prompt=context,
-            system=self.config.system_preamble,
+            system=system,
+            output_mode=mode,
         )
 
         try:
             response = self.llm_provider.complete(request)
-            self._integrate_response(graph, response)
+            self._integrate_response(graph, response, mode)
             graph.mark_goal(goal, GoalStatus.ACHIEVED, response.content)
 
             self.bus.publish(
@@ -1359,6 +1388,7 @@ class Orchestrator:
                     {
                         "run_id": run_id,
                         "goal": goal.goal.goal_expr,
+                        "output_mode": mode,
                         "response": response.content[:200],
                     },
                 )
@@ -1437,7 +1467,7 @@ class Orchestrator:
                 error=str(e),
             )
 
-    def _route_tool(self, goal_expr: str) -> Optional[ToolProvider]:
+    def _route_tool(self, goal_expr: str) -> ToolProvider | None:
         """
         Best-match keyword routing: the tool whose longest matching trigger
         keyword wins.  Longer phrases are more specific, so "run lua
@@ -1445,7 +1475,7 @@ class Orchestrator:
         CodeRunnerTool even if CodeRunnerTool is registered first.
         """
         goal_lower = goal_expr.lower()
-        best_tool: Optional[ToolProvider] = None
+        best_tool: ToolProvider | None = None
         best_len: int = 0
 
         for tool in self.tools.values():
@@ -1456,28 +1486,39 @@ class Orchestrator:
 
         return best_tool
 
-    def _integrate_response(self, graph: WorkflowGraph, response: LLMResponse) -> None:
+    def _integrate_response(
+        self, graph: WorkflowGraph, response: LLMResponse, output_mode: str = "rl"
+    ) -> None:
         """
-        Parse the LLM response and apply any RelateLang state updates to the graph.
+        Parse the LLM response and apply any state updates to the graph.
 
-        Three-tier strategy
-        -------------------
-        1. Strip markdown code fences (```rl ... ``` / ``` ... ```) and attempt a
-           full RLParser parse on the cleaned text.
-        2. Fall back to a full parse of the raw content (handles responses that are
-           already clean RL but may have leading/trailing whitespace).
-        3. Last resort: regex-based line-by-line extraction of attribute and
-           predicate statements from mixed prose + RL responses.
+        Dual-mode strategy
+        ------------------
+        JSON mode (output_mode="json"):
+            1. Parse structured JSON response (from tool_calls or content).
+            2. On JSON parse failure → fall through to RL parse as safety net.
 
-        Errors are logged at DEBUG level and never raised — a response that
-        contains no RL is valid (the LLM may return a reasoning explanation
-        without any state updates).
+        RL mode (output_mode="rl"):
+            1. Strip markdown code fences and attempt a full RLParser parse.
+            2. Fall back to a full parse of the raw content.
+            3. Last resort: regex-based line-by-line extraction.
+
+        The audit snapshot is always updated with RL-style statements regardless
+        of which path succeeded — JSON deltas are re-emitted as RL for the trail.
         """
+        if output_mode == "json":
+            if self._integrate_json_response(graph, response):
+                return
+            # JSON parse failed (model misbehaved) → fall through to RL fallback
+            logger.warning(
+                "_integrate_response: JSON mode parse failed; falling back to RL extraction"
+            )
+
+        # ── RL parse path (legacy + fallback) ────────────────────────────────
         content = response.content
         if not content or not content.strip():
             return
 
-        # ── 1 & 2: full RL parse (with and without markdown fence stripping) ──
         candidates = [
             re.sub(r"```[a-zA-Z]*\n?", "", content).strip(),  # fences stripped
             content.strip(),  # raw
@@ -1499,11 +1540,11 @@ class Orchestrator:
                         "_integrate_response: applied %d RL update(s) via full parse",
                         updates,
                     )
-                return  # parse succeeded (even if no updates – that is valid)
+                return
             except ParseError:
                 continue
 
-        # ── 3: regex fallback for mixed prose + RL responses ─────────────────
+        # ── Regex fallback ────────────────────────────────────────────────────
         _attr_re = re.compile(
             r'^(\w+)\s+has\s+(\w+)\s+of\s+"?([^".\n]+)"?\s*\.',
             re.IGNORECASE | re.MULTILINE,
@@ -1548,6 +1589,70 @@ class Orchestrator:
                 "(prose-only response — no graph updates)"
             )
 
+    def _integrate_json_response(self, graph: WorkflowGraph, response: LLMResponse) -> bool:
+        """
+        Parse a structured JSON response and apply attribute/predicate deltas to the graph.
+
+        Handles two JSON sources:
+        - response.tool_calls  → Anthropic tool_use (rof_graph_update tool)
+        - response.content     → OpenAI json_schema / Gemini / Ollama format field
+
+        Returns True if at least one valid JSON object was found and applied,
+        False if parsing failed entirely (caller should fall back to RL mode).
+        """
+        import json as _json
+
+        data: dict | None = None
+
+        # ── Source 1: Anthropic tool_use ─────────────────────────────────────
+        if response.tool_calls:
+            for tc in response.tool_calls:
+                if tc.get("name") == "rof_graph_update":
+                    data = tc.get("arguments") or {}
+                    break
+
+        # ── Source 2: JSON in content (OpenAI json_schema / Gemini / Ollama) ─
+        if data is None and response.content:
+            raw = response.content.strip()
+            # Strip markdown fences if present
+            raw = re.sub(r"```[a-zA-Z]*\n?", "", raw).strip()
+            # Extract first {...} block in case of leading/trailing text
+            m = re.search(r"\{.*\}", raw, re.DOTALL)
+            if m:
+                raw = m.group(0)
+            try:
+                data = _json.loads(raw)
+            except (_json.JSONDecodeError, ValueError) as exc:
+                logger.debug("_integrate_json_response: JSON parse failed: %s", exc)
+                return False
+
+        if not data:
+            return False
+
+        updates = 0
+        for attr in data.get("attributes", []):
+            entity = attr.get("entity", "").strip()
+            name = attr.get("name", "").strip()
+            value = attr.get("value")
+            if entity and name and value is not None:
+                graph.set_attribute(entity, name, value)
+                updates += 1
+
+        for pred in data.get("predicates", []):
+            entity = pred.get("entity", "").strip()
+            value = pred.get("value", "").strip()
+            if entity and value:
+                graph.add_predicate(entity, value)
+                updates += 1
+
+        reasoning = data.get("reasoning", "")
+        logger.debug(
+            "_integrate_json_response: applied %d update(s). reasoning=%r",
+            updates,
+            reasoning[:120] if reasoning else "",
+        )
+        return True  # success even if updates==0 (valid empty response is allowed)
+
 
 # ==============================================================================
 # rof/lint.py
@@ -1572,9 +1677,9 @@ class LintIssue:
     def __str__(self) -> str:
         loc = f"line {self.line}: " if self.line else ""
         sev = {
-            Severity.ERROR: f"error",
-            Severity.WARNING: f"warning",
-            Severity.INFO: f"info",
+            Severity.ERROR: "error",
+            Severity.WARNING: "warning",
+            Severity.INFO: "info",
         }[self.severity]
         return f"  [{sev}] {loc}{self.message}  ({self.code})"
 
@@ -1909,6 +2014,6 @@ if __name__ == "__main__":
 
     print(f"\nRun {'✓ SUCCESS' if result.success else '✗ FAILED'} (run_id={result.run_id[:8]}...)")
     print(f"Steps: {len(result.steps)}")
-    print(f"\nFinal State:")
+    print("\nFinal State:")
     for name, e in result.snapshot["entities"].items():
         print(f"  {name}: attrs={e['attributes']} preds={e['predicates']}")
