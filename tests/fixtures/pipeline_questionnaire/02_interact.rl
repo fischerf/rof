@@ -32,4 +32,4 @@ define HumanResponses  as "The answers provided by the human during the question
 if Questionnaire has question_count > 0,
     then ensure Questionnaire is ready_to_run.
 
-ensure run Lua questionnaire interactively and collect HumanResponses.
+ensure run lua questionnaire interactively and collect HumanResponses.
