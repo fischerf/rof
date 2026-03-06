@@ -17,6 +17,7 @@ TEST_DOMAINS = {
     "lint": "test_lint.py",
     "llm": "test_llm_providers.py",
     "tools": "test_tools_registry.py",
+    "passthrough": "test_tool_output_graph_passthrough.py",
     "pipeline": "test_pipeline_runner.py",
     "routing": "test_routing.py",
     "all": "./",
@@ -70,10 +71,11 @@ Available domains:
   cli      - CLI tests
   lint     - Linter tests
   llm      - LLM provider tests
-  tools    - Tools and registry tests
-  pipeline - Pipeline orchestration tests
-  routing  - Learned routing confidence tests
-  all      - All tests
+  tools       - Tools and registry tests
+  passthrough - Tool output entity-keyed contract & graph passthrough tests
+  pipeline    - Pipeline orchestration tests
+  routing     - Learned routing confidence tests
+  all         - All tests
         """,
     )
 

@@ -317,9 +317,12 @@ class TestWebSearchTool:
         with patch.object(t, "_search", return_value=[]):
             resp = t.execute(ToolRequest(name="WebSearchTool", goal="search web for ROF"))
         assert resp.success
-        assert "query" in resp.output
-        assert "results" in resp.output
-        assert "rl_context" in resp.output
+        # Output is entity-keyed: top-level key is the summary entity
+        assert "WebSearchResults" in resp.output
+        summary = resp.output["WebSearchResults"]
+        assert "query" in summary
+        assert "result_count" in summary
+        assert "rl_context" in summary
 
     def test_search_exception_returns_failure(self):
         t = WebSearchTool()
@@ -502,8 +505,13 @@ class TestAPICallTool:
                 )
             )
         assert resp.success
-        assert resp.output["status_code"] == 200
-        assert resp.output["body"] == {"ok": True}
+        # Output is entity-keyed: attributes live under the "APICallResult" entity
+        assert "APICallResult" in resp.output
+        entity = resp.output["APICallResult"]
+        assert entity["status_code"] == 200
+        import json
+
+        assert json.loads(entity["body"]) == {"ok": True}
 
     def test_http_error_status(self):
         import types
@@ -610,9 +618,12 @@ class TestAPICallTool:
                     input={"url": "https://api.example.com/"},
                 )
             )
-        assert "status_code" in resp.output
-        assert "body" in resp.output
-        assert "elapsed_ms" in resp.output
+        # Output is entity-keyed: attributes live under the "APICallResult" entity
+        assert "APICallResult" in resp.output
+        entity = resp.output["APICallResult"]
+        assert "status_code" in entity
+        assert "body" in entity
+        assert "elapsed_ms" in entity
 
 
 # ===========================================================================
@@ -1103,16 +1114,25 @@ class TestRAGTool:
             )
         )
         assert resp.success
-        assert "documents" in resp.output
-        assert len(resp.output["documents"]) > 0
+        # Output is entity-keyed: summary in "RAGResults", docs in "KnowledgeDoc1"…N
+        assert "RAGResults" in resp.output
+        result_count = resp.output["RAGResults"]["result_count"]
+        assert result_count > 0
+        assert "KnowledgeDoc1" in resp.output
 
     def test_output_keys_present(self):
         t = RAGTool(backend="in_memory")
         t.add_documents([{"id": "x", "text": "some document text about databases."}])
         resp = t.execute(ToolRequest(name="RAGTool", goal="retrieve information about databases"))
-        assert "query" in resp.output
-        assert "documents" in resp.output
-        assert "rl_context" in resp.output
+        # Output is entity-keyed: summary entity holds query/result_count/rl_context
+        assert "RAGResults" in resp.output
+        summary = resp.output["RAGResults"]
+        assert "query" in summary
+        assert "result_count" in summary
+        assert "rl_context" in summary
+        # Individual document entities must also be present
+        assert "KnowledgeDoc1" in resp.output
+        assert "text" in resp.output["KnowledgeDoc1"]
 
     def test_query_override_via_input(self):
         t = RAGTool(backend="in_memory")
@@ -1125,7 +1145,8 @@ class TestRAGTool:
             )
         )
         assert resp.success
-        assert resp.output["query"] == "yellow tropical fruits"
+        # query lives inside the "RAGResults" summary entity
+        assert resp.output["RAGResults"]["query"] == "yellow tropical fruits"
 
     def test_top_k_limits_results(self):
         t = RAGTool(backend="in_memory", top_k=2)
@@ -1143,13 +1164,22 @@ class TestRAGTool:
             )
         )
         assert resp.success
-        assert len(resp.output["documents"]) <= 2
+        # result_count in the summary entity must respect the top_k limit
+        result_count = resp.output["RAGResults"]["result_count"]
+        assert result_count <= 2
+        # And the number of KnowledgeDocN entities must match
+        doc_entities = [k for k in resp.output if k.startswith("KnowledgeDoc")]
+        assert len(doc_entities) <= 2
 
     def test_empty_corpus_returns_success_no_docs(self):
         t = RAGTool(backend="in_memory")
         resp = t.execute(ToolRequest(name="RAGTool", goal="retrieve information about anything"))
         assert resp.success
-        assert resp.output["documents"] == []
+        # With an empty corpus, result_count must be 0 and no KnowledgeDocN entities present
+        assert "RAGResults" in resp.output
+        assert resp.output["RAGResults"]["result_count"] == 0
+        doc_entities = [k for k in resp.output if k.startswith("KnowledgeDoc")]
+        assert doc_entities == []
 
 
 # ===========================================================================

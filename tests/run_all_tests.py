@@ -157,6 +157,13 @@ def main():
             ],
         ),
         TestDomain(
+            name="Tool Output & Graph Passthrough",
+            description="Tests that tool outputs are entity-keyed dicts, written into the WorkflowGraph, and forwarded to downstream tools via ToolRequest.input (WebSearchTool → AICodeGenTool / FileSaveTool pipeline contract)",
+            test_files=[
+                "test_tool_output_graph_passthrough.py",
+            ],
+        ),
+        TestDomain(
             name="Pipeline",
             description="Tests for multi-stage pipeline orchestration",
             test_files=[

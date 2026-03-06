@@ -454,13 +454,26 @@ class WebSearchTool(ToolProvider):
         max_results   – default 5
 
     Output (ToolResponse.output):
-        dict with keys: query, results (list of dicts), rl_context (str)
+        Entity-keyed dict consumed directly by Orchestrator._execute_tool_step.
+        Every value is a plain attribute dict so graph.set_attribute() stores it
+        and every subsequent tool in the same run receives it via request.input:
+
+          "WebSearchResults" → {query, result_count, rl_context}
+              Summary entity.  rl_context is a multi-line RL attribute block
+              ready for ContextInjector to embed in the next LLM prompt.
+
+          "SearchResult1" … "SearchResultN" → {title, url, snippet}
+              One entity per hit so downstream tools (AICodeGenTool,
+              FileSaveTool, …) can iterate, filter, or embed each result.
 
     Usage:
         tool = WebSearchTool()
         resp = tool.execute(ToolRequest(name="WebSearchTool",
                                         goal="retrieve web_information about Python 3.13"))
-        print(resp.output["rl_context"])
+        # top-level summary entity
+        print(resp.output["WebSearchResults"]["rl_context"])
+        # individual hit
+        print(resp.output["SearchResult1"]["url"])
     """
 
     def __init__(
@@ -501,14 +514,30 @@ class WebSearchTool(ToolProvider):
         try:
             results = self._search(query, max_r)
             rl_context = "\n\n".join(r.to_rl(i + 1) for i, r in enumerate(results))
-            return ToolResponse(
-                success=True,
-                output={
+
+            # Build an entity-keyed output dict so Orchestrator._execute_tool_step
+            # writes every result into the WorkflowGraph via set_attribute().
+            #
+            # The previous flat layout {"query": str, "results": list, "rl_context": str}
+            # was silently discarded: _execute_tool_step only stores values where
+            # isinstance(attrs, dict) is True, so strings and lists were never
+            # written to the graph — search results were invisible to every
+            # subsequent tool (AICodeGenTool, FileSaveTool, …).
+            output: dict = {
+                "WebSearchResults": {
                     "query": query,
-                    "results": [r.__dict__ for r in results],
+                    "result_count": len(results),
                     "rl_context": rl_context,
                 },
-            )
+            }
+            for i, r in enumerate(results, start=1):
+                output[f"SearchResult{i}"] = {
+                    "title": r.title,
+                    "url": r.url,
+                    "snippet": r.snippet,
+                }
+
+            return ToolResponse(success=True, output=output)
         except Exception as e:
             logger.error("WebSearchTool failed: %s", e)
             return ToolResponse(success=False, error=str(e))
@@ -527,6 +556,8 @@ class WebSearchTool(ToolProvider):
                     continue
             logger.warning("All backends failed; returning mock results.")
             return self._mock_results(query)
+        if backend == "mock":
+            return self._mock_results(query)
         return self._call_backend(backend, query, max_results)
 
     def _call_backend(self, backend: str, query: str, max_results: int) -> list[SearchResult]:
@@ -536,6 +567,8 @@ class WebSearchTool(ToolProvider):
             return self._serpapi(query, max_results)
         if backend == "brave":
             return self._brave(query, max_results)
+        if backend == "mock":
+            return self._mock_results(query)
         raise ValueError(f"Unknown backend: {backend}")
 
     def _ddg(self, query: str, max_results: int) -> list[SearchResult]:
@@ -649,7 +682,11 @@ class RAGTool(ToolProvider):
         top_k      – number of results (default: 3)
 
     Output (ToolResponse.output):
-        dict with keys: query, documents (list of dicts), rl_context (str)
+        Entity-keyed dict so Orchestrator._execute_tool_step writes every
+        result into the WorkflowGraph and downstream tools receive it:
+
+          "RAGResults"       → {query, result_count, rl_context}
+          "KnowledgeDoc1"…N  → {text, relevance_score, …extra metadata}
 
     Usage:
         rag = RAGTool(backend="in_memory")
@@ -720,6 +757,8 @@ class RAGTool(ToolProvider):
         try:
             results = self._query(query, top_k)
             rl_lines: list[str] = []
+            output: dict = {}
+
             for i, doc in enumerate(results):
                 ent = f"KnowledgeDoc{i + 1}"
                 rl_lines.append(f'define {ent} as "Retrieved document {i + 1}".')
@@ -730,14 +769,24 @@ class RAGTool(ToolProvider):
                     if k not in ("text", "id", "score") and isinstance(v, (str, int, float)):
                         rl_lines.append(f'{ent} has {k} of "{v}".')
 
-            return ToolResponse(
-                success=True,
-                output={
-                    "query": query,
-                    "documents": results,
-                    "rl_context": "\n".join(rl_lines),
-                },
-            )
+                # Write each document as its own entity dict so set_attribute()
+                # stores it in the graph (plain dicts only — lists are dropped).
+                entity_attrs: dict = {"text": doc["text"][:300]}
+                if "score" in doc:
+                    entity_attrs["relevance_score"] = round(doc["score"], 3)
+                for k, v in doc.items():
+                    if k not in ("text", "id", "score") and isinstance(v, (str, int, float)):
+                        entity_attrs[k] = v
+                output[ent] = entity_attrs
+
+            rl_context = "\n".join(rl_lines)
+            output["RAGResults"] = {
+                "query": query,
+                "result_count": len(results),
+                "rl_context": rl_context,
+            }
+
+            return ToolResponse(success=True, output=output)
         except Exception as e:
             logger.error("RAGTool failed: %s", e)
             return ToolResponse(success=False, error=str(e))
@@ -1216,13 +1265,20 @@ class APICallTool(ToolProvider):
             except Exception:
                 resp_body = resp.text
 
-            output = {
-                "status_code": resp.status_code,
-                "headers": dict(resp.headers),
-                "body": resp_body,
-                "elapsed_ms": elapsed_ms,
-            }
             success = 200 <= resp.status_code < 300
+            # Wrap in an entity dict so _execute_tool_step stores it in the graph.
+            # body may be a dict (JSON) or str (plain text); normalise to str so
+            # set_attribute() always receives a scalar and downstream tools can
+            # read it as an attribute without further unwrapping.
+            body_str = resp_body if isinstance(resp_body, str) else json.dumps(resp_body)
+            output = {
+                "APICallResult": {
+                    "status_code": resp.status_code,
+                    "body": body_str[:4000],  # guard against huge payloads
+                    "elapsed_ms": elapsed_ms,
+                    "success": success,
+                },
+            }
             return ToolResponse(
                 success=success,
                 output=output,
