@@ -3166,6 +3166,24 @@ class AICodeGenTool(ToolProvider):
     @property
     def trigger_keywords(self) -> list[str]:
         return [
+            # Longest / most specific phrases first — the router picks the
+            # longest matching keyword, so these must be longer than any
+            # competing keyword in WebSearchTool or other tools.
+            "generate python code",
+            "generate python script",
+            "generate lua code",
+            "generate lua script",
+            "generate javascript code",
+            "generate js code",
+            "generate shell code",
+            "generate shell script",
+            "write python code",
+            "write python script",
+            "write lua code",
+            "write javascript code",
+            "create python code",
+            "create python script",
+            # Medium-specificity phrases
             "generate code",
             "write code",
             "implement code",
@@ -3175,11 +3193,11 @@ class AICodeGenTool(ToolProvider):
             "generate javascript",
             "generate js",
             "generate shell",
-            "implement",
             "generate script",
             "write script",
             "create script",
             "generate program",
+            "implement",
         ]
 
     def execute(self, request: ToolRequest) -> ToolResponse:
