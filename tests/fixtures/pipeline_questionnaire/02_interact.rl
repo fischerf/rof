@@ -1,35 +1,26 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// 02_interact.rl  –  Stage 2: Interactive Questionnaire Execution
+// 02_interact.rl  –  Stage 2: Interactive Lua Script Execution
 // ─────────────────────────────────────────────────────────────────────────────
-// inject_prior_context: true  →  Questionnaire.file_path arrives here
-// from Stage 1 automatically.
+// inject_prior_context: true  →  Script.file_path arrives here from Stage 1.
 //
 // ROUTING NOTE  (important for custom tool authors)
 // rof_core._route_tool iterates tools in insertion order and returns on the
 // FIRST keyword match — it is NOT a best-match scorer.  The goal phrase below
-// must be completely disjoint from any keyword registered on LuaSaveTool
-// (whose keywords are "save lua_script to file" and "generate questionnaire lua").
-// "run Lua questionnaire interactively" contains none of those words, so
+// must be completely disjoint from any keyword registered on FileSaveTool
+// (whose keywords are "save file" and "write file").
+// "run lua script interactively" contains none of those words, so
 // LuaRunTool wins cleanly.
 //
 // LuaRunTool intercepts the goal below.  It:
-//   1. Reads Questionnaire.file_path from snapshot (ToolRequest.input)
-//   2. Prepends a Lua preamble  – declares `answers` table + JSON encoder
-//   3. Appends a Lua epilogue   – serialises answers{} to /tmp/*.json
-//   4. Runs  lua <augmented.lua>  with stdin/stdout/stderr fully inherited
-//      so the human types answers directly in the terminal (no proxy)
-//   5. After process exits reads the JSON and writes every answer as
-//      HumanResponses.q_<key> into the snapshot
+//   1. Reads Script.file_path from the snapshot (ToolRequest.input)
+//   2. Runs  lua <file_path>  with stdin/stdout/stderr fully inherited
+//      so the user interacts with the script directly in the terminal
+//   3. Returns the file_path and process return_code into the snapshot
 //
 // Snapshot produced by this stage:
-//   HumanResponses.answer_count         total questions answered
-//   HumanResponses.q_<snake_key>        individual answer per question
-//   HumanResponses.raw_json             full JSON for the audit trail
+//   Script.file_path    path of the script that was run
+//   Script.return_code  process exit code
 
-define Questionnaire   as "An interactive CLI questionnaire that probes the respondent's knowledge on a topic".
-define HumanResponses  as "The answers provided by the human during the questionnaire".
+define Script as "A Lua script file to be executed interactively in the terminal".
 
-if Questionnaire has question_count > 0,
-    then ensure Questionnaire is ready_to_run.
-
-ensure run lua questionnaire interactively and collect HumanResponses.
+ensure run lua script interactively.

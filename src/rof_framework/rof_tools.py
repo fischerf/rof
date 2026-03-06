@@ -135,6 +135,7 @@ except ImportError:
         system: str = ""
         max_tokens: int = 256
         temperature: float = 0.7
+        output_mode: str = "raw"  # tools always produce free-form output, never RL/JSON
 
     @_dc
     class LLMResponse:  # type: ignore[no-redef]
@@ -2351,7 +2352,7 @@ class JavaScriptTool(ToolProvider):
         script: str,
         tool_name: str = "JavaScriptTool",
         description: str = "JavaScript tool",
-        trigger_keywords: Optional[list[str]] = None,
+        trigger_keywords: list[str] | None = None,
         timeout: float = 10.0,
     ):
         self._script = script
@@ -2364,11 +2365,11 @@ class JavaScriptTool(ToolProvider):
     def from_file(
         cls,
         path: str,
-        name: Optional[str] = None,
-        trigger: Optional[str] = None,
-        triggers: Optional[list[str]] = None,
+        name: str | None = None,
+        trigger: str | None = None,
+        triggers: list[str] | None = None,
         timeout: float = 10.0,
-    ) -> "JavaScriptTool":
+    ) -> JavaScriptTool:
         p = Path(path)
         return cls(
             script=p.read_text(encoding="utf-8"),
@@ -2413,200 +2414,109 @@ class JavaScriptTool(ToolProvider):
 
 
 # ===========================================================================
-# rof_tools/tools/lua_questionnaire.py
-# LuaSaveTool + LuaRunTool  –  dedicated tools for the questionnaire pipeline
+# FileSaveTool + LuaRunTool
 # ===========================================================================
 
 
-class LuaSaveTool(ToolProvider):
+class FileSaveTool(ToolProvider):
     """
-    Stage-1 tool: calls the injected LLM provider to generate a Lua
-    questionnaire script, wraps it with an answer-capture preamble and
-    JSON-serialisation epilogue, saves the augmented script to the OS
-    temp directory, and writes ``Questionnaire.file_path``
-    (+ ``answers_json_path``) into the snapshot so Stage 2 can locate
-    both files.
+    Saves arbitrary text content to a file.
 
-    Trigger keywords: ``"save lua_script to file"``,
-                      ``"generate questionnaire lua"``
+    The file path (including extension) is provided directly in the snapshot —
+    no assumptions are made about the content type or extension.  No LLM call
+    is made by this tool.
 
-    Constructor args:
-        llm_provider:  Any object with a ``.complete(LLMRequest) -> LLMResponse``
-                       method (rof_llm.OllamaProvider / AnthropicProvider / …).
+    Trigger keywords: ``"save file"``, ``"write file"``
+
+    Input (any snapshot entity):
+        file_path (str)   – destination path; if omitted a temp file is created
+        content   (str)   – text to write  *(required)*
+        encoding  (str)   – file encoding (default ``"utf-8"``)
+
+    Output:
+        file_path   (str)  – absolute path of the written file
+        bytes_written (int) – number of bytes written
     """
 
-    _TRIGGER_KEYWORDS = ["save lua_script to file", "generate questionnaire lua"]
+    _TRIGGER_KEYWORDS = ["save file", "write file"]
 
-    # Strict system prompt — keeps LLMs from wrapping output in markdown
-    # fences, re-declaring `answers`, or adding require() calls.
-    _CODEGEN_SYSTEM = (
-        "You are an expert Lua programmer writing an interactive CLI questionnaire.\n\n"
-        "STRICT OUTPUT RULES — violations break the pipeline:\n"
-        "1. Output ONLY Lua source code. No markdown fences. No prose. No explanation.\n"
-        '2. First line must be:   io.stdout:setvbuf("no")\n'
-        "3. The global table `answers` is pre-declared — just write to it:\n"
-        '       answers["q1"] = io.read()\n'
-        "4. For every question use EXACTLY this pattern:\n"
-        '       io.write("Your question here? ")\n'
-        "       io.flush()\n"
-        '       answers["q1"] = io.read()\n'
-        "5. Do NOT add json encoding, file I/O, or require() calls — appended automatically.\n"
-        "6. Do NOT re-declare `answers` — it is already declared.\n"
-        "7. Use io.write() for prompts (not print), always followed by io.flush().\n"
-        '8. Print a welcome header and a closing "Thank you!" line.\n'
-        "9. The script must run with vanilla Lua 5.x — no require(), no external libs.\n"
-        "10. Use simple keys q1, q2, … qN only.  Keep prompts under 80 characters.\n"
-    )
-
-    def __init__(self, llm_provider: Any) -> None:
-        self._llm = llm_provider
-
-    # ── ToolProvider interface ─────────────────────────────────────────────
+    def __init__(self) -> None:
+        pass
 
     @property
     def name(self) -> str:
-        return "LuaSaveTool"
+        return "FileSaveTool"
 
     @property
     def trigger_keywords(self) -> list[str]:
         return self._TRIGGER_KEYWORDS
 
     def execute(self, request: ToolRequest) -> ToolResponse:
-        # ── 1. Extract questionnaire parameters from snapshot ─────────────
-        q_attrs: dict = {}
-        for entity_name, entity_data in request.input.items():
-            if "questionnaire" in entity_name.lower():
-                if isinstance(entity_data, dict):
-                    q_attrs = {k: v for k, v in entity_data.items() if not k.startswith("__")}
+        # ── 1. Extract attributes from any matching snapshot entity ───────
+        attrs: dict = {}
+        for entity_data in request.input.values():
+            if isinstance(entity_data, dict) and "content" in entity_data:
+                attrs = {k: v for k, v in entity_data.items() if not k.startswith("__")}
                 break
 
-        topic = q_attrs.get("topic", "general knowledge")
-        question_count = q_attrs.get("question_count", 5)
-        difficulty = q_attrs.get("difficulty", "intermediate")
-        target_runtime = q_attrs.get("target_runtime", "Lua 5.x")
-
-        # ── 2. Ask the LLM to generate the questionnaire body ─────────────
-        prompt = (
-            f'Write a {difficulty} {target_runtime} CLI questionnaire on "{topic}".\n'
-            f"Include exactly {question_count} questions.\n"
-            "Mix question types: factual, conceptual, practical, one open-ended.\n"
-            "Output the Lua code now:"
-        )
-
-        try:
-            # Import LLMRequest lazily so rof_llm is optional at module level
-            try:
-                from .rof_llm import LLMRequest  # type: ignore
-            except ImportError:
-                from .rof_core import LLMRequest  # type: ignore
-
-            resp = self._llm.complete(
-                LLMRequest(
-                    system=self._CODEGEN_SYSTEM,
-                    prompt=prompt,
-                    max_tokens=2048,
-                    temperature=0.2,
-                )
-            )
-            raw_lua = resp.content.strip()
-        except Exception as exc:
-            return ToolResponse(success=False, error=f"LLM call failed: {exc}")
-
-        # Strip markdown fences if the LLM ignored instructions
-        import re as _re
-
-        for pat in (r"```lua\s*\n(.*?)```", r"```\s*\n(.*?)```"):
-            m = _re.search(pat, raw_lua, _re.DOTALL)
-            if m:
-                raw_lua = m.group(1).strip()
-                break
-        else:
-            raw_lua = re.sub(r"^```[a-z]*\n?", "", raw_lua, flags=re.MULTILINE)
-            raw_lua = re.sub(r"\n?```$", "", raw_lua, flags=re.MULTILINE)
-            raw_lua = raw_lua.strip()
-
-        if len(raw_lua) < 30:
+        content: str = str(attrs.get("content", ""))
+        if not content:
             return ToolResponse(
                 success=False,
-                error=f"LLM returned no usable Lua code. Snippet: {raw_lua[:200]!r}",
+                error="FileSaveTool: no 'content' attribute found in the snapshot.",
             )
 
-        # Strip any setvbuf the LLM emitted — preamble provides it
-        raw_lua = re.sub(r"^\s*io\.stdout:setvbuf\([^)]*\)\s*\n", "", raw_lua, flags=re.MULTILINE)
+        encoding: str = attrs.get("encoding", "utf-8")
 
-        # ── 3. Wrap with preamble + epilogue ──────────────────────────────
-        uid = uuid.uuid4().hex[:12]
-        tmp_dir = Path(tempfile.gettempdir())
+        # ── 2. Resolve destination path ───────────────────────────────────
+        file_path_str: str = attrs.get("file_path", "")
+        if file_path_str:
+            dest = Path(file_path_str)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            # No path supplied — create a temp file preserving any extension hint
+            suffix = Path(attrs.get("file_name", "output.txt")).suffix or ".txt"
+            tmp_fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+            os.close(tmp_fd)
+            dest = Path(tmp_path)
 
-        # Use forward slashes in the Lua path string — Lua handles them on Windows too
-        answers_path = (tmp_dir / f"questionnaire_answers_{uid}.json").as_posix()
-        safe_ans_path = answers_path.replace("\\", "\\\\")
-
-        preamble = textwrap.dedent("""\
-            -- ROF preamble: initialise answers table
-            io.stdout:setvbuf("no")
-            io.stderr:setvbuf("no")
-            answers = {}
-        """)
-
-        epilogue = textwrap.dedent(f"""\
-
-            -- ROF epilogue: serialise answers to JSON
-            local function _rof_json_encode(t)
-                local parts = {{}}
-                for k, v in pairs(t) do
-                    local key = tostring(k):gsub('"', '\\\\"')
-                    local val = tostring(v):gsub('\\\\', '\\\\\\\\'):gsub('"', '\\\\"')
-                    parts[#parts + 1] = '"' .. key .. '":"' .. val .. '"'
-                end
-                return '{{' .. table.concat(parts, ',') .. '}}'
-            end
-            local _rof_f = io.open("{safe_ans_path}", "w")
-            if _rof_f then
-                _rof_f:write(_rof_json_encode(answers))
-                _rof_f:close()
-            else
-                io.stderr:write("ROF: cannot write answers to {safe_ans_path}\\n")
-            end
-        """)
-
-        augmented_lua = preamble + "\n" + raw_lua + "\n" + epilogue
-
-        # ── 4. Save to the OS temp directory (cross-platform) ─────────────
-        script_path = str(tmp_dir / f"questionnaire_{uid}.lua")
+        # ── 3. Write ───────────────────────────────────────────────────────
         try:
-            with open(script_path, "w", encoding="utf-8") as fh:
-                fh.write(augmented_lua)
+            dest.write_text(content, encoding=encoding)
         except OSError as exc:
-            return ToolResponse(success=False, error=f"Could not save script: {exc}")
+            return ToolResponse(success=False, error=f"FileSaveTool: could not write file: {exc}")
 
-        logger.info("LuaSaveTool: script saved → %s", script_path)
+        bytes_written = dest.stat().st_size
+        logger.info("FileSaveTool: wrote %d bytes → %s", bytes_written, dest)
 
-        # ── 5. Return snapshot delta ──────────────────────────────────────
         return ToolResponse(
             success=True,
             output={
-                "Questionnaire": {
-                    "file_path": script_path,
-                    "answers_json_path": answers_path,
-                    "script_lines": augmented_lua.count("\n") + 1,
-                    "uid": uid,
-                },
+                "file_path": str(dest),
+                "bytes_written": bytes_written,
             },
         )
 
 
 class LuaRunTool(ToolProvider):
     """
-    Stage-2 tool: runs the saved Lua questionnaire script interactively in
-    the current terminal (stdin / stdout / stderr fully inherited), then
-    reads the answers JSON written by the script epilogue and injects every
-    answer as a ``HumanResponses`` attribute into the snapshot.
+    Runs a Lua script interactively in the current terminal.
 
-    Trigger keywords: ``"run lua questionnaire interactively"``
+    stdin, stdout, and stderr are fully inherited from the parent process so
+    the user can interact with the script directly.  On Windows the script is
+    launched in a new console window to ensure a proper interactive TTY.
+
+    Trigger keywords: ``"run lua script"``, ``"run lua interactively"``
+
+    Input (any snapshot entity):
+        file_path (str)  – path to the ``.lua`` file to execute  *(required)*
+
+    Output:
+        file_path    (str) – path of the script that was run
+        return_code  (int) – process exit code
     """
 
-    _TRIGGER_KEYWORDS = ["run lua questionnaire interactively"]
+    _TRIGGER_KEYWORDS = ["run lua script", "run lua interactively"]
 
     @property
     def name(self) -> str:
@@ -2617,41 +2527,21 @@ class LuaRunTool(ToolProvider):
         return self._TRIGGER_KEYWORDS
 
     def execute(self, request: ToolRequest) -> ToolResponse:
-        # ── 1. Locate the saved script ────────────────────────────────────
+        # ── 1. Locate the script path in the snapshot ─────────────────────
         script_path: Optional[str] = None
-        answers_json_path: Optional[str] = None
-
-        for entity_name, entity_data in request.input.items():
-            if "questionnaire" in entity_name.lower() and isinstance(entity_data, dict):
+        for entity_data in request.input.values():
+            if isinstance(entity_data, dict) and "file_path" in entity_data:
                 script_path = entity_data.get("file_path")
-                answers_json_path = entity_data.get("answers_json_path")
                 break
-
-        if not script_path:
-            # Fallback: scan the OS temp dir for the most recently written script
-            tmp_dir = Path(tempfile.gettempdir())
-            tmp_scripts = sorted(
-                tmp_dir.glob("questionnaire_*.lua"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            if tmp_scripts:
-                script_path = str(tmp_scripts[0])
-                uid = tmp_scripts[0].stem.replace("questionnaire_", "")
-                answers_json_path = str(tmp_dir / f"questionnaire_answers_{uid}.json")
 
         if not script_path or not Path(script_path).exists():
             return ToolResponse(
                 success=False,
                 error=(
-                    "LuaRunTool: Questionnaire.file_path not found in snapshot "
-                    "and no questionnaire_*.lua file exists in the temp directory. "
-                    "Run the generate stage first."
+                    "LuaRunTool: no valid 'file_path' found in the snapshot. "
+                    "Save the Lua script first and store its path as 'file_path'."
                 ),
             )
-
-        if not answers_json_path:
-            answers_json_path = script_path.replace(".lua", "_answers.json")
 
         # ── 2. Find a Lua binary ──────────────────────────────────────────
         lua_bin = None
@@ -2667,22 +2557,19 @@ class LuaRunTool(ToolProvider):
                     "No Lua runtime found. Install Lua:\n"
                     "  Ubuntu/Debian:  sudo apt install lua5.4\n"
                     "  macOS:          brew install lua\n"
-                    "  Windows:        https://luabinaries.sourceforge.net/\n"
-                    "  Or:             pip install lupa"
+                    "  Windows:        https://luabinaries.sourceforge.net/"
                 ),
             )
 
         # ── 3. Run interactively (full terminal inheritance) ──────────────
         print(f"\n{'─' * 60}")
-        print(f"  ROF: running Lua questionnaire  →  {script_path}")
+        print(f"  ROF: running Lua script  →  {script_path}")
         print(f"  Lua binary: {lua_bin}")
         print(f"{'─' * 60}\n")
 
         try:
             if os.name == "nt":
                 # On Windows open in a new console so Lua gets a real interactive TTY.
-                # Without this, stdin=None inside a Python process that was itself
-                # launched from a terminal may not be properly inherited by the child.
                 proc = subprocess.run(
                     [lua_bin, script_path],
                     creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
@@ -2700,38 +2587,20 @@ class LuaRunTool(ToolProvider):
         except Exception as exc:
             return ToolResponse(success=False, error=f"Lua process error: {exc}")
 
-        print(f"\n{'─' * 60}")
-        print("  ROF: questionnaire completed — reading answers …")
-        print(f"{'─' * 60}\n")
+        print(f"\n{'─' * 60}\n")
 
-        # ── 4. Read captured answers ──────────────────────────────────────
-        answers: dict = {}
-        answers_file = Path(answers_json_path)
-        if answers_file.exists():
-            try:
-                raw = answers_file.read_text(encoding="utf-8").strip()
-                answers = json.loads(raw) if raw else {}
-            except Exception as exc:
-                logger.warning("LuaRunTool: could not parse answers JSON: %s", exc)
-        else:
-            logger.warning("LuaRunTool: answers file not found: %s", answers_json_path)
-
-        if proc.returncode != 0 and not answers:
+        if proc.returncode != 0:
             return ToolResponse(
                 success=False,
-                error=f"Lua exited with code {proc.returncode} and no answers were captured.",
+                error=f"Lua exited with code {proc.returncode}.",
             )
-
-        # ── 5. Build snapshot delta ───────────────────────────────────────
-        human_responses: dict = {"answer_count": len(answers), "raw_json": json.dumps(answers)}
-        for key, val in answers.items():
-            # normalise key → q_<snake_key>
-            snake = re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_")
-            human_responses[f"q_{snake}"] = val
 
         return ToolResponse(
             success=True,
-            output={"HumanResponses": human_responses},
+            output={
+                "file_path": script_path,
+                "return_code": proc.returncode,
+            },
         )
 
 
@@ -3115,6 +2984,7 @@ class LLMPlayerTool(ToolProvider):
                         system=system_prompt,
                         max_tokens=20,
                         temperature=0.7,
+                        output_mode="raw",  # single-word player input — not RL/JSON
                     )
                 )
             except Exception as exc:
@@ -3260,6 +3130,7 @@ class AICodeGenTool(ToolProvider):
                     max_tokens=self._max_tokens,
                     temperature=0.2,
                     timeout=self._llm_timeout,
+                    output_mode="raw",  # source code — not RL/JSON
                 )
             )
         except Exception as e:
@@ -3535,7 +3406,7 @@ def create_default_registry(
     )
     registry.register(
         LuaRunTool(),
-        tags=["lua", "questionnaire", "execution"],
+        tags=["lua", "execution"],
     )
 
     # Also merge any @rof_tool decorated functions
@@ -3579,7 +3450,7 @@ __all__ = [
     "get_default_registry",
     "LuaScriptTool",
     "JavaScriptTool",
-    "LuaSaveTool",
+    "FileSaveTool",
     "LuaRunTool",
     # Factory
     "create_default_registry",

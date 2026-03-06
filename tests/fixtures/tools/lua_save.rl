@@ -1,17 +1,10 @@
 // lua_save.rl
-// Demonstrates LuaSaveTool: LLM generates a Lua questionnaire and saves it to disk.
-// Trigger phrase: "generate questionnaire lua" / "save lua_script to file"
+// Demonstrates FileSaveTool: writes arbitrary text content to a file on disk.
+// Trigger phrase: "save file"
 
-define Questionnaire as "An interactive Lua CLI questionnaire on a technical topic".
-define HumanRespondent as "The developer who will answer the questions in the terminal".
+define Script as "A Lua source file to be saved to disk".
 
-Questionnaire has topic of "Lua table manipulation and metatables".
-Questionnaire has question_count of 5.
-Questionnaire has difficulty of "intermediate".
-Questionnaire has target_runtime of "Lua 5.x".
+Script has file_path of "/tmp/hello.lua".
+Script has content of "print('Hello from ROF FileSaveTool!')".
 
-HumanRespondent has interface of "command-line terminal".
-
-relate Questionnaire and HumanRespondent as "presented to".
-
-ensure generate Questionnaire lua_script and save lua_script to file.
+ensure save file.

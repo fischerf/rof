@@ -1,23 +1,18 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// 01_generate.rl  –  Stage 1: Questionnaire Generation
+// 01_generate.rl  –  Stage 1: Lua Script Generation
 // ─────────────────────────────────────────────────────────────────────────────
-// LuaSaveTool intercepts the goal below, calls the LLM for a Lua script,
-// saves it to /tmp/, and writes Questionnaire.file_path into the snapshot.
+// The LLM produces a Lua script and stores it as Script.content together with
+// a destination Script.file_path.  FileSaveTool intercepts the goal below,
+// writes the content verbatim to the given path, and returns the resolved
+// file_path in the snapshot so Stage 2 can locate it.
 //
 // Snapshot produced by this stage:
-//   Questionnaire.file_path     absolute path of the saved .lua file
-//   Questionnaire.script_lines  line count (for audit trail)
+//   Script.content      raw Lua source written by the LLM
+//   Script.file_path    absolute path where FileSaveTool saved the file
 
-define Questionnaire as "An interactive CLI questionnaire that probes the respondent's knowledge on a topic".
-define HumanRespondent as "The human who will answer the questionnaire via the terminal".
+define Script as "A Lua script file to be saved to disk".
 
-Questionnaire has topic of "Lua programming fundamentals".
-Questionnaire has question_count of 6.
-Questionnaire has difficulty of "beginner-to-intermediate".
-Questionnaire has target_runtime of "Lua 5.x".
+Script has file_path of "/tmp/questionnaire.lua".
+Script has content of "-- generated Lua script".
 
-HumanRespondent has interface of "command-line terminal".
-
-relate Questionnaire and HumanRespondent as "presented to".
-
-ensure generate Questionnaire lua_script and save lua_script to file.
+ensure save file.

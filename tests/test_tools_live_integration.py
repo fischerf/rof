@@ -45,9 +45,9 @@ try:
     from rof_framework.rof_llm import create_provider
     from rof_framework.rof_tools import (
         AICodeGenTool,
+        FileSaveTool,
         HumanInLoopMode,
         LLMPlayerTool,
-        LuaSaveTool,
         create_default_registry,
     )
 
@@ -202,15 +202,15 @@ def test_fixture_standalone(fixture_name: str, orchestrator_factory):
 
 def test_lua_save_then_run(orchestrator_factory):
     """
-    lua_save.rl generates and saves a Lua questionnaire; lua_run.rl then
-    executes it.  These two scripts are designed to run in sequence with
-    the snapshot from stage 1 seeding stage 2.
+    lua_save.rl saves a Lua script to disk via FileSaveTool; lua_run.rl then
+    executes it via LuaRunTool.  These two scripts are designed to run in
+    sequence with the snapshot from stage 1 seeding stage 2.
     """
-    # Stage 1: generate and save the Lua script
+    # Stage 1: save the Lua script to disk
     result_save = _run_fixture("lua_save.rl", orchestrator_factory)
     _assert_run(result_save, "lua_save.rl")
 
-    # Stage 2: run the saved questionnaire, seeding with the previous snapshot
+    # Stage 2: run the saved script, seeding with the previous snapshot
     result_run = _run_fixture(
         "lua_run.rl",
         orchestrator_factory,

@@ -708,8 +708,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     try:
         from .rof_tools import (  # type: ignore
             AICodeGenTool,
+            FileSaveTool,
             LLMPlayerTool,
-            LuaSaveTool,
             create_default_registry,
         )
 
@@ -719,7 +719,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         run_tools = list(create_default_registry().all_tools().values())
         # LLM-dependent tools added after registry (require provider instance)
         run_tools.append(AICodeGenTool(llm=provider, output_dir=output_dir))
-        run_tools.append(LuaSaveTool(llm_provider=provider))
+        run_tools.append(FileSaveTool())
         run_tools.append(LLMPlayerTool(llm=provider, output_dir=output_dir))
     except ImportError:
         pass
@@ -1018,13 +1018,13 @@ def cmd_pipeline_run(args: argparse.Namespace) -> int:
 
     provider = _make_provider(args)
 
-    # ── Questionnaire-specific tools + LLMPlayerTool ──────────────────────
+    # ── Pipeline tools + LLMPlayerTool ───────────────────────────────────
     pipeline_tools: list[Any] = []
     try:
-        from .rof_tools import LLMPlayerTool, LuaRunTool, LuaSaveTool  # type: ignore
+        from .rof_tools import FileSaveTool, LLMPlayerTool, LuaRunTool  # type: ignore
 
         pipeline_tools = [
-            LuaSaveTool(llm_provider=provider),
+            FileSaveTool(),
             LuaRunTool(),
             LLMPlayerTool(llm=provider),
         ]
@@ -1219,10 +1219,10 @@ def cmd_pipeline_debug(args: argparse.Namespace) -> int:
     # ── Tools ─────────────────────────────────────────────────────────────
     pipeline_tools: list[Any] = []
     try:
-        from .rof_tools import LLMPlayerTool, LuaRunTool, LuaSaveTool  # type: ignore
+        from .rof_tools import FileSaveTool, LLMPlayerTool, LuaRunTool  # type: ignore
 
         pipeline_tools = [
-            LuaSaveTool(llm_provider=debug_provider),
+            FileSaveTool(),
             LuaRunTool(),
             LLMPlayerTool(llm=debug_provider),
         ]

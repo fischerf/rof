@@ -88,6 +88,8 @@ except ImportError:
         max_tokens: int = 1024
         temperature: float = 0.0
         metadata: dict = _f(default_factory=dict)
+        timeout: float | None = None  # per-call timeout override
+        output_mode: str = "json"  # "json" | "rl" | "raw"
 
     @_dc
     class LLMResponse:  # type: ignore
@@ -511,7 +513,7 @@ class GitHubCopilotProvider(LLMProvider):
         }
 
         # ── JSON structured output ────────────────────────────────────────────
-        if getattr(request, "output_mode", "rl") == "json":
+        if getattr(request, "output_mode", "json") == "json":
             params["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
@@ -1048,7 +1050,7 @@ class OpenAIProvider(LLMProvider):
         }
 
         # ── JSON structured output ────────────────────────────────────────────
-        if getattr(request, "output_mode", "rl") == "json":
+        if getattr(request, "output_mode", "json") == "json":
             params["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
@@ -1189,7 +1191,7 @@ class AnthropicProvider(LLMProvider):
             params["system"] = request.system
 
         # ── JSON structured output via forced tool_use ────────────────────────
-        if getattr(request, "output_mode", "rl") == "json":
+        if getattr(request, "output_mode", "json") == "json":
             params["tools"] = [_ROF_TOOL_DEFINITION]
             params["tool_choice"] = {"type": "tool", "name": "rof_graph_update"}
 
@@ -1299,7 +1301,7 @@ class GeminiProvider(LLMProvider):
         }
 
         # ── JSON structured output ────────────────────────────────────────────
-        if getattr(request, "output_mode", "rl") == "json":
+        if getattr(request, "output_mode", "json") == "json":
             generation_config_kwargs["response_mime_type"] = "application/json"
             generation_config_kwargs["response_schema"] = ROF_GRAPH_UPDATE_SCHEMA
 
@@ -1427,7 +1429,7 @@ class OllamaProvider(LLMProvider):
             else self._default_temperature,
         }
         # Ollama OpenAI-compat supports response_format json_object
-        if getattr(request, "output_mode", "rl") == "json":
+        if getattr(request, "output_mode", "json") == "json":
             params["response_format"] = {"type": "json_object"}
 
         try:
@@ -1460,7 +1462,7 @@ class OllamaProvider(LLMProvider):
             payload["system"] = request.system
 
         # Ollama native API supports a `format` field for JSON schema enforcement
-        if getattr(request, "output_mode", "rl") == "json":
+        if getattr(request, "output_mode", "json") == "json":
             payload["format"] = ROF_GRAPH_UPDATE_SCHEMA
 
         try:
@@ -1483,7 +1485,12 @@ class OllamaProvider(LLMProvider):
         return self._use_openai_compat
 
     def supports_structured_output(self) -> bool:
-        return True
+        # The native httpx path sends Ollama's `format` field, which is
+        # best-effort and model-dependent — not reliable enough to treat as
+        # structured output for output_mode="auto" resolution.
+        # Only the OpenAI-compat path (use_openai_compat=True) sends
+        # response_format={"type": "json_object"} which is actually enforced.
+        return self._use_openai_compat
 
     @property
     def context_limit(self) -> int:
@@ -1603,8 +1610,8 @@ class RendererConfig:
     # Prefix printed before the goal section
     goal_section_header: str = "\n// Current Goal"
     # Output mode: mirrors OrchestratorConfig.output_mode
-    # "rl" → RL preamble; "json" → JSON preamble; "auto" → defer to caller
-    output_mode: str = "rl"
+    # "json" → JSON preamble; "rl" → RL preamble; "auto" → defer to caller
+    output_mode: str = "json"
 
 
 class PromptRenderer:
@@ -1653,6 +1660,7 @@ class PromptRenderer:
         return LLMRequest(
             prompt=prompt,
             system=system,
+            output_mode=self._config.output_mode if self._config.output_mode != "auto" else "json",
         )
 
     def render_raw(
@@ -1796,18 +1804,80 @@ class ResponseParser:
     )
 
     def __init__(self):
-        # Lazy import: only used when rof_core is available
+        # Lazy import: only used when rof_core is available.
+        # Try three import paths in order:
+        #   1. Relative package import  (rof_framework.rof_core)  — normal installed use
+        #   2. Bare module name         (rof_core)                 — standalone / sys.path use
+        #   3. Already-imported core    (_CORE_IMPORTED shortcut)  — same-process re-use
         self._rof_parser: Any = None
-        if _CORE_IMPORTED:
+        _RLParser = None
+        for _attempt in range(1):  # break-able block
             try:
-                from rof_core import RLParser  # type: ignore[import-untyped,import-not-found]
+                from rof_framework.rof_core import RLParser as _RLParser  # type: ignore
 
-                self._rof_parser = RLParser()
+                break
+            except ImportError:
+                pass
+            try:
+                from rof_core import RLParser as _RLParser  # type: ignore
+
+                break
+            except ImportError:
+                pass
+            if _CORE_IMPORTED:
+                try:
+                    import importlib as _il
+
+                    _mod = _il.import_module("rof_framework.rof_core")
+                    _RLParser = getattr(_mod, "RLParser", None)
+                except Exception:
+                    pass
+        if _RLParser is not None:
+            try:
+                self._rof_parser = _RLParser()
             except Exception:
                 pass
 
-    def parse(self, content: str, output_mode: str = "rl") -> ParsedResponse:
+    def parse(
+        self,
+        content: str,
+        output_mode: str = "json",
+        tool_calls: list | None = None,
+    ) -> ParsedResponse:
         result = ParsedResponse(raw_content=content)
+
+        # ── Anthropic tool_use shortcut ───────────────────────────────────────
+        # When output_mode="json" and the provider returned tool_calls
+        # (Anthropic forced tool_use), the data lives in tool_calls[].arguments,
+        # not in content (which is empty or just preamble prose).
+        # Treat any non-empty tool_calls list as a valid structured response
+        # immediately — no need to parse content at all.
+        if output_mode == "json" and tool_calls:
+            for tc in tool_calls:
+                if tc.get("name") == "rof_graph_update":
+                    data = tc.get("arguments") or {}
+                    for attr in data.get("attributes", []):
+                        entity = str(attr.get("entity", "")).strip()
+                        name = str(attr.get("name", "")).strip()
+                        value = attr.get("value")
+                        if entity and name and value is not None:
+                            result.attribute_deltas.setdefault(entity, {})[name] = value
+                            v_repr = f'"{value}"' if isinstance(value, str) else str(value)
+                            result.rl_statements.append(f"{entity} has {name} of {v_repr}.")
+                    for pred in data.get("predicates", []):
+                        entity = str(pred.get("entity", "")).strip()
+                        value = str(pred.get("value", "")).strip()
+                        if entity and value:
+                            result.predicate_deltas.setdefault(entity, []).append(value)
+                            result.rl_statements.append(f'{entity} is "{value}".')
+                    result.is_valid_rl = True
+                    return result
+
+        # ── Strip <think>…</think> blocks up front ────────────────────────────
+        # Reasoning models (qwen3, deepseek-r1, …) prepend chain-of-thought
+        # inside <think> tags before their actual answer.  All downstream paths
+        # (JSON parse, full RL parse, regex extraction) must see clean content.
+        content = self._THINK_RE.sub("", content).strip()
 
         # ── JSON mode: parse structured response first ────────────────────────
         if output_mode == "json":
@@ -1880,10 +1950,16 @@ class ResponseParser:
     # Internals
     # ------------------------------------------------------------------
 
+    # Matches <think>…</think> blocks emitted by reasoning models
+    # (qwen3, deepseek-r1, …) — must be stripped before RL parsing.
+    _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
     def _try_full_rl_parse(self, content: str, result: ParsedResponse) -> None:
         # Strip markdown code fences before attempting a full parse.
         # LLMs frequently wrap RL output in ```rl … ``` or plain ``` … ``` blocks.
+        # Also strip <think>…</think> blocks from reasoning models (qwen3, deepseek-r1).
         stripped = re.sub(r"```[a-zA-Z]*\n?", "", content).strip()
+        stripped = self._THINK_RE.sub("", stripped).strip()
         candidates = [stripped, content.strip()]
 
         for candidate in candidates:
@@ -2168,8 +2244,16 @@ class RetryManager(LLMProvider):
         attempt: int,
     ) -> LLMResponse:
         """Retry the LLM call if the response is not valid RL/JSON."""
-        output_mode = getattr(request, "output_mode", "rl")
-        parsed = self._parser.parse(response.content, output_mode)
+        output_mode = getattr(request, "output_mode", "json")
+        # "raw" mode means free-form output (code, player input, prose) —
+        # there is no schema to validate against, so skip parse-retry entirely.
+        if output_mode == "raw":
+            return response
+        parsed = self._parser.parse(
+            response.content,
+            output_mode,
+            tool_calls=response.tool_calls if response.tool_calls else None,
+        )
         if parsed.is_valid_rl:
             return response
 

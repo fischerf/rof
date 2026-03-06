@@ -17,12 +17,11 @@
 #       --provider ollama --model gemma3:12b --json
 
 stages:
-
   - name: generate
     rl_file: 01_generate.rl
     description: >
-      LLM generates an interactive Lua questionnaire on the configured topic.
-      LuaSaveTool saves the script to /tmp/ and writes the path into the snapshot.
+      FileSaveTool saves the Lua script supplied in the snapshot to /tmp/
+      and writes the path into the snapshot.
 
   - name: interact
     rl_file: 02_interact.rl
@@ -38,7 +37,7 @@ stages:
       score (0-100), level, strengths, knowledge gaps, and learning recommendations.
 
 config:
-  on_failure:             halt    # stop immediately on any stage failure
-  retry_count:            1       # one retry on transient LLM errors
-  inject_prior_context:   true    # thread snapshot forward through all stages
-  max_snapshot_entities:  50      # guard against context window overflow
+  on_failure: halt # stop immediately on any stage failure
+  retry_count: 1 # one retry on transient LLM errors
+  inject_prior_context: true # thread snapshot forward through all stages
+  max_snapshot_entities: 50 # guard against context window overflow

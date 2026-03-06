@@ -289,7 +289,7 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   │  RetryManager       │       │  FileReaderTool  pdf/csv/docx/…       │
   │  PromptRenderer     │       │  ValidatorTool   RL schema check      │
   │  ResponseParser     │       │  HumanInLoopTool stdin/cb/file        │
-  └─────────────────────┘       │  LuaSaveTool     Lua codegen + save   │
+  └─────────────────────┘       │  FileSaveTool    Lua script + save    │
                                 │  LuaRunTool      interactive Lua run  │
                                 │                                       │
                                 │  SDK: @rof_tool · LuaScriptTool       │
@@ -344,11 +344,11 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
       06_report.rl                   Stage 6: human-readable report
       run_factcheck.py               Python demo with learned routing confidence
 
-    pipeline_questionnaire/          3-stage interactive Lua questionnaire pipeline
+    pipeline_questionnaire/          3-stage interactive Lua pipeline
       pipeline_questionnaire.yaml    YAML config  (generate → interact → evaluate)
-      01_generate.rl                 Stage 1: LLM generates Lua questionnaire script
-      02_interact.rl                 Stage 2: run script interactively in terminal
-      03_evaluate.rl                 Stage 3: score + feedback from answers
+      01_generate.rl                 Stage 1: LLM generates Lua script, FileSaveTool saves it
+      02_interact.rl                 Stage 2: LuaRunTool runs the script interactively
+      03_evaluate.rl                 Stage 3: LLM evaluates the results
 ```
 
 ---
@@ -564,27 +564,26 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   │     auto_mock – returns mock_response immediately (for testing)
   │   Supports: options validation, configurable timeout, elapsed_s in output.
   │
-  ├── LuaSaveTool  *(questionnaire pipeline — Stage 1)*
-  │   Calls the injected LLM provider to generate a Lua CLI questionnaire
-  │   script using a strict 10-rule system prompt that prevents markdown
-  │   fences, re-declared variables, and require() calls.
-  │   Saves the augmented script (preamble + LLM code + JSON epilogue) to
-  │   the OS temp directory (cross-platform; uses tempfile.gettempdir()).
-  │   Writes Questionnaire.file_path + answers_json_path into the snapshot.
-  │   Constructor: LuaSaveTool(llm_provider=<any LLMProvider>)
-  │   Trigger keywords: "save lua_script to file", "generate questionnaire lua"
+  ├── FileSaveTool
+  │   Saves arbitrary text content to a file.  The destination path
+  │   (including extension) is taken directly from the snapshot — no
+  │   assumptions are made about content type.  If no path is given a
+  │   temp file is created.  No LLM call is made.
+  │   Input: content (str, required), file_path (str, optional),
+  │          encoding (str, default "utf-8")
+  │   Output: file_path (str), bytes_written (int)
+  │   Constructor: FileSaveTool()
+  │   Trigger keywords: "save file", "write file"
   │
-  ├── LuaRunTool  *(questionnaire pipeline — Stage 2)*
-  │   Runs the saved Lua script interactively with full terminal inheritance.
-  │   On Windows: launches Lua in a new console (CREATE_NEW_CONSOLE) so the
-  │   process gets a proper interactive TTY.
-  │   On POSIX: inherits stdin/stdout/stderr directly.
-  │   After the process exits, reads the JSON answer file written by the
-  │   Lua epilogue and injects every answer as HumanResponses.q_<key>.
-  │   Handles Ctrl+C gracefully. Falls back to scanning the temp dir for
-  │   the most recently written questionnaire_*.lua if the snapshot path
-  │   is missing.
-  │   Trigger keywords: "run lua questionnaire interactively"
+  ├── LuaRunTool
+  │   Runs a Lua script interactively in the current terminal.
+  │   stdin, stdout, and stderr are fully inherited from the parent
+  │   process.  On Windows the script is launched in a new console
+  │   window to ensure a proper interactive TTY.  Handles Ctrl+C
+  │   gracefully.
+  │   Input: file_path (str, required) — path to the .lua file
+  │   Output: file_path (str), return_code (int)
+  │   Trigger keywords: "run lua script", "run lua interactively"
   │
   └── SDK
       @rof_tool decorator  – register any Python function as a tool
@@ -819,7 +818,7 @@ without writing any Python.
 
 ```
   Executes a pipeline defined in a YAML config file.
-  Automatically loads LuaSaveTool + LuaRunTool from rof_tools if available.
+  Automatically loads FileSaveTool + LuaRunTool from rof_tools if available.
 
   YAML shape:
     provider: ollama          # optional — overrides env
@@ -967,7 +966,7 @@ rof lint    tests/fixtures/pipeline_fakenews_detection/01_extract.rl
 rof inspect tests/fixtures/pipeline_fakenews_detection/05_decide.rl --format json
 ```
 
-**Interactive Lua Questionnaire pipeline** (LuaSaveTool + LuaRunTool):
+**Interactive Lua pipeline** (FileSaveTool + LuaRunTool):
 
 ```bash
 # Requires Lua on PATH and --provider with a capable model

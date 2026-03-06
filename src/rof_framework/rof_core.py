@@ -1099,7 +1099,11 @@ class LLMRequest:
     temperature: float = 0.0
     metadata: dict = _f(default_factory=dict)
     timeout: float | None = None  # per-call override; None → provider default
-    output_mode: str = "rl"  # "rl" | "json" — controls response format enforcement
+    output_mode: str = "json"  # "json" | "rl" | "raw"
+    # "json" — expect rof_graph_update JSON schema; RetryManager re-prompts with JSON hint
+    # "rl"   — expect RelateLang text; RetryManager re-prompts with RL hint on failure
+    # "raw"  — free-form response (code, player input, prose); RetryManager skips
+    #          parse-retry entirely — never emit "Response is not valid RL" warnings
 
 
 @_dc
@@ -1487,7 +1491,7 @@ class Orchestrator:
         return best_tool
 
     def _integrate_response(
-        self, graph: WorkflowGraph, response: LLMResponse, output_mode: str = "rl"
+        self, graph: WorkflowGraph, response: LLMResponse, output_mode: str = "json"
     ) -> None:
         """
         Parse the LLM response and apply any state updates to the graph.
