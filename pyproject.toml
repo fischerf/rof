@@ -137,13 +137,32 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths     = ["tests"]
-addopts       = "-v --tb=short"
+addopts       = "-v --tb=short --cov=rof_framework --cov-report=html"
 python_files  = ["test_*.py"]
 python_classes= ["Test*"]
 python_functions = ["test_*"]
 markers = [
     "live_integration: tests that require a real LLM backend (set ROF_TEST_PROVIDER + ROF_TEST_API_KEY to enable)",
 ]
+
+[tool.coverage.run]
+source        = ["rof_framework"]
+branch        = true
+
+[tool.coverage.paths]
+# Map the installed/editable src layout so coverage resolves correctly
+source = [
+    "src/rof_framework",
+    "*/site-packages/rof_framework",
+]
+
+[tool.coverage.report]
+show_missing  = true
+skip_covered  = false
+omit          = ["tests/*"]
+
+[tool.coverage.html]
+directory     = "htmlcov"
 
 [tool.ruff]
 target-version = "py310"

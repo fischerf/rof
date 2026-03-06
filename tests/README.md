@@ -47,7 +47,9 @@ Tests are organized by domain:
 - Tests tool provider interface
 - Tests ToolRegistry registration and lookup
 - Tests ToolRouter keyword and semantic routing
-- Tests built-in tools (WebSearchTool, ValidatorTool, CodeRunnerTool)
+- Tests built-in tools (WebSearchTool, ValidatorTool, CodeRunnerTool, etc.)
+- Tests `@rof_tool` decorator and `FunctionTool`
+- Tests `create_default_registry` and registry+router integration
 
 ### 8. **Pipeline** (`tests/test_pipeline_runner.py`)
 - Tests multi-stage pipeline orchestration
@@ -70,78 +72,122 @@ Tests are organized by domain:
 - Integration tests for `ConfidentOrchestrator` – stub LLM + tool runs, trace writing, multi-run memory accumulation (requires `rof_core` + `rof_tools`)
 - Integration tests for `ConfidentPipeline` – multi-stage run, shared memory across stages (requires `rof_core` + `rof_pipeline`)
 
+---
+
 ## Running Tests
+
+> **Important:** All commands must be run from the **project root** (`rof/`), not from inside the `tests/` directory.
+> This is required so that `pyproject.toml` is picked up and the `src/` layout is resolved correctly.
+
+```
+cd rof   # project root — where pyproject.toml lives
+```
 
 ### Run All Tests
 
 **Windows:**
 ```cmd
-run_tests.bat
+python -m pytest
 ```
 
 **Linux/Mac:**
 ```bash
-chmod +x run_tests.sh
-./run_tests.sh
+python3 -m pytest
 ```
 
-**Direct Python:**
+The default flags (`-v --tb=short`) and coverage settings are configured in `pyproject.toml` and apply automatically.
+
+You can also use the convenience scripts:
+
+| Script | Platform |
+|---|---|
+| `python run_all_tests.py` (from `tests/`) | any |
+| `tests\run_tests.bat` | Windows |
+| `bash tests/run_tests.sh` | Linux/Mac |
+
+### Run a Specific Test File
+
 ```cmd
-python run_all_tests.py
+python -m pytest tests/test_core_integration.py
 ```
 
-### Run Specific Domain
+### Run a Specific Test Class
 
 ```cmd
-python -m pytest tests/test_core_integration.py -v
+python -m pytest tests/test_core_integration.py::TestEventBus
 ```
 
-### Run Specific Test Class
+### Run a Specific Test
 
 ```cmd
-python -m pytest tests/test_core_integration.py::TestEventBus -v
-```
-
-### Run Specific Test
-
-```cmd
-python -m pytest tests/test_core_integration.py::TestEventBus::test_subscribe_and_publish -v
+python -m pytest tests/test_core_integration.py::TestEventBus::test_subscribe_and_publish
 ```
 
 ### Run with Coverage
 
+Coverage is enabled by default via `pyproject.toml`. The HTML report is written to `htmlcov/` in the project root.
+
 ```cmd
-pip install pytest-cov
-python -m pytest --cov=rof_core --cov=rof_llm --cov=rof_tools --cov=rof_pipeline --cov=rof_routing --cov-report=html
+python -m pytest
 ```
+
+To generate a quick terminal summary alongside the HTML report:
+
+```cmd
+python -m pytest --cov-report=term-missing --cov-report=html
+```
+
+To run without coverage (faster, e.g. during active development):
+
+```cmd
+python -m pytest --no-cov
+```
+
+> **Why not `--cov=rof_core` etc.?**
+> The source modules (`rof_core`, `rof_llm`, `rof_tools`, `rof_pipeline`, `rof_routing`) all live inside the
+> single `rof_framework` package under `src/rof_framework/`. Passing `--cov=rof_framework` (configured
+> automatically in `pyproject.toml`) is the correct way to instrument them. Passing the old submodule
+> names would result in *"Module was never imported"* warnings and no data being collected.
+
+---
 
 ## Test Requirements
 
 ### Required Dependencies
-- pytest >= 8.0.0
+- `pytest >= 8.0`
+- `pytest-cov >= 5.0` (for coverage reports)
 
 ### Optional Dependencies (for specific test domains)
-- colorama (for colored test output)
-- pytest-cov (for coverage reports)
-- httpx (for WebSearchTool tests)
-- nvidia-ml-py (silences a PyTorch `FutureWarning` about deprecated `pynvml`
-  that appears when running routing tests with `sentence-transformers` installed:
-  `pip install nvidia-ml-py`)
-- All dependencies listed in pyproject.toml
+- `colorama` — coloured output in `run_all_tests.py`
+- `httpx` — WebSearchTool tests
+- `pyyaml` — pipeline tests
+- `sentence-transformers` — embedding-based routing tests
+- `nvidia-ml-py` — silences a PyTorch `FutureWarning` about deprecated `pynvml`
+  that surfaces when running routing tests with `sentence-transformers` installed:
+  ```cmd
+  pip install nvidia-ml-py
+  ```
+
+Install all dev dependencies at once with:
+
+```cmd
+pip install -e ".[dev]"
+```
+
+---
 
 ## Writing New Tests
 
-### Test File Naming Convention
-- `test_<module>_<domain>.py` for unit tests
-- Place in `tests/` directory
+### File Naming Convention
+- `test_<module>.py` or `test_<module>_<domain>.py` for unit tests
+- Place in the `tests/` directory
 
-### Test Class Naming Convention
-- `Test<ComponentName>` for component tests
-- Group related tests in classes
+### Class Naming Convention
+- `Test<ComponentName>` — group related tests in classes
 
-### Test Method Naming Convention
-- `test_<what_is_being_tested>`
-- Be descriptive: `test_orchestrator_with_multiple_goals`
+### Method Naming Convention
+- `test_<what_is_being_tested>` — be descriptive:
+  `test_orchestrator_with_multiple_goals`
 
 ### Example Test Structure
 
@@ -149,17 +195,11 @@ python -m pytest --cov=rof_core --cov=rof_llm --cov=rof_tools --cov=rof_pipeline
 """
 tests/test_example.py
 =====================
-Tests for example component.
+Tests for an example component.
 """
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 import pytest
-
-from rof_core import ExampleComponent
+from rof_framework.rof_core import ExampleComponent
 
 
 class TestExampleComponent:
@@ -167,25 +207,33 @@ class TestExampleComponent:
         component = ExampleComponent()
         result = component.do_something()
         assert result is not None
-    
+
     def test_error_handling(self):
         component = ExampleComponent()
         with pytest.raises(ValueError):
             component.do_invalid_thing()
 ```
 
+> `conftest.py` automatically adds `src/` to `sys.path`, so imports are always
+> `from rof_framework.<module> import ...` — no manual `sys.path` manipulation needed
+> in individual test files.
+
+---
+
 ## Test Coverage Goals
 
-- **Core modules**: > 80% coverage
-- **LLM providers**: > 70% coverage (many external deps)
-- **Tools**: > 60% coverage (many optional deps)
-- **CLI**: > 75% coverage
-- **Pipeline**: > 75% coverage
-- **Routing**: > 80% coverage (sections without optional deps skip gracefully)
+| Module | Target |
+|---|---|
+| `rof_core` | > 80% |
+| `rof_llm` | > 70% (many external deps) |
+| `rof_tools` | > 60% (many optional deps) |
+| `rof_cli` | > 75% |
+| `rof_pipeline` | > 75% |
+| `rof_routing` | > 80% (sections without optional deps skip gracefully) |
+
+---
 
 ## Continuous Integration
-
-Tests can be integrated into CI/CD pipelines:
 
 ### GitHub Actions Example
 
@@ -198,43 +246,60 @@ jobs:
   test:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest
-      - name: Run tests
-        run: python run_all_tests.py
+          pip install -e ".[dev]"
+      - name: Run tests with coverage
+        run: python -m pytest
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: htmlcov
+          path: htmlcov/
 ```
+
+---
 
 ## Troubleshooting
 
+### "Module was never imported" / "No data was collected" (coverage)
+- Make sure you are running `pytest` from the **project root** (`rof/`), not from inside `tests/`.
+- Do **not** pass `--cov=rof_core` (or any other submodule name) — use `--cov=rof_framework`
+  or rely on the default configured in `pyproject.toml`.
+
 ### Import Errors
-- Ensure `tests/conftest.py` properly adds project root to `sys.path`
-- Check that all required modules are installed
+- Verify `tests/conftest.py` is present — it inserts `src/` into `sys.path` automatically.
+- Ensure the package is installed (editable install recommended): `pip install -e ".[dev]"`.
 
 ### Test Failures
-- Run with `-v` flag for verbose output
-- Use `--tb=short` for shorter tracebacks
-- Use `--lf` to run only last failed tests
+- Run with `-v` for verbose output (enabled by default via `pyproject.toml`).
+- Use `--tb=long` for full tracebacks.
+- Use `--lf` to re-run only the last failed tests.
 
 ### Slow Tests
-- Run with `-x` to stop at first failure
-- Use `pytest-xdist` for parallel execution: `pytest -n auto`
+- Use `-x` to stop at the first failure.
+- Use `pytest-xdist` for parallel execution: `pip install pytest-xdist && pytest -n auto`.
+- Skip coverage during development: `pytest --no-cov`.
+
+---
 
 ## Contributing Tests
 
 When contributing new tests:
 
-1. Follow the existing test structure
-2. Add tests to the appropriate domain
-3. Update this README if adding new test domains
-4. Ensure all tests pass before submitting PR
-5. Aim for meaningful assertions, not just "doesn't crash"
+1. Follow the existing test structure and naming conventions.
+2. Add tests to the appropriate domain file or create a new one.
+3. Update this README if adding a new test domain.
+4. Run the full suite (`python -m pytest` from the project root) before submitting a PR.
+5. Aim for meaningful assertions, not just "doesn't crash".
+
+---
 
 ## Contact
 
-For questions about testing, refer to the main ROF documentation or open an issue.
+For questions about testing, refer to the main ROF documentation or open an issue on GitHub.

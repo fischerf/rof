@@ -1,0 +1,108 @@
+# pipeline.yaml
+# ROF — Dual Output Mode Demo Pipeline
+#
+# Demonstrates the two LLM response strategies side by side:
+#   Stage 1 (extract)  — output_mode: rl
+#     Works with any model, including local Ollama. The LLM replies in
+#     plain RelateLang text. Full RLParser is attempted first; regex
+#     fallback extracts individual attribute/predicate lines from mixed
+#     prose. RetryManager re-prompts with an RL hint on failure.
+#
+#   Stage 2 (classify) — output_mode: json
+#     Best with cloud models (OpenAI, Anthropic, Gemini). JSON schema is
+#     enforced at the provider level. The response is decoded as a
+#     structured object, then re-emitted as RL statements so the audit
+#     snapshot stays in a single uniform RelateLang format.
+#
+# Both stages produce the same graph delta shape (entity / attribute /
+# predicate updates) and the same immutable RL audit snapshot.
+# output_mode only controls how the LLM is asked to respond and how the
+# response is decoded.
+#
+# ── Run (any cloud provider) ──────────────────────────────────────────────
+#   rof pipeline run tests/fixtures/pipeline_output_mode/pipeline.yaml \
+#       --provider anthropic --model claude-sonnet-4-5
+#
+#   rof pipeline run tests/fixtures/pipeline_output_mode/pipeline.yaml \
+#       --provider openai --model gpt-4o-mini
+#
+# ── Save the final snapshot to a file ────────────────────────────────────
+#   rof pipeline run tests/fixtures/pipeline_output_mode/pipeline.yaml \
+#       --provider openai --model gpt-4o-mini \
+#       --json > tests/fixtures/pipeline_output_mode/output/result.json
+#
+# ── Ollama (local, no API key) ────────────────────────────────────────────
+#   Ollama returns False for supports_structured_output(), so "auto" on
+#   stage 2 would silently downgrade to "rl". For an explicit local run,
+#   override both stages to rl:
+#
+#   Edit stage 2 below: output_mode: rl
+#   rof pipeline run tests/fixtures/pipeline_output_mode/pipeline.yaml \
+#       --provider ollama --model gemma3:12b \
+#       --json > tests/fixtures/pipeline_output_mode/output/result.json
+
+# ── LLM provider (all optional — CLI flags and env vars take precedence) ──
+# provider: openai          # openai | anthropic | gemini | ollama
+# model:    gpt-4o-mini     # omit to use per-provider default
+# api_key:  sk-...          # prefer ROF_API_KEY / OPENAI_API_KEY env vars
+
+# ── Pipeline stages ───────────────────────────────────────────────────────
+stages:
+
+  - name: extract
+    rl_file: 01_extract.rl
+    output_mode: rl                  # plain RelateLang text — works with any model
+    description: >
+      Extract and validate product and customer data from the seed facts.
+      The LLM is asked to respond in RelateLang text (rl mode).
+      Full RLParser is tried first; regex fallback handles mixed prose.
+      RetryManager re-prompts with an RL hint if no RL is returned.
+
+  - name: classify
+    rl_file: 02_classify.rl
+    output_mode: json                # structured JSON schema — best with cloud models
+    description: >
+      Classify the customer segment and assign a risk tier.
+      The LLM is asked for a JSON object matching the rof_graph_update
+      schema. The result is decoded and re-emitted as RL statements for
+      the audit trail. Falls back to RL extraction if the model ignores
+      the schema instruction.
+
+# ── Pipeline-level configuration ─────────────────────────────────────────
+config:
+  on_failure:             halt      # halt | continue | retry
+  retry_count:            2         # retries per stage before giving up
+  inject_prior_context:   true      # stage 2 receives stage 1's RL snapshot
+  max_snapshot_entities:  50        # cap to avoid context window overflow
+
+# ── Output ────────────────────────────────────────────────────────────────
+# Pass --json to write the final PipelineResult to stdout as JSON, then
+# redirect to a file:
+#
+#   rof pipeline run pipeline.yaml --provider anthropic --json \
+#       > tests/fixtures/pipeline_output_mode/output/result.json
+#
+# The result.json contains:
+#   {
+#     "success": true,
+#     "pipeline_id": "...",
+#     "elapsed_s": 1.23,
+#     "stages": 2,
+#     "final_snapshot": {
+#       "entities": {
+#         "Customer": {
+#           "attributes": { "name": "...", "segment": "HighValue", ... },
+#           "predicates": ["eligible"]
+#         },
+#         "Product": {
+#           "attributes": { "sku": "WIDGET-42", "availability": "in_stock", ... },
+#           "predicates": []
+#         },
+#         "RiskTier": {
+#           "attributes": { "level": "Low", "score": 0.08 },
+#           "predicates": ["approved"]
+#         }
+#       }
+#     },
+#     "error": null
+#   }
