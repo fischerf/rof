@@ -99,6 +99,7 @@ import re
 import sys
 import textwrap
 import time
+import traceback
 from pathlib import Path
 from typing import Optional
 
@@ -178,6 +179,7 @@ from rof_framework.rof_llm import (  # type: ignore
     AuthError,
     BackoffStrategy,
     GitHubCopilotProvider,
+    ProviderError,
     RetryConfig,
     RetryManager,
     create_provider,
@@ -208,6 +210,141 @@ if _HAS_ROUTING:
 # ===========================================================================
 # ANSI colour helpers  (disabled automatically on Windows without VT mode)
 # ===========================================================================
+
+# ===========================================================================
+# Communications logger  (shared by --log-comms in both REPL and one-shot)
+# ===========================================================================
+
+_COMMS_DIR_NAME = "comms_log"
+
+
+class _CommsLogger:
+    """
+    Thin shim that wraps any LLMProvider, logs every request/response pair
+    to a JSONL file, then delegates to the real provider.
+
+    Each line is a self-contained JSON object — one "request" entry followed
+    immediately by a "response" or "error" entry:
+
+        {"seq":1,"ts":"...","direction":"request","output_mode":"rl",
+         "max_tokens":512,"temperature":0.1,"system":"...","prompt":"..."}
+        {"seq":1,"ts":"...","direction":"response","content":"..."}
+
+    Error entries add  "error_type", "status_code", and "traceback".
+    """
+
+    def __init__(self, provider, log_path: Path):
+        self._provider = provider
+        self._log_path = log_path
+        self._seq = 0
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("", encoding="utf-8")  # truncate / create
+        info(f"Comms log → {log_path}")
+
+    # Proxy every attribute/method not defined here to the wrapped provider
+    # (supports_structured_output, supports_tool_calling, context_limit, …).
+    # This keeps the shim forward-compatible with new LLMProvider additions.
+    def __getattr__(self, name):
+        return getattr(self._provider, name)
+
+    def complete(self, request):
+        self._seq += 1
+        seq = self._seq
+        ts_req = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+        req_entry = {
+            "seq": seq,
+            "ts": ts_req,
+            "direction": "request",
+            "stage": (getattr(request, "metadata", None) or {}).get("stage"),
+            "output_mode": getattr(request, "output_mode", "json"),
+            "max_tokens": request.max_tokens,
+            "temperature": request.temperature,
+            "system": request.system,
+            "prompt": request.prompt,
+        }
+        self._append(req_entry)
+
+        try:
+            response = self._provider.complete(request)
+        except Exception as exc:
+            err_entry = {
+                "seq": seq,
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "direction": "error",
+                "error_type": type(exc).__name__,
+                "status_code": getattr(exc, "status_code", None),
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            }
+            self._append(err_entry)
+            raise
+
+        res_entry = {
+            "seq": seq,
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "direction": "response",
+            "content": response.content,
+        }
+        self._append(res_entry)
+        return response
+
+    def _append(self, entry: dict) -> None:
+        with self._log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+
+
+def _attach_debug_hooks(llm, debug: bool, log_comms: bool, log_path: Optional[Path]) -> object:
+    """
+    Apply the two optional diagnostic layers to any LLMProvider (or RetryManager):
+
+    1. ``debug=True``      → attach ``on_retry`` to print full ProviderError
+                             detail (type, message, HTTP status, traceback)
+                             every time the RetryManager fires a retry.
+
+    2. ``log_comms=True``  → wrap the inner ``_provider`` of a RetryManager
+                             (or the top-level object) with ``_CommsLogger``
+                             so every individual LLM call is appended to
+                             ``log_path`` as a JSONL record.
+
+    Returns the (possibly re-wrapped) provider.
+    """
+    if debug:
+
+        def _on_retry(attempt: int, exc: Exception) -> None:
+            status = getattr(exc, "status_code", None)
+            status_str = f"  HTTP status : {status}\n" if status else ""
+            raw = getattr(exc, "raw", None)
+            raw_str = f"  Raw payload : {json.dumps(raw, default=str)[:400]}\n" if raw else ""
+            tb = traceback.format_exc()
+            ts = time.strftime("%H:%M:%S")
+            print(
+                f"\n  ┌─ ProviderError detail (attempt {attempt}) ──────────────────\n"
+                f"  │  Type       : {type(exc).__name__}\n"
+                f"  │  Message    : {exc}\n"
+                f"  │  {status_str}"
+                f"  │  {raw_str}"
+                f"  │  Traceback  :\n"
+                + "".join(f"  │    {line}" for line in tb.splitlines(keepends=True))
+                + f"\n  └─ [{ts}] retrying…\n"
+            )
+
+        if hasattr(llm, "on_retry"):
+            llm.on_retry = _on_retry
+        else:
+            logging.getLogger(__name__).debug(
+                "on_retry hook not available on provider type %s", type(llm).__name__
+            )
+
+    if log_comms and log_path:
+        if hasattr(llm, "_provider"):
+            # Patch inside RetryManager so every retry attempt is also logged.
+            llm._provider = _CommsLogger(llm._provider, log_path)
+        else:
+            llm = _CommsLogger(llm, log_path)
+
+    return llm
+
 
 _USE_COLOUR = (
     sys.stdout.isatty()
@@ -496,8 +633,11 @@ class ROFSession:
         verbose: bool = False,
         use_routing: bool = True,
         output_mode: str = "auto",
+        debug: bool = False,
+        log_comms: bool = False,
+        comms_log_path: Optional[Path] = None,
     ):
-        self._llm = llm
+        self._llm = _attach_debug_hooks(llm, debug, log_comms, comms_log_path)
         self._output_dir = output_dir
         self._verbose = verbose
         self._use_routing = use_routing and _HAS_ROUTING
@@ -568,7 +708,7 @@ class ROFSession:
         if verbose:
             self._bus.subscribe("*", lambda e: print(dim(f"  [EVENT] {e.name}: {e.payload}")))
 
-        self._planner = Planner(llm=llm)
+        self._planner = Planner(llm=self._llm)
 
         # Resolve output_mode: "auto" defers to the provider at runtime.
         # "json" enforces the rof_graph_update JSON schema (cloud models).
@@ -1039,23 +1179,6 @@ Example prompts:
   Search the web for the latest news about RelateLang
   Generate a JavaScript function to validate email addresses
   Write a Lua script that implements a simple calculator
-
-Supported providers (pass via --provider):
-  anthropic      – Anthropic Claude   (requires ANTHROPIC_API_KEY or --api-key)
-  openai         – OpenAI GPT         (requires OPENAI_API_KEY or --api-key)
-  ollama         – Local Ollama/vLLM  (no key needed; --base-url if non-default)
-  github_copilot – GitHub Copilot     (no key needed! browser login on first run,
-                                       token cached at ~/.config/rof/copilot_oauth.json
-                                       for all future runs automatically)
-
-GitHub Copilot tips:
-  First run   : python rof_ai_demo.py --provider github_copilot
-                → opens GitHub device-activation page in your browser
-                → enter the shown code once, then it's cached forever
-  Later runs  : same command — cache is loaded silently, no browser
-  Re-login    : add --invalidate-cache to force a fresh browser login
-  No browser  : add --no-browser to print the URL instead of opening it
-  Direct token: --github-token ghp_...  to bypass device-flow entirely
 """
 
 
@@ -1125,12 +1248,23 @@ def _parse_args() -> argparse.Namespace:
               anthropic      – Anthropic Claude  (--api-key  or  ANTHROPIC_API_KEY)
               openai         – OpenAI GPT        (--api-key  or  OPENAI_API_KEY)
               ollama         – Local Ollama/vLLM (--base-url, no key required)
-              github_copilot – GitHub Copilot    (no key required!)
+              github_copilot – GitHub Copilot    (no key needed! browser login on first run,
+                                                  token cached at ~/.config/rof/copilot_oauth.json
+                                                  for all future runs automatically)
 
             Output modes (--output-mode):
               auto  (default) – json if provider.supports_structured_output(), else rl
               json            – enforce JSON schema (OpenAI / Anthropic / Gemini)
               rl              – plain RelateLang text (any model, Ollama-safe)
+
+            GitHub Copilot tips:
+            First run   : python rof_ai_demo.py --provider github_copilot
+                            → opens GitHub device-activation page in your browser
+                            → enter the shown code once, then it's cached forever
+            Later runs  : same command — cache is loaded silently, no browser
+            Re-login    : add --invalidate-cache to force a fresh browser login
+            No browser  : add --no-browser to print the URL instead of opening it
+            Direct token: --github-token ghp_...  to bypass device-flow entirely
 
             GitHub Copilot — how auth works:
               No API key needed. On the very first run the demo opens GitHub's
@@ -1191,6 +1325,25 @@ def _parse_args() -> argparse.Namespace:
         help="Run a single prompt non-interactively and exit",
     )
     p.add_argument("--verbose", action="store_true", help="Enable debug logging")
+    p.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "Print full ProviderError details (type, message, HTTP status, traceback) "
+            "whenever the RetryManager fires a retry. Implies --verbose."
+        ),
+    )
+    p.add_argument(
+        "--log-comms",
+        dest="log_comms",
+        action="store_true",
+        help=(
+            "Save every LLM request and response to "
+            "<output-dir>/comms_log/comms_<timestamp>.jsonl as JSONL. "
+            "Each call produces a 'request' entry followed by a 'response' or 'error' entry. "
+            "Useful for replaying or inspecting exact provider traffic."
+        ),
+    )
     p.add_argument(
         "--no-routing",
         dest="no_routing",
@@ -1321,12 +1474,23 @@ def main() -> None:
     args = _parse_args()
     llm, output_dir = _setup_wizard(args)
 
+    debug: bool = getattr(args, "debug", False)
+    log_comms: bool = getattr(args, "log_comms", False)
+
+    comms_log_path: Optional[Path] = None
+    if log_comms:
+        ts_tag = time.strftime("%Y%m%d_%H%M%S")
+        comms_log_path = output_dir / _COMMS_DIR_NAME / f"comms_{ts_tag}.jsonl"
+
     session = ROFSession(
         llm=llm,
         output_dir=output_dir,
-        verbose=args.verbose,
+        verbose=args.verbose or debug,
         use_routing=not getattr(args, "no_routing", False),
         output_mode=getattr(args, "output_mode", "auto"),
+        debug=debug,
+        log_comms=log_comms,
+        comms_log_path=comms_log_path,
     )
 
     if args.one_shot:
