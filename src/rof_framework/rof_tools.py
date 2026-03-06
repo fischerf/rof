@@ -2438,7 +2438,27 @@ class FileSaveTool(ToolProvider):
         bytes_written (int) – number of bytes written
     """
 
-    _TRIGGER_KEYWORDS = ["save file", "write file"]
+    _TRIGGER_KEYWORDS = [
+        "save file",
+        "write file",
+        "export file",
+        "save csv",
+        "write csv",
+        "export csv",
+        "save data",
+        "write data",
+        "export data",
+        "save output",
+        "write output",
+        "save results",
+        "write results",
+        "export results",
+        "save to file",
+        "write to file",
+        "export to file",
+        "store file",
+        "persist file",
+    ]
 
     def __init__(self) -> None:
         pass
