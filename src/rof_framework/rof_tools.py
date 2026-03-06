@@ -20,8 +20,12 @@ Package structure (embedded single-file):
     │   ├── api_call.py           # APICallTool     – generic HTTP REST
     │   ├── database.py           # DatabaseTool    – SQL queries (SQLite / SA)
     │   ├── file_reader.py        # FileReaderTool  – PDF / CSV / DOCX / TXT
+    │   ├── file_save.py          # FileSaveTool    – write / append files to disk
     │   ├── validator.py          # ValidatorTool   – RL-schema validation
-    │   └── human_in_loop.py      # HumanInLoopTool – pause & await human
+    │   ├── human_in_loop.py      # HumanInLoopTool – pause & await human
+    │   ├── lua_run.py            # LuaRunTool      – inline Lua execution
+    │   ├── llm_player.py         # LLMPlayerTool   – LLM interaction / script player
+    │   └── ai_codegen.py         # AICodeGenTool   – AI-powered code generation
     └── sdk/
         ├── __init__.py
         ├── decorator.py          # @rof_tool decorator for Python
