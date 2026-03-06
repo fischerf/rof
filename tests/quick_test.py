@@ -18,6 +18,7 @@ TEST_DOMAINS = {
     "llm": "test_llm_providers.py",
     "tools": "test_tools_registry.py",
     "passthrough": "test_tool_output_graph_passthrough.py",
+    "chains": "test_pipeline_chains.py",
     "pipeline": "test_pipeline_runner.py",
     "routing": "test_routing.py",
     "all": "./",
@@ -73,6 +74,7 @@ Available domains:
   llm      - LLM provider tests
   tools       - Tools and registry tests
   passthrough - Tool output entity-keyed contract & graph passthrough tests
+  chains      - Real multi-tool pipeline chain integration tests
   pipeline    - Pipeline orchestration tests
   routing     - Learned routing confidence tests
   all         - All tests

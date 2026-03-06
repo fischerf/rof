@@ -164,6 +164,13 @@ def main():
             ],
         ),
         TestDomain(
+            name="Pipeline Chains",
+            description="Real multi-tool integration tests: chains of actual tool implementations (WebSearchTool → AICodeGenTool → CodeRunnerTool → FileSaveTool → FileReaderTool) where each tool's real output feeds the next tool's real execution",
+            test_files=[
+                "test_pipeline_chains.py",
+            ],
+        ),
+        TestDomain(
             name="Pipeline",
             description="Tests for multi-stage pipeline orchestration",
             test_files=[
