@@ -77,7 +77,9 @@ from typing import Any, Callable, Optional, Union
 logger = logging.getLogger("rof.tools")
 
 # ---------------------------------------------------------------------------
-# Re-export / stub rof-core interfaces
+# Import rof-core interfaces; fall back to the shared canonical stubs when
+# rof_core is not on the path (e.g. standalone review or testing).
+# The stubs live in a single file (_stubs.py) — never copy-paste them here.
 # ---------------------------------------------------------------------------
 try:
     from .rof_core import (  # type: ignore
@@ -96,55 +98,16 @@ try:
 
     _CORE_IMPORTED = True
 except ImportError:
+    from ._stubs import (  # type: ignore
+        LLMProvider,
+        LLMRequest,
+        LLMResponse,
+        ToolProvider,
+        ToolRequest,
+        ToolResponse,
+    )
+
     _CORE_IMPORTED = False
-
-    from abc import ABC as _ABC
-    from abc import abstractmethod as _abs
-    from dataclasses import dataclass as _dc
-    from dataclasses import field as _f
-
-    @_dc
-    class ToolRequest:  # type: ignore[no-redef]
-        name: str
-        input: dict = _f(default_factory=dict)
-        goal: str = ""
-
-    @_dc
-    class ToolResponse:  # type: ignore[no-redef]
-        success: bool
-        output: Any = None
-        error: str = ""
-
-    class ToolProvider(_ABC):  # type: ignore[no-redef]
-        @property
-        @_abs
-        def name(self) -> str: ...
-        @property
-        @_abs
-        def trigger_keywords(self) -> list[str]: ...
-        @_abs
-        def execute(self, request: ToolRequest) -> ToolResponse: ...
-
-    try:
-        from .rof_llm import LLMProvider  # type: ignore[assignment]
-    except ImportError:
-
-        class LLMProvider(_ABC):  # type: ignore[no-redef]
-            @_abs
-            def complete(self, req: Any) -> Any: ...
-
-    @_dc
-    class LLMRequest:  # type: ignore[no-redef]
-        prompt: str
-        system: str = ""
-        max_tokens: int = 256
-        temperature: float = 0.7
-        output_mode: str = "raw"  # tools always produce free-form output, never RL/JSON
-
-    @_dc
-    class LLMResponse:  # type: ignore[no-redef]
-        content: str
-        raw: dict = _f(default_factory=dict)
 
 
 # ===========================================================================

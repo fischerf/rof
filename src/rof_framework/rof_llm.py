@@ -61,12 +61,11 @@ from typing import Any, Optional
 logger = logging.getLogger("rof.llm")
 
 # ---------------------------------------------------------------------------
-# Inline stubs of rof-core types so this module is self-contained for
-# review/testing.  In a real package these would be proper imports:
-#   from rof.interfaces.llm_provider import LLMProvider, LLMRequest, LLMResponse
+# Import rof-core LLM interfaces; fall back to the shared canonical stubs
+# when rof_core is not on the path (e.g. standalone review or testing).
+# The stubs live in a single file (_stubs.py) — never copy-paste them here.
 # ---------------------------------------------------------------------------
 try:
-    # Attempt real import first
     from .rof_core import (  # type: ignore
         LLMProvider,
         LLMRequest,
@@ -75,39 +74,13 @@ try:
 
     _CORE_IMPORTED = True
 except ImportError:
+    from ._stubs import (  # type: ignore
+        LLMProvider,
+        LLMRequest,
+        LLMResponse,
+    )
+
     _CORE_IMPORTED = False
-
-    # ---- Minimal stubs (only used when rof_core is not on the path) --------
-    from dataclasses import dataclass as _dc
-    from dataclasses import field as _f
-
-    @_dc
-    class LLMRequest:  # type: ignore
-        prompt: str
-        system: str = ""
-        max_tokens: int = 1024
-        temperature: float = 0.0
-        metadata: dict = _f(default_factory=dict)
-        timeout: float | None = None  # per-call timeout override
-        output_mode: str = "json"  # "json" | "rl" | "raw"
-
-    @_dc
-    class LLMResponse:  # type: ignore
-        content: str
-        raw: dict = _f(default_factory=dict)
-        tool_calls: list = _f(default_factory=list)
-
-    class LLMProvider(ABC):  # type: ignore
-        @abstractmethod
-        def complete(self, request: LLMRequest) -> LLMResponse: ...
-        @abstractmethod
-        def supports_tool_calling(self) -> bool: ...
-        def supports_structured_output(self) -> bool:
-            return False
-
-        @property
-        @abstractmethod
-        def context_limit(self) -> int: ...
 
 
 # ===========================================================================

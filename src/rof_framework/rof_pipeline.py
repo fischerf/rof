@@ -68,8 +68,9 @@ from typing import Any, Callable, Optional, Union
 logger = logging.getLogger("rof.pipeline")
 
 # ---------------------------------------------------------------------------
-# Re-export / stub rof-core interfaces
-# (same graceful-import pattern as rof_tools.py)
+# Import rof-core interfaces; fall back to the shared canonical stubs when
+# rof_core is not on the path (e.g. standalone review or testing).
+# The stubs live in a single file (_stubs.py) — never copy-paste them here.
 # ---------------------------------------------------------------------------
 try:
     from .rof_core import (  # type: ignore
@@ -94,55 +95,21 @@ try:
 
     _CORE_IMPORTED = True
 except ImportError:
+    from ._stubs import (  # type: ignore
+        Event,
+        EventBus,
+        LLMProvider,
+        LLMRequest,
+        LLMResponse,
+        OrchestratorConfig,
+        RunResult,
+        StepResult,
+        ToolProvider,
+        ToolRequest,
+        ToolResponse,
+    )
+
     _CORE_IMPORTED = False
-
-    # Minimal stubs so the module can be imported standalone for inspection
-    class LLMProvider(ABC):  # type: ignore[no-redef]
-        @abstractmethod
-        def complete(self, request: Any) -> Any: ...
-        @abstractmethod
-        def supports_tool_calling(self) -> bool: ...
-        @property
-        @abstractmethod
-        def context_limit(self) -> int: ...
-
-    class ToolProvider(ABC):  # type: ignore[no-redef]
-        @property
-        @abstractmethod
-        def name(self) -> str: ...
-        @property
-        @abstractmethod
-        def trigger_keywords(self) -> list[str]: ...
-        @abstractmethod
-        def execute(self, request: Any) -> Any: ...
-
-    class EventBus:  # type: ignore[no-redef]
-        def subscribe(self, *a, **kw):
-            pass
-
-        def publish(self, *a, **kw):
-            pass
-
-    @dataclass
-    class Event:  # type: ignore[no-redef]
-        name: str
-        payload: dict = field(default_factory=dict)
-
-    @dataclass
-    class RunResult:  # type: ignore[no-redef]
-        run_id: str
-        success: bool
-        steps: list = field(default_factory=list)
-        snapshot: dict = field(default_factory=dict)
-        error: Optional[str] = None
-
-    @dataclass
-    class OrchestratorConfig:  # type: ignore[no-redef]
-        max_iterations: int = 50
-        pause_on_error: bool = False
-        auto_save_state: bool = False
-        system_preamble: str = ""
-        output_mode: str = "auto"  # "auto" | "json" | "rl"
 
 
 # ===========================================================================

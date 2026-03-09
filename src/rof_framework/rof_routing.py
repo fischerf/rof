@@ -123,7 +123,12 @@ from typing import Any, Optional, Union
 logger = logging.getLogger("rof.routing")
 
 # ---------------------------------------------------------------------------
-# Import rof-core interfaces (required)
+# Import rof-core interfaces; fall back to the shared canonical stubs for the
+# types that are available there when rof_core is not on the path.
+# The stubs live in a single file (_stubs.py) — never copy-paste them here.
+# Heavier types (Orchestrator, WorkflowGraph, StateManager, …) are only used
+# inside ConfidentOrchestrator / ConfidentPipeline which are already guarded
+# by _CORE_IMPORTED, so they don't need stub equivalents.
 # ---------------------------------------------------------------------------
 try:
     from .rof_core import (  # type: ignore
@@ -154,6 +159,22 @@ except ImportError:
         "are unavailable. Import GoalPatternNormalizer, RoutingMemory, "
         "SessionMemory, GoalSatisfactionScorer, ConfidentToolRouter "
         "independently."
+    )
+
+    # Import the subset of types available as canonical stubs so that the
+    # standalone-importable components (GoalPatternNormalizer, RoutingMemory,
+    # ConfidentToolRouter, …) still get properly typed bases.
+    from ._stubs import (  # type: ignore
+        Event,
+        EventBus,
+        GoalState,
+        GoalStatus,
+        OrchestratorConfig,
+        RunResult,
+        StepResult,
+        ToolProvider,
+        ToolRequest,
+        ToolResponse,
     )
 
 # ---------------------------------------------------------------------------
@@ -1634,8 +1655,8 @@ __all__ = [
 # ===========================================================================
 
 if __name__ == "__main__":
-    import sys
     import os
+    import sys
 
     # Add the current directory to sys.path so rof_core / rof_tools are importable
     sys.path.insert(0, os.path.dirname(__file__))
