@@ -212,6 +212,87 @@ if _HAS_ROUTING:
 # ===========================================================================
 
 # ===========================================================================
+# Session-wide stats counter  (tokens, requests, errors)
+# ===========================================================================
+
+
+class _SessionStats:
+    """Accumulates lightweight telemetry across the whole session."""
+
+    def __init__(self) -> None:
+        self.total_requests: int = 0
+        self.total_errors: int = 0
+        self.total_prompt_chars: int = 0
+        self.total_response_chars: int = 0
+        self.total_runs: int = 0
+        self.last_plan_ms: int = 0
+        self.last_exec_ms: int = 0
+        self._start: float = time.perf_counter()
+
+    # Rough token estimate: ~4 chars per token
+    @property
+    def est_prompt_tokens(self) -> int:
+        return self.total_prompt_chars // 4
+
+    @property
+    def est_response_tokens(self) -> int:
+        return self.total_response_chars // 4
+
+    @property
+    def est_total_tokens(self) -> int:
+        return self.est_prompt_tokens + self.est_response_tokens
+
+    @property
+    def uptime_s(self) -> int:
+        return int(time.perf_counter() - self._start)
+
+    def record_request(self, prompt: str, system: str = "") -> None:
+        self.total_requests += 1
+        self.total_prompt_chars += len(prompt) + len(system)
+
+    def record_response(self, content: str) -> None:
+        self.total_response_chars += len(content)
+
+    def record_error(self) -> None:
+        self.total_errors += 1
+
+
+# Global stats singleton — populated by _StatsTracker and ROFSession
+_STATS = _SessionStats()
+
+
+# ===========================================================================
+# Stats tracker  –  thin LLMProvider wrapper that feeds _STATS
+# ===========================================================================
+
+
+class _StatsTracker:
+    """
+    Wraps any LLMProvider and records every request/response in _STATS.
+    Stacks transparently with _CommsLogger.
+    """
+
+    def __init__(self, provider) -> None:
+        self._provider = provider
+
+    def __getattr__(self, name):
+        return getattr(self._provider, name)
+
+    def complete(self, request):
+        _STATS.record_request(
+            prompt=getattr(request, "prompt", ""),
+            system=getattr(request, "system", ""),
+        )
+        try:
+            response = self._provider.complete(request)
+        except Exception:
+            _STATS.record_error()
+            raise
+        _STATS.record_response(getattr(response, "content", ""))
+        return response
+
+
+# ===========================================================================
 # Communications logger  (shared by --log-comms in both REPL and one-shot)
 # ===========================================================================
 
@@ -294,7 +375,9 @@ class _CommsLogger:
             fh.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
 
 
-def _attach_debug_hooks(llm, debug: bool, log_comms: bool, log_path: Optional[Path]) -> object:
+def _attach_debug_hooks(
+    llm, debug: bool, log_comms: bool, log_path: Optional[Path], track_stats: bool = True
+) -> object:
     """
     Apply the two optional diagnostic layers to any LLMProvider (or RetryManager):
 
@@ -343,6 +426,14 @@ def _attach_debug_hooks(llm, debug: bool, log_comms: bool, log_path: Optional[Pa
         else:
             llm = _CommsLogger(llm, log_path)
 
+    # Always attach stats tracker as the outermost layer so it sees
+    # every call regardless of retry / comms-log wrapping.
+    if track_stats:
+        if hasattr(llm, "_provider"):
+            llm._provider = _StatsTracker(llm._provider)
+        else:
+            llm = _StatsTracker(llm)
+
     return llm
 
 
@@ -354,9 +445,23 @@ _USE_COLOUR = (
     )
 )
 
+# Detect whether the terminal is wide enough for the headline bar
+_TERM_WIDTH: int = 80
+try:
+    import shutil as _shutil
+
+    _TERM_WIDTH = max(60, _shutil.get_terminal_size((80, 24)).columns)
+except Exception:
+    pass
+
 
 def _c(text: str, code: str) -> str:
     return f"\033[{code}m{text}\033[0m" if _USE_COLOUR else text
+
+
+# Erase-to-end-of-line + carriage return (for overwriting headline in place)
+def _cr_erase() -> str:
+    return "\033[2K\r" if _USE_COLOUR else "\r"
 
 
 def cyan(t: str) -> str:
@@ -375,6 +480,14 @@ def red(t: str) -> str:
     return _c(t, "91")
 
 
+def magenta(t: str) -> str:
+    return _c(t, "95")
+
+
+def blue(t: str) -> str:
+    return _c(t, "94")
+
+
 def bold(t: str) -> str:
     return _c(t, "1")
 
@@ -383,33 +496,179 @@ def dim(t: str) -> str:
     return _c(t, "2")
 
 
-def banner(title: str, char: str = "=", width: int = 68) -> None:
-    line = char * width
-    print(f"\n{line}")
-    print(f"  {bold(title)}")
-    print(line)
+def _visible(text: str) -> int:
+    """Return the printable character width of *text* (strips ANSI escapes)."""
+    return len(re.sub(r"\033\[[0-9;]*m", "", text))
+
+
+# ---------------------------------------------------------------------------
+# Content-driven box renderer
+# ---------------------------------------------------------------------------
+# A "box spec" is a list of row descriptors, each one of:
+#   str                – a plain content row
+#   None               – a mid-separator  ├──────┤
+#   "TOP" / "BOT"      – reserved; inserted automatically
+#
+# Usage:
+#   _box(["Title", None, "row1", "row2"], colour="96")
+#
+# The box width is determined by the widest visible row, capped at
+# _TERM_WIDTH.  Every row is padded to that width so all right borders
+# line up perfectly regardless of ANSI escape sequences.
+# ---------------------------------------------------------------------------
+
+
+def _box(rows: list, *, colour: str = "0", min_width: int = 0) -> list[str]:
+    """
+    Build and return the lines of a box whose width is driven by content.
+
+    Parameters
+    ----------
+    rows      : list of str | None
+                str  → content row (may contain ANSI codes)
+                None → horizontal mid-separator  ├────┤
+    colour    : ANSI colour code applied to the border characters only
+    min_width : enforce a minimum inner content width
+
+    Returns a list of ready-to-print strings (no trailing newline).
+    """
+    # 1. Measure the widest visible content row
+    content_width = min_width
+    for row in rows:
+        if row is not None:
+            content_width = max(content_width, _visible(row))
+
+    # 2. Total box width = content + 2 padding spaces + 2 border chars
+    #    Clamp to terminal width, but never narrower than content.
+    inner = min(content_width, _TERM_WIDTH - 4)
+    inner = max(inner, content_width)  # never clip content
+
+    top = "\u250c" + "\u2500" * (inner + 2) + "\u2510"
+    mid = "\u251c" + "\u2500" * (inner + 2) + "\u2524"
+    bot = "\u2514" + "\u2500" * (inner + 2) + "\u2518"
+
+    def _row_line(text: str) -> str:
+        pad = inner - _visible(text)
+        return "\u2502 " + text + " " * pad + " \u2502"
+
+    lines: list[str] = [_c(top, colour)]
+    for row in rows:
+        if row is None:
+            lines.append(_c(mid, colour))
+        else:
+            lines.append(_c(_row_line(row), colour))
+    lines.append(_c(bot, colour))
+    return lines
+
+
+def _print_box(rows: list, *, colour: str = "0", min_width: int = 0) -> None:
+    """Render and immediately print a box (adds a leading blank line)."""
+    print()
+    for line in _box(rows, colour=colour, min_width=min_width):
+        print(line)
+
+
+def banner(title: str, subtitle: str = "") -> None:
+    rows: list = [bold(title)]
+    if subtitle:
+        rows.append(dim(subtitle))
+    _print_box(rows, colour="96")
 
 
 def section(title: str) -> None:
-    print(f"\n{dim('-' * 50)}")
-    print(f"  {cyan(title)}")
-    print(dim("-" * 50))
+    label = f"  {cyan(title)}"
+    fill = max(0, _TERM_WIDTH - _visible(label) - 2)
+    print()
+    print(dim("\u2500" * 2) + label + "  " + dim("\u2500" * fill))
 
 
 def step(label: str, text: str = "") -> None:
-    print(f"  {bold(green('[' + label + ']'))}  {text}")
+    tag_map = {
+        "PLAN": cyan,
+        "GOAL": blue,
+        "MODE": dim,
+        "TOOL": magenta,
+        "ROUTE": yellow,
+        "ERR": red,
+    }
+    colour_fn = tag_map.get(label, green)
+    tag = colour_fn(f"\u25b8 {label:<5}")
+    print(f"  {bold(tag)}  {text}")
+
+
+_WARN_ICON = "\u26a0 WARN "
+_ERR_ICON = "\u2717 ERR  "
+_INFO_ICON = "\u2139     "
 
 
 def warn(text: str) -> None:
-    print(f"  {yellow('[WARN]')}  {text}")
+    print(f"  {yellow(_WARN_ICON)}  {text}")
 
 
 def err(text: str) -> None:
-    print(f"  {red('[ERR] ')}  {text}")
+    print(f"  {red(_ERR_ICON)}  {text}")
 
 
 def info(text: str) -> None:
-    print(f"  {dim('     ')}  {text}")
+    print(f"  {dim(_INFO_ICON)}  {text}")
+
+
+# ---------------------------------------------------------------------------
+# Headline bar  –  one-line stats printed/refreshed after every run
+# ---------------------------------------------------------------------------
+
+# Provider/model label set once at startup; read by print_headline()
+_HEADLINE_PROVIDER: str = ""
+_HEADLINE_MODEL: str = ""
+
+
+def set_headline_identity(provider: str, model: str) -> None:
+    global _HEADLINE_PROVIDER, _HEADLINE_MODEL
+    _HEADLINE_PROVIDER = provider
+    _HEADLINE_MODEL = model
+
+
+def print_headline(*, newline: bool = True) -> None:
+    """
+    Print (or refresh) a one-line stats bar:
+
+      [ ROF ]  provider/model  |  runs: N  |  reqs: N  |  ~tok: N  |  plan: Nms  exec: Nms  |  up: Ns
+    """
+    s = _STATS
+    provider_label = (
+        f"{_HEADLINE_PROVIDER}/{_HEADLINE_MODEL}"
+        if _HEADLINE_MODEL
+        else _HEADLINE_PROVIDER or "rof"
+    )
+
+    # Build segments
+    seg_id = bold(cyan(" ROF "))
+    seg_prov = dim(provider_label)
+    seg_runs = f"runs: {bold(str(s.total_runs))}"
+    seg_reqs = f"reqs: {bold(str(s.total_requests))}"
+    seg_tok = f"~tok: {bold(str(s.est_total_tokens))}"
+    seg_errs = f"err: {bold(red(str(s.total_errors)))}" if s.total_errors else ""
+    seg_timing = ""
+    if s.last_plan_ms or s.last_exec_ms:
+        seg_timing = f"plan: {bold(str(s.last_plan_ms))}ms  exec: {bold(str(s.last_exec_ms))}ms"
+    seg_up = dim(f"up: {s.uptime_s}s")
+
+    sep = dim("  \u2502  ")
+    parts = [f"\u2590{seg_id}\u258c", seg_prov, seg_runs, seg_reqs, seg_tok]
+    if seg_errs:
+        parts.append(seg_errs)
+    if seg_timing:
+        parts.append(seg_timing)
+    parts.append(seg_up)
+
+    line = sep.join(parts)
+    end = "\n" if newline else ""
+    if _USE_COLOUR:
+        print(_cr_erase() + _c(line, "2"), end=end, flush=True)
+    else:
+        # Plain text fallback: strip all ANSI
+        plain = re.sub(r"\033\[[0-9;]*m", "", line)
+        print(plain, end=end, flush=True)
 
 
 # ===========================================================================
@@ -738,8 +997,9 @@ class ROFSession:
     # ------------------------------------------------------------------
 
     def run(self, user_prompt: str) -> RunResult:
+        _STATS.total_runs += 1
         # ---- Stage 1: Plan -------------------------------------------
-        section("Stage 1  |  Planning  (NL -> RelateLang)")
+        section("Stage 1  |  Planning  (NL \u2192 RelateLang)")
         info(f"Prompt: {user_prompt!r}")
         print()
 
@@ -751,7 +1011,8 @@ class ROFSession:
             raise
 
         plan_ms = int((time.perf_counter() - t0) * 1000)
-        step("PLAN", f"generated in {plan_ms} ms")
+        _STATS.last_plan_ms = plan_ms
+        step("PLAN", f"generated in {bold(str(plan_ms))} ms")
         print()
 
         # Print the generated RL
@@ -798,25 +1059,45 @@ class ROFSession:
         t1 = time.perf_counter()
         result = orch.run(ast)
         exec_ms = int((time.perf_counter() - t1) * 1000)
+        _STATS.last_exec_ms = exec_ms
 
         # ---- Summary -------------------------------------------------
         section("Run summary")
-        status = green("SUCCESS") if result.success else red("FAILED")
+
+        status_icon = green("\u2714 SUCCESS") if result.success else red("\u2717 FAILED")
         routing_label = (
             green("ConfidentOrchestrator") if self._use_routing else dim("Orchestrator (static)")
         )
         resolved_mode = self._orch_config.output_mode
         if resolved_mode == "auto":
             resolved_mode = "json (auto)" if self._llm.supports_structured_output() else "rl (auto)"
-        print(f"  Status  : {status}")
-        print(f"  Mode    : {cyan(resolved_mode)}")
-        print(f"  Routing : {routing_label}")
+
+        # Two-column summary table
+        rows = [
+            ("Status", status_icon),
+            ("Mode", cyan(resolved_mode)),
+            ("Routing", routing_label),
+        ]
         if self._use_routing and self._routing_memory is not None:
-            print(f"  Memory  : {len(self._routing_memory)} routing observation(s) accumulated")
-        print(f"  Steps   : {len(result.steps)}")
-        print(f"  Plan ms : {plan_ms}")
-        print(f"  Exec ms : {exec_ms}")
-        print(f"  Run ID  : {result.run_id[:12]}…")
+            rows.append(("Memory", f"{len(self._routing_memory)} observation(s)"))
+        rows += [
+            ("Steps", bold(str(len(result.steps)))),
+            ("Plan", bold(f"{plan_ms} ms")),
+            ("Exec", bold(f"{exec_ms} ms")),
+            (
+                "Tokens",
+                bold(f"~{_STATS.est_total_tokens}")
+                + dim(
+                    f"  (prompt ~{_STATS.est_prompt_tokens}  resp ~{_STATS.est_response_tokens})"
+                ),
+            ),
+            ("Requests", bold(str(_STATS.total_requests))),
+            ("Run ID", dim(result.run_id[:16] + "…")),
+        ]
+        print()
+        for label, value in rows:
+            label_col = dim(f"{label:<10}")
+            print(f"  {label_col}  {value}")
 
         # Always persist plan + run summary
         self._save_run_artifacts(result.run_id, rl_src, result)
@@ -824,19 +1105,20 @@ class ROFSession:
         # Print final entity state
         entities = result.snapshot.get("entities", {})
         if entities:
-            print()
-            print(f"  {bold('Final entity state:')}")
-            for ename, edata in entities.items():
-                if ename.startswith("RoutingTrace"):
-                    continue  # shown separately below
-                attrs = edata.get("attributes", {})
-                preds = edata.get("predicates", [])
-                parts: list[str] = []
-                for k, v in attrs.items():
-                    parts.append(f"{k}={v!r}")
-                for p in preds:
-                    parts.append(f"is={p!r}")
-                print(f"    {cyan(ename)}: {', '.join(parts) or '(empty)'}")
+            non_trace = {k: v for k, v in entities.items() if not k.startswith("RoutingTrace")}
+            if non_trace:
+                print()
+                print(f"  {bold('Entity state:')}")
+                for ename, edata in non_trace.items():
+                    attrs = edata.get("attributes", {})
+                    preds = edata.get("predicates", [])
+                    parts: list[str] = []
+                    for k, v in attrs.items():
+                        parts.append(f"{dim(k)}={cyan(repr(v))}")
+                    for p in preds:
+                        parts.append(f"{dim('is')}={yellow(repr(p))}")
+                    entity_line = ", ".join(parts) or dim("(empty)")
+                    print(f"    {bold(cyan(ename))}: {entity_line}")
 
         # Print routing decisions (RoutingTrace entities)
         if self._use_routing:
@@ -847,16 +1129,28 @@ class ROFSession:
                 for tname, tdata in traces.items():
                     a = tdata.get("attributes", {})
                     uncertain_mark = (
-                        yellow("  ⚠ uncertain") if a.get("is_uncertain") == "True" else ""
+                        yellow("  \u26a0 uncertain") if a.get("is_uncertain") == "True" else ""
                     )
+                    conf_raw = a.get("composite", "?")
+                    try:
+                        conf_f = float(conf_raw)
+                        conf_col = (green if conf_f >= 0.7 else yellow if conf_f >= 0.4 else red)(
+                            f"{conf_f:.3f}"
+                        )
+                    except (TypeError, ValueError):
+                        conf_col = str(conf_raw)
                     print(
                         f"    {cyan(a.get('goal_pattern', tname))}: "
-                        f"tool={a.get('tool_selected', '?')}  "
-                        f"composite={a.get('composite', '?')}  "
-                        f"tier={a.get('dominant_tier', '?')}  "
+                        f"tool={bold(a.get('tool_selected', '?'))}  "
+                        f"conf={conf_col}  "
+                        f"tier={dim(a.get('dominant_tier', '?'))}  "
                         f"sat={a.get('satisfaction', '?')}"
                         f"{uncertain_mark}"
                     )
+
+        # ---- Headline bar (always last) ---------------------------------
+        print()
+        print_headline()
 
         return result
 
@@ -965,10 +1259,13 @@ PROVIDER_DEFAULTS = {
 def _setup_wizard(args: argparse.Namespace) -> LLMProvider:
     """Interactive wizard to configure the LLM provider."""
 
-    banner("ROF AI Demo  –  RelateLang Orchestration Framework")
+    banner(
+        "ROF AI Demo  \u2013  RelateLang Orchestration Framework",
+        "Natural language \u2192 RelateLang workflow \u2192 execution",
+    )
     print()
-    print("  Turns natural language into executable RelateLang workflows.")
-    print("  Powered by rof_core + rof_llm + rof_tools.")
+    print(f"  {dim('Turns natural language into executable RelateLang workflows.')}")
+    print(f"  {dim('Powered by rof_core + rof_llm + rof_tools.')}")
     print()
 
     # Normalise provider aliases so internal logic is consistent
@@ -981,13 +1278,17 @@ def _setup_wizard(args: argparse.Namespace) -> LLMProvider:
     # --- Provider --------------------------------------------------------
     provider = args.provider
     if not provider:
-        print("  Available providers:")
-        print("    1. anthropic      (Claude claude-opus-4-5, claude-sonnet-4-5, …)")
-        print("    2. openai         (GPT-4o, GPT-4o-mini, o1, …)")
-        print("    3. ollama         (local models: deepseek-r1:8b, mistral, …)")
-        print("    4. github_copilot (Copilot Chat via PAT / OAuth token)")
+        print(f"  {bold('Available providers:')}")
+        print(
+            f"    {cyan('1')}. {bold('anthropic')}      (Claude claude-opus-4-5, claude-sonnet-4-5, \u2026)"
+        )
+        print(f"    {cyan('2')}. {bold('openai')}         (GPT-4o, GPT-4o-mini, o1, \u2026)")
+        print(
+            f"    {cyan('3')}. {bold('ollama')}         (local models: deepseek-r1:8b, mistral, \u2026)"
+        )
+        print(f"    {cyan('4')}. {bold('github_copilot')} (Copilot Chat via PAT / OAuth token)")
         print()
-        choice = input("  Choose provider [1/2/3/4] or name: ").strip()
+        choice = input(f"  {bold('Choose provider')} [1/2/3/4] or name: ").strip()
         provider = {
             "1": "anthropic",
             "2": "openai",
@@ -999,12 +1300,15 @@ def _setup_wizard(args: argparse.Namespace) -> LLMProvider:
 
     provider = _ALIASES.get(provider.lower(), provider.lower())
     default_model, env_key = PROVIDER_DEFAULTS.get(provider, ("gpt-4o", None))
+    # Register for headline display
+    set_headline_identity(provider, "")
 
     # --- Model -----------------------------------------------------------
     model = args.model
     if not model:
-        typed = input(f"  Model [default: {default_model}]: ").strip()
+        typed = input(f"  {bold('Model')} [default: {cyan(default_model)}]: ").strip()
         model = typed or default_model
+    set_headline_identity(provider, model)
 
     # --- Output directory (needed by all paths) --------------------------
     output_dir = Path(args.output_dir) if args.output_dir else Path.cwd() / "rof_output"
@@ -1066,11 +1370,14 @@ def _setup_wizard(args: argparse.Namespace) -> LLMProvider:
             # ── Path A: direct token supplied — skip device-flow entirely ─
             masked = github_token[:8] + "*" * max(0, len(github_token) - 8)
             print()
-            print(f"  Provider : {bold(provider)}")
-            print(f"  Model    : {bold(model)}")
-            print(f"  GH token : {masked}  {dim('(direct — device-flow skipped)')}")
-            print(f"  Output   : {output_dir}")
-            print()
+            _print_config_box(
+                provider,
+                model,
+                output_dir,
+                extra_rows=[
+                    ("GH token", masked + "  " + dim("(direct \u2014 device-flow skipped)")),
+                ],
+            )
             base_llm = GitHubCopilotProvider(
                 github_token=github_token,
                 model=model,
@@ -1079,22 +1386,21 @@ def _setup_wizard(args: argparse.Namespace) -> LLMProvider:
         else:
             # ── Path B: no token — device-flow (with automatic cache) ─────
             open_browser = not getattr(args, "no_browser", False)
+            auth_note = (
+                dim("(browser opens automatically)")
+                if open_browser
+                else dim("(--no-browser: URL will be printed)")
+            )
             print()
-            print(f"  Provider : {bold(provider)}")
-            print(f"  Model    : {bold(model)}")
-            if open_browser:
-                print(
-                    f"  Auth     : {cyan('device-flow OAuth')}  "
-                    f"{dim('(browser opens automatically)')}"
-                )
-            else:
-                print(
-                    f"  Auth     : {cyan('device-flow OAuth')}  "
-                    f"{dim('(--no-browser: URL will be printed)')}"
-                )
-            print(f"  Cache    : {GitHubCopilotProvider._DEFAULT_CACHE_PATH}")
-            print(f"  Output   : {output_dir}")
-            print()
+            _print_config_box(
+                provider,
+                model,
+                output_dir,
+                extra_rows=[
+                    ("Auth", f"{cyan('device-flow OAuth')}  {auth_note}"),
+                    ("Cache", str(GitHubCopilotProvider._DEFAULT_CACHE_PATH)),
+                ],
+            )
             try:
                 base_llm = GitHubCopilotProvider.authenticate(
                     model=model,
@@ -1139,13 +1445,11 @@ def _setup_wizard(args: argparse.Namespace) -> LLMProvider:
         extra["base_url"] = base
         print(f"  Ollama endpoint: {base}")
 
-    print()
-    print(f"  Provider : {bold(provider)}")
-    print(f"  Model    : {bold(model)}")
+    extra_rows = []
     if api_key:
-        print(f"  API key  : {api_key[:8]}{'*' * max(0, len(api_key) - 8)}")
-    print(f"  Output   : {output_dir}")
+        extra_rows.append(("API key", api_key[:8] + "*" * max(0, len(api_key) - 8)))
     print()
+    _print_config_box(provider, model, output_dir, extra_rows=extra_rows)
 
     llm = create_provider(
         provider_name=provider,
@@ -1157,40 +1461,88 @@ def _setup_wizard(args: argparse.Namespace) -> LLMProvider:
     return llm, output_dir
 
 
+# ---------------------------------------------------------------------------
+# Config box helper  (used by _setup_wizard for all provider paths)
+# ---------------------------------------------------------------------------
+
+
+def _print_config_box(
+    provider: str, model: str, output_dir: Path, extra_rows: list | None = None
+) -> None:
+    """Print a bordered configuration summary box, width driven by content."""
+    kv_rows = [
+        ("Provider", bold(cyan(provider))),
+        ("Model", bold(model)),
+    ]
+    if extra_rows:
+        kv_rows.extend(extra_rows)
+    kv_rows.append(("Output", str(output_dir)))
+
+    # Build label width from the longest key so values are all aligned
+    label_w = max(len(k) for k, _ in kv_rows)
+    box_rows = [dim(f"{k:<{label_w}}") + "  " + v for k, v in kv_rows]
+    _print_box(box_rows, colour="96")
+    print()
+
+
 # ===========================================================================
 # REPL loop
 # ===========================================================================
 
-HELP_TEXT = """
-Commands:
-  help     – show this message
-  clear    – clear the screen
-  verbose  – toggle verbose logging
-  routing  – show learned routing memory summary (rof_routing)
-  quit     – exit
+_HELP_COMMANDS = [
+    ("help", "show this message"),
+    ("stats", "print live stats headline"),
+    ("clear", "clear the screen"),
+    ("verbose", "toggle verbose logging"),
+    ("routing", "show learned routing memory (rof_routing)"),
+    ("quit", "exit"),
+]
 
-Or just type any natural language prompt and press Enter.
+_EXAMPLE_PROMPTS = [
+    "Create a small questionnaire for CLI, executed in Lua",
+    "Create a small text adventure in Python, let the LLM play it, and save the choices",
+    "Calculate the first 15 Fibonacci numbers in Python",
+    "Write a Python script that draws an ASCII bar chart",
+    "Search the web for the latest news about RelateLang",
+    "Generate a JavaScript function to validate email addresses",
+    "Write a Lua script that implements a simple calculator",
+]
 
-Example prompts:
-  Create a small questionnaire for CLI, executed in Lua
-  create a small textadventure in python. play this textadventure and write the choices. save the python file.
-  Calculate the first 15 Fibonacci numbers in Python
-  Write a Python script that draws an ASCII bar chart
-  Search the web for the latest news about RelateLang
-  Generate a JavaScript function to validate email addresses
-  Write a Lua script that implements a simple calculator
-"""
+
+def _print_help() -> None:
+    # Build the command rows; measure key column width dynamically
+    cmd_w = max(len(cmd) for cmd, _ in _HELP_COMMANDS)
+    box_rows: list = [bold("Commands"), None]
+    for cmd, desc in _HELP_COMMANDS:
+        box_rows.append(cyan(f"{cmd:<{cmd_w}}") + "  " + dim(desc))
+    box_rows += [None, bold("Example prompts"), None]
+    for ex in _EXAMPLE_PROMPTS:
+        box_rows.append("  " + yellow(ex))
+    _print_box(box_rows, colour="2")
+    print()
 
 
 def _repl(session: ROFSession) -> None:
-    banner("Interactive REPL  –  type 'help' or a prompt, 'quit' to exit")
-    print(HELP_TEXT)
+    banner(
+        "Interactive REPL",
+        "type 'help' for commands  \u2502  'quit' to exit  \u2502  or enter any prompt",
+    )
+    _print_help()
+    # Show initial headline so users see the stats bar right away
+    print_headline()
+    print()
 
     verbose = [False]
 
     while True:
         try:
-            prompt = input(bold("rof> ")).strip()
+            # Build a compact inline prompt showing run count
+            run_label = dim(f"[{_STATS.total_runs}]") if _STATS.total_runs else ""
+            prompt_str = bold(cyan("rof")) + run_label + bold(" > ")
+            if _USE_COLOUR:
+                prompt = input(prompt_str).strip()
+            else:
+                prompt = input("rof> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -1202,16 +1554,27 @@ def _repl(session: ROFSession) -> None:
         if low in ("quit", "exit", "q"):
             break
         if low == "help":
-            print(HELP_TEXT)
+            _print_help()
+            continue
+        if low == "stats":
+            print_headline()
+            print()
             continue
         if low == "clear":
             os.system("cls" if os.name == "nt" else "clear")
+            banner(
+                "Interactive REPL",
+                "type 'help' for commands  \u2502  'quit' to exit  \u2502  or enter any prompt",
+            )
+            print_headline()
+            print()
             continue
         if low == "verbose":
             verbose[0] = not verbose[0]
             lvl = logging.DEBUG if verbose[0] else logging.WARNING
             logging.getLogger("rof").setLevel(lvl)
-            print(f"  Verbose logging {'ON' if verbose[0] else 'OFF'}")
+            state = green("ON") if verbose[0] else dim("OFF")
+            print(f"  Verbose logging {state}")
             continue
         if low == "routing":
             section("Learned routing memory")
@@ -1230,7 +1593,10 @@ def _repl(session: ROFSession) -> None:
                 traceback.print_exc()
 
     print()
-    print("  Goodbye.")
+    # Final headline before exit
+    print_headline()
+    print()
+    print(f"  {dim('Goodbye.')}  {dim(chr(0x1F44B))}")
 
 
 # ===========================================================================
