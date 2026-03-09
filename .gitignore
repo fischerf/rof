@@ -3,3 +3,5 @@ src/rof.egg-info/
 dist/
 tests/__pycache__/
 demos/fixtures/
+zed-relatelang/
+demos/rof_self_demo/
