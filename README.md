@@ -320,12 +320,80 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
 
 ```
   src/rof_framework/
-    rof_core.py            Core framework — parser, orchestrator, graph, state, events
-    rof_llm.py             LLM Gateway   — 5 provider adapters, retry, prompt renderer
-    rof_tools.py           Tool Layer    — 10 built-in tools, router, registry, SDK
-    rof_pipeline.py        Pipeline Runner — multi-stage .rl workflow chaining
-    rof_cli.py             CLI — lint · inspect · run · debug · pipeline run
-    rof_routing.py         Routing layer — ConfidentPipeline, RoutingMemory
+    py.typed                           PEP 561 marker
+
+    core/                              Core framework
+      ast/nodes.py                     StatementType, RLNode, WorkflowAST + all node types
+      parser/rl_parser.py              RLParser, StatementParser ABC, all *Parser classes
+      graph/workflow_graph.py          GoalStatus, EntityState, GoalState, WorkflowGraph
+      state/state_manager.py           StateAdapter, InMemoryStateAdapter, StateManager
+      events/event_bus.py              Event, EventHandler, EventBus
+      context/context_injector.py      ContextProvider, ContextInjector
+      conditions/condition_evaluator.py ConditionEvaluator
+      interfaces/llm_provider.py       LLMRequest, LLMResponse, LLMProvider ABC
+      interfaces/tool_provider.py      ToolRequest, ToolResponse, ToolProvider ABC
+      orchestrator/orchestrator.py     OrchestratorConfig, StepResult, RunResult, Orchestrator
+
+    llm/                               LLM Gateway — 5 provider adapters, retry, renderer
+      providers/openai_provider.py     OpenAIProvider, AzureOpenAIProvider
+      providers/anthropic_provider.py  AnthropicProvider
+      providers/gemini_provider.py     GeminiProvider
+      providers/ollama_provider.py     OllamaProvider
+      providers/github_copilot_provider.py  GitHubCopilotProvider
+      renderer/prompt_renderer.py      PromptRenderer, RendererConfig
+      response/response_parser.py      ResponseParser, ParsedResponse
+      retry/retry_manager.py           RetryManager, RetryConfig, BackoffStrategy
+
+    tools/                             Tool Layer — built-in tools, router, registry, SDK
+      registry/tool_registry.py        ToolRegistry
+      registry/factory.py              create_default_registry()
+      router/tool_router.py            ToolRouter, RoutingStrategy, RouteResult
+      tools/web_search.py              WebSearchTool
+      tools/rag.py                     RAGTool
+      tools/code_runner.py             CodeRunnerTool
+      tools/api_call.py                APICallTool
+      tools/database.py                DatabaseTool
+      tools/file_reader.py             FileReaderTool
+      tools/file_save.py               FileSaveTool
+      tools/validator.py               ValidatorTool
+      tools/human_in_loop.py           HumanInLoopTool
+      tools/lua_run.py                 LuaRunTool
+      tools/llm_player.py              LLMPlayerTool
+      tools/ai_codegen.py              AICodeGenTool
+      sdk/decorator.py                 @rof_tool decorator
+      sdk/lua_runner.py                LuaScriptTool
+      sdk/js_runner.py                 JavaScriptTool
+
+    pipeline/                          Pipeline Runner — multi-stage .rl workflow chaining
+      stage.py                         PipelineStage, FanOutGroup
+      config.py                        PipelineConfig, OnFailure, SnapshotMerge
+      result.py                        StageResult, FanOutGroupResult, PipelineResult
+      serializer.py                    SnapshotSerializer
+      runner.py                        Pipeline
+      builder.py                       PipelineBuilder
+
+    routing/                           Routing layer — learned confidence routing
+      normalizer.py                    GoalPatternNormalizer
+      memory.py                        RoutingStats, RoutingMemory, SessionMemory
+      scorer.py                        GoalSatisfactionScorer
+      decision.py                      RoutingDecision
+      router.py                        ConfidentToolRouter
+      updater.py                       RoutingMemoryUpdater
+      tracer.py                        RoutingTraceWriter
+      orchestrator.py                  ConfidentOrchestrator
+      pipeline.py                      ConfidentPipeline
+      hints.py                         RoutingHint, RoutingHintExtractor
+      inspector.py                     RoutingMemoryInspector
+
+    cli/main.py                        CLI entry point — all commands + main()
+
+    # Backward-compatibility shims (thin re-export wrappers):
+    rof_core.py     →  rof_framework.core
+    rof_llm.py      →  rof_framework.llm
+    rof_tools.py    →  rof_framework.tools
+    rof_pipeline.py →  rof_framework.pipeline
+    rof_routing.py  →  rof_framework.routing
+    rof_cli.py      →  rof_framework.cli
 
   tests/fixtures/
     pipeline_load_approval/          3-stage Loan Approval pipeline
@@ -350,6 +418,19 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
       02_interact.rl                 Stage 2: LuaRunTool runs the script interactively
       03_evaluate.rl                 Stage 3: LLM evaluates the results
 ```
+
+---
+
+> **Migration note (v0.1 → package layout)**
+> The implementation has moved from six flat monolith files into typed
+> sub-packages (`rof_framework.core`, `.llm`, `.tools`, `.pipeline`,
+> `.routing`, `.cli`). All existing imports of the form
+> `from rof_framework.rof_core import Orchestrator` continue to work
+> unchanged — each `rof_*.py` file is now a thin backward-compatibility
+> shim that re-exports every public name from the canonical sub-package.
+> Prefer the new paths (e.g. `from rof_framework.core import Orchestrator`)
+> for any new code; the shims are guaranteed to remain in place for the
+> full v0.x series.
 
 ---
 
