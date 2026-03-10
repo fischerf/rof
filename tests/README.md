@@ -27,10 +27,22 @@ Tests are organized by domain:
 - Tests ContextInjector for prompt building
 - Integration tests with mock LLM and tools
 
-### 4. **CLI** (`tests/test_cli.py`)
-- Tests command-line interface commands
-- Tests lint, inspect, run, debug, and pipeline commands
-- Tests argument parsing and output formats
+### 4. **CLI** (`tests/test_cli.py`) — **110 tests, 74% coverage**
+- Tests all CLI commands: version, lint, inspect, run, debug, pipeline
+- Tests argument parsing and validation
+- Tests output formats (text, JSON, tree, RL)
+- Tests provider creation and environment variable handling
+- Tests error handling and edge cases
+- Tests workflow execution with mocked providers
+- Tests pipeline multi-stage execution
+- **Live integration tests** (10 tests, skipped by default)
+  - Tests with real LLM providers (OpenAI, Anthropic, Gemini, Ollama)
+  - Requires `ROF_TEST_PROVIDER` environment variable
+  - See `LIVE_TESTS_GUIDE.md` for setup instructions
+
+**Documentation:**
+- `CLI_TEST_SUMMARY.md` - Detailed coverage report (33% → 74%)
+- `LIVE_TESTS_GUIDE.md` - Setup and running live integration tests
 
 ### 5. **Linter** (`tests/test_lint.py`)
 - Tests static analysis rules (E001-E003, W001)
@@ -143,6 +155,113 @@ To run without coverage (faster, e.g. during active development):
 python -m pytest --no-cov
 ```
 
+### Run Live Integration Tests
+
+Live integration tests execute workflows against **real LLM providers** and are **skipped by default**. They require environment variables to be set.
+
+#### Environment Variables
+
+| Variable | Required | Description | Example |
+|----------|----------|-------------|---------|
+| `ROF_TEST_PROVIDER` | **Yes** | Provider name | `openai`, `anthropic`, `gemini`, `ollama` |
+| `ROF_TEST_API_KEY` | No* | API key for provider | `sk-...` |
+| `ROF_TEST_MODEL` | No | Model override | `gpt-4o-mini`, `claude-3-5-sonnet-20241022` |
+
+\* Not required for `ollama` or local providers
+
+#### Quick Setup Examples
+
+**Windows PowerShell:**
+```powershell
+# OpenAI (cheapest: gpt-4o-mini)
+$env:ROF_TEST_PROVIDER="openai"
+$env:ROF_TEST_API_KEY="sk-..."
+$env:ROF_TEST_MODEL="gpt-4o-mini"
+
+# Anthropic
+$env:ROF_TEST_PROVIDER="anthropic"
+$env:ROF_TEST_API_KEY="sk-ant-..."
+$env:ROF_TEST_MODEL="claude-3-5-sonnet-20241022"
+
+# Ollama (local, FREE - recommended for development)
+$env:ROF_TEST_PROVIDER="ollama"
+$env:ROF_TEST_MODEL="llama3"
+
+# Then run tests
+pytest tests/test_cli.py -v -m live_integration
+```
+
+**Linux/macOS:**
+```bash
+# OpenAI
+export ROF_TEST_PROVIDER=openai
+export ROF_TEST_API_KEY=sk-...
+export ROF_TEST_MODEL=gpt-4o-mini
+
+# Ollama (local, FREE)
+export ROF_TEST_PROVIDER=ollama
+export ROF_TEST_MODEL=llama3
+
+# Then run tests
+pytest tests/test_cli.py -v -m live_integration
+```
+
+#### Available Live Test Suites
+
+| Test Suite | Location | Tests | Description |
+|------------|----------|-------|-------------|
+| CLI Live Tests | `test_cli.py` | 10 | Command execution with real providers |
+| Core Workflows | `test_fixtures_live_integration.py` | varies | Workflow parsing & execution |
+| Tools | `test_tools_live_integration.py` | varies | Tool integration |
+
+#### Running Live Tests
+
+```bash
+# Run ALL live integration tests
+pytest tests/ -v -m live_integration
+
+# Run only CLI live tests
+pytest tests/test_cli.py -v -m live_integration
+
+# Run specific test class
+pytest tests/test_cli.py::TestRunLiveIntegration -v -m live_integration
+
+# Run specific test
+pytest tests/test_cli.py::TestRunLiveIntegration::test_run_customer_segmentation_live -v
+
+# Exclude live tests (default behavior)
+pytest tests/test_cli.py -v -m "not live_integration"
+```
+
+#### Cost Considerations
+
+⚠️ **Warning**: Live tests make real API calls and may incur costs:
+
+| Provider | Approx. Cost/Run | Best For |
+|----------|------------------|----------|
+| **Ollama** | **$0.00** | **Development (recommended)** |
+| Gemini | $0.00 - $0.01 | Free tier available |
+| OpenAI | $0.01 - $0.05 | Use `gpt-4o-mini` |
+| Anthropic | $0.01 - $0.10 | Use `claude-3-5-haiku-20241022` |
+
+**Best Practices:**
+1. Use **Ollama** (local, free) for regular development
+2. Use cheap models for paid providers (`gpt-4o-mini`, `claude-3-5-haiku-20241022`)
+3. Run live tests selectively, not in every commit
+4. Monitor API usage dashboards
+
+#### Troubleshooting Live Tests
+
+| Issue | Solution |
+|-------|----------|
+| Tests are skipped | Set `ROF_TEST_PROVIDER` environment variable |
+| Authentication errors | Verify `ROF_TEST_API_KEY` is correct |
+| Timeout errors | Use faster/smaller models |
+| Ollama connection refused | Start Ollama: `ollama serve` |
+| Model not found | Check provider docs for available models |
+
+For complete documentation, see `tests/LIVE_TESTS_GUIDE.md`.
+
 > **Why not `--cov=rof_core` etc.?**
 > The source modules (`rof_core`, `rof_llm`, `rof_tools`, `rof_pipeline`, `rof_routing`) all live inside the
 > single `rof_framework` package under `src/rof_framework/`. Passing `--cov=rof_framework` (configured
@@ -222,14 +341,14 @@ class TestExampleComponent:
 
 ## Test Coverage Goals
 
-| Module | Target |
-|---|---|
-| `rof_core` | > 80% |
-| `rof_llm` | > 70% (many external deps) |
-| `rof_tools` | > 60% (many optional deps) |
-| `rof_cli` | > 75% |
-| `rof_pipeline` | > 75% |
-| `rof_routing` | > 80% (sections without optional deps skip gracefully) |
+| Module | Current | Target |
+|---|---|---|
+| `rof_core` | ~75% | > 80% |
+| `rof_llm` | ~25% | > 70% (many external deps) |
+| `rof_tools` | ~35% | > 60% (many optional deps) |
+| `rof_cli` | **74%** ✓ | > 75% |
+| `rof_pipeline` | ~65% | > 75% |
+| `rof_routing` | varies | > 80% (sections without optional deps skip gracefully) |
 
 ---
 
