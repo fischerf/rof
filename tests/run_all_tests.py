@@ -175,6 +175,11 @@ def main():
             description="Tests for multi-stage pipeline orchestration",
             test_files=[
                 "test_pipeline_runner.py",
+                "test_condition_evaluator.py",
+                "test_pipeline_fanout_and_extras.py",
+                "test_pipeline_result_and_renderer.py",
+                "test_response_parser.py",
+                "test_retry_manager.py",
             ],
         ),
         TestDomain(
