@@ -752,7 +752,6 @@ class TestConfidentToolRouter:
 
         # First routing decision (no history)
         decision1 = router.route("determine segment for entity")
-        comp1 = decision1.composite_confidence
 
         # Simulate 10 successful outcomes
         pattern = GoalPatternNormalizer().normalize("determine segment for entity")
@@ -760,11 +759,16 @@ class TestConfidentToolRouter:
             for _ in range(10):
                 mem.update(pattern, decision1.tool.name, 0.9)
 
-            # Second routing decision (with history)
+            # Second routing decision (with history of high satisfaction)
             router2 = ConfidentToolRouter(registry=registry, routing_memory=mem)
             decision2 = router2.route("determine segment for entity")
-            # Historical tier should push composite upward
-            assert decision2.composite_confidence >= comp1
+            # With 10 high-satisfaction (0.9) outcomes the composite must be
+            # well above the uncertainty threshold, regardless of the raw
+            # static keyword score.  We no longer assert >= comp1 because the
+            # static floor clamp was removed: a weighted blend of static +
+            # 0.9 history is always high but may sit fractionally below a
+            # perfect static match score of 1.0.
+            assert decision2.composite_confidence >= 0.8
 
     def test_routing_hint_forces_tool(self):
         """A routing hint via required_tool should redirect routing."""

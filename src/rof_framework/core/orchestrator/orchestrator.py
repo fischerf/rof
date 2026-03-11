@@ -115,12 +115,19 @@ class Orchestrator:
         self.llm_provider = llm_provider
         self.tools = {t.name: t for t in (tools or [])}
         self.config = config or OrchestratorConfig()
-        self.bus = bus or EventBus()
         self.state_manager = state_manager or StateManager()
         self.injector = injector or ContextInjector()
 
-        # Standard-Logging über Event Bus
-        self.bus.subscribe("*", lambda e: logger.debug("EVENT %s: %s", e.name, e.payload))
+        # Only register the debug wildcard handler when we own the bus (i.e. a
+        # fresh EventBus was created here).  When a shared bus is injected from
+        # outside (e.g. ROFSession reuses self._bus across multiple REPL turns)
+        # we must NOT register again — every Orchestrator construction would
+        # add another copy of the handler, causing N duplicate log lines after N
+        # REPL interactions.
+        _fresh_bus = bus is None
+        self.bus = bus or EventBus()
+        if _fresh_bus:
+            self.bus.subscribe("*", lambda e: logger.debug("EVENT %s: %s", e.name, e.payload))
 
     def run(self, ast: WorkflowAST, run_id: str | None = None) -> RunResult:
         """

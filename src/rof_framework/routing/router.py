@@ -199,8 +199,10 @@ class ConfidentToolRouter:
             return static, "static"
 
         composite = (w_s * static + w_e * sess + w_h * hist) / total
-        # Static confidence is a floor: additional tiers can only boost, not lower.
-        composite = max(composite, static)
+        # NOTE: we intentionally do NOT clamp composite to static as a floor.
+        # Historical failures (low EMA) must be able to lower the composite below
+        # the raw keyword-match score so that consistently failing tools get
+        # demoted and the router learns to prefer alternatives.
 
         # Dominant tier = highest effective weight
         if w_e > w_s and w_e >= w_h:

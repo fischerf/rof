@@ -4,8 +4,25 @@ tools/tools/web_search.py
 
 from __future__ import annotations
 
-import copy, csv, hashlib, io, json, logging, math, os, queue, re, shlex, shutil
-import subprocess, sys, tempfile, textwrap, threading, time, uuid
+import copy
+import csv
+import hashlib
+import io
+import json
+import logging
+import math
+import os
+import queue
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
+import threading
+import time
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -20,6 +37,7 @@ logger = logging.getLogger("rof.tools")
 
 
 __all__ = ["SearchResult", "WebSearchTool"]
+
 
 # rof_tools/tools/web_search.py
 @dataclass
@@ -83,11 +101,13 @@ class WebSearchTool(ToolProvider):
         api_key: Optional[str] = None,
         max_results: int = 5,
         timeout: float = 15.0,
+        verify: Union[bool, str] = False,
     ):
         self._backend = backend
         self._api_key = api_key
         self._max_results = max_results
         self._timeout = timeout
+        self._verify = verify  # False bypasses corporate SSL proxy cert errors
 
     @property
     def name(self) -> str:
@@ -177,17 +197,16 @@ class WebSearchTool(ToolProvider):
             from ddgs import DDGS  # type: ignore
         except ImportError as e:
             raise ImportError("pip install ddgs") from e
-        results: list[SearchResult] = []
-        with DDGS(timeout=self._timeout) as ddgs:
-            for r in ddgs.text(query, max_results=max_results):
-                results.append(
-                    SearchResult(
-                        title=r.get("title", ""),
-                        url=r.get("href", ""),
-                        snippet=r.get("body", ""),
-                    )
-                )
-        return results
+        ddgs = DDGS(timeout=int(self._timeout), verify=self._verify)
+        raw = ddgs.text(query, max_results=max_results)
+        return [
+            SearchResult(
+                title=r.get("title", ""),
+                url=r.get("href", r.get("url", "")),
+                snippet=r.get("body", r.get("snippet", "")),
+            )
+            for r in raw
+        ]
 
     def _serpapi(self, query: str, max_results: int) -> list[SearchResult]:
         try:
@@ -260,5 +279,3 @@ class WebSearchTool(ToolProvider):
             if idx != -1:
                 return goal[idx + len(prefix) :].strip().strip('"').strip("'")
         return goal.replace("ensure", "").strip()
-
-

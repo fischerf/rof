@@ -4,8 +4,25 @@ tools/tools/human_in_loop.py
 
 from __future__ import annotations
 
-import copy, csv, hashlib, io, json, logging, math, os, queue, re, shlex, shutil
-import subprocess, sys, tempfile, textwrap, threading, time, uuid
+import copy
+import csv
+import hashlib
+import io
+import json
+import logging
+import math
+import os
+import queue
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
+import threading
+import time
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -20,6 +37,7 @@ logger = logging.getLogger("rof.tools")
 
 
 __all__ = ["HumanInLoopMode", "HumanInLoopTool"]
+
 
 # rof_tools/tools/human_in_loop.py
 class HumanInLoopMode(Enum):
@@ -112,26 +130,37 @@ class HumanInLoopTool(ToolProvider):
 
         elapsed = round(time.time() - start, 2)
 
+        # Build entity-keyed output so _execute_tool_step can write every
+        # field into the WorkflowGraph via graph.set_attribute().
+        #
+        # The orchestrator iterates t_resp.output and only stores values
+        # where isinstance(attrs, dict) is True.  A flat dict like
+        # {"prompt": "…", "response": "…"} would have strings as values,
+        # so nothing would be written and the human's answer would be
+        # silently discarded by every downstream LLM / tool step.
+        #
+        # Wrapping in "HumanResponse" mirrors the convention used by
+        # WebSearchTool ("WebSearchResults") and AICodeGenTool, and
+        # makes the response accessible to the context injector as:
+        #   HumanResponse.response  ←  what the human typed
+        #   HumanResponse.prompt    ←  what was asked
+        payload = {
+            "prompt": prompt,
+            "response": response,
+            "mode": self._mode.value,
+            "elapsed_s": elapsed,
+        }
+
         if options and response.strip().lower() not in [o.lower() for o in options]:
             return ToolResponse(
                 success=False,
-                output={
-                    "prompt": prompt,
-                    "response": response,
-                    "mode": self._mode.value,
-                    "elapsed_s": elapsed,
-                },
+                output={"HumanResponse": payload},
                 error=f"Response '{response}' not in allowed options: {options}",
             )
 
         return ToolResponse(
             success=True,
-            output={
-                "prompt": prompt,
-                "response": response,
-                "mode": self._mode.value,
-                "elapsed_s": elapsed,
-            },
+            output={"HumanResponse": payload},
         )
 
     # ------------------------------------------------------------------
@@ -196,5 +225,3 @@ class HumanInLoopTool(ToolProvider):
             time.sleep(self._poll_interval)
 
         raise TimeoutError(f"No response file written within {timeout}s at: {self._response_file}")
-
-

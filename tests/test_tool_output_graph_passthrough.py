@@ -74,6 +74,29 @@ pytestmark = pytest.mark.skipif(
 
 
 # ---------------------------------------------------------------------------
+# Session-scoped fixture: block sentence_transformers so RAG tests never
+# attempt to download the ~90 MB all-MiniLM-L6-v2 model.  RAGTool._embed
+# calls ToolRouter._embed which tries `from sentence_transformers import …`
+# first and falls back to fast TF-IDF when the import fails.  Without this
+# patch the tests that add documents (and therefore call _embed) hang
+# indefinitely waiting for the network.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _block_sentence_transformers(monkeypatch):
+    """Force RAGTool to use the TF-IDF embedding fallback in every test."""
+    import sys
+    import unittest.mock as _um
+
+    # Insert a sentinel that raises ImportError when sentence_transformers
+    # is imported, without touching any already-loaded real module.
+    if "sentence_transformers" not in sys.modules:
+        monkeypatch.setitem(sys.modules, "sentence_transformers", None)  # type: ignore[arg-type]
+    yield
+
+
+# ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
 

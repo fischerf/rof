@@ -212,4 +212,23 @@ class RAGTool(ToolProvider):
         return [{"score": s, **d} for s, d in scored[:top_k]]
 
     def _embed(self, text: str) -> list[float]:
-        return ToolRouter.__dict__["_embed"](self, text)  # reuse router logic
+        """Pure TF-IDF bag-of-words vector (no external dependencies).
+
+        Intentionally does NOT try sentence-transformers so that the
+        in_memory backend remains fully offline / test-safe.
+        """
+        if text in self._embeddings_cache:
+            return self._embeddings_cache[text]
+
+        tokens = re.findall(r"\w+", text.lower())
+        freq: dict[str, float] = {}
+        for tok in tokens:
+            freq[tok] = freq.get(tok, 0) + 1
+        norm = math.sqrt(sum(v * v for v in freq.values())) or 1.0
+        dim = 256
+        vec = [0.0] * dim
+        for tok, cnt in freq.items():
+            idx = int(hashlib.md5(tok.encode()).hexdigest(), 16) % dim
+            vec[idx] += cnt / norm
+        self._embeddings_cache[text] = vec
+        return vec

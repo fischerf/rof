@@ -62,8 +62,8 @@ Rules:
 - NO prose, NO explanation before or after the code.
 - The code must be complete and runnable as-is.
 - For interactive programs (questionnaires, menus): use print() / io.write()
-  for prompts and io.read() / input() for answers. The code will be saved to a
-  file and run interactively by the user.
+  for prompts and io.read() / input() for answers. The code will be run
+  directly in the terminal so the user can interact with it live.
 - Prefer clear, readable code with comments.
 """
 
@@ -87,6 +87,15 @@ class AICodeGenTool(ToolProvider):
         "lua": ["io.read", "io.write", "stdin"],
         "python": ["input(", "sys.stdin", "getpass"],
         "javascript": ["readline", "prompt(", "process.stdin"],
+    }
+
+    # Runtime commands for interactive execution
+    _LANG_CMD = {
+        "python": [sys.executable],
+        "lua": ["lua"],
+        "javascript": ["node"],
+        "js": ["node"],
+        "shell": ["bash"],
     }
 
     def __init__(
@@ -201,31 +210,48 @@ class AICodeGenTool(ToolProvider):
 
         if is_interactive:
             _t_section("Interactive program detected")
-            print(f"  {_t_yellow('This script reads from stdin (questionnaire / menu / prompt).')}")
-            print(f"  It has been saved to:")
-            print(f"  {_t_bold(str(out_path))}")
-            print()
-            run_cmd = {
-                "lua": f"lua {out_path.name}",
-                "python": f"python {out_path.name}",
-                "javascript": f"node {out_path.name}",
-                "js": f"node {out_path.name}",
-                "shell": f"bash {out_path.name}",
-            }.get(lang, f"./{out_path.name}")
-            print(f"  Run it with:  {_t_cyan(run_cmd)}")
-            print()
-            entity_name = self._entity_name(context)
-            return ToolResponse(
-                success=True,
-                output={
-                    entity_name: {
-                        "language": lang,
-                        "saved_to": str(out_path),
-                        "interactive": True,
-                        "run_with": run_cmd,
-                    }
-                },
+            print(
+                f"  {_t_yellow('This script reads from stdin — running it now in the terminal.')}"
             )
+            print(f"  Script: {_t_bold(str(out_path))}")
+            print()
+
+            run_result = self._run_interactive(lang, out_path)
+
+            entity_name = self._entity_name(context)
+            if run_result["success"]:
+                return ToolResponse(
+                    success=True,
+                    output={
+                        entity_name: {
+                            "language": lang,
+                            "saved_to": str(out_path),
+                            "interactive": True,
+                            "returncode": run_result["returncode"],
+                        }
+                    },
+                )
+            else:
+                # Script failed to launch (missing runtime, etc.) — fall back
+                # to the old "save and tell user" behaviour so the workflow
+                # does not break silently.
+                run_cmd = self._run_cmd_str(lang, out_path.name)
+                _t_warn(f"Could not run interactively: {run_result['error']}")
+                print(f"  The script has been saved to:")
+                print(f"  {_t_bold(str(out_path))}")
+                print(f"  Run it manually with:  {_t_cyan(run_cmd)}")
+                print()
+                return ToolResponse(
+                    success=True,
+                    output={
+                        entity_name: {
+                            "language": lang,
+                            "saved_to": str(out_path),
+                            "interactive": True,
+                            "run_with": run_cmd,
+                        }
+                    },
+                )
 
         # --- Execute non-interactive code ------------------------------
         _t_section(f"Executing {lang} code")
@@ -269,6 +295,80 @@ class AICodeGenTool(ToolProvider):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _run_interactive(self, lang: str, script_path: Path) -> dict:
+        """Run an interactive script with the terminal's stdin/stdout/stderr
+        inherited directly, so the user can see output and type answers live.
+
+        Returns a dict with keys: success (bool), returncode (int), error (str).
+        """
+        base_cmd = self._LANG_CMD.get(lang)
+        if base_cmd is None:
+            # Unknown language — try to find a shebang or give up
+            return {
+                "success": False,
+                "returncode": -1,
+                "error": f"No runtime known for lang={lang!r}",
+            }
+
+        # Resolve the interpreter: for Lua check several binary names
+        import shutil as _shutil
+
+        if lang == "lua":
+            for candidate in ("lua", "lua5.4", "lua5.3", "luajit"):
+                if _shutil.which(candidate):
+                    base_cmd = [candidate]
+                    break
+            else:
+                return {
+                    "success": False,
+                    "returncode": -1,
+                    "error": "No Lua interpreter found on PATH",
+                }
+        elif lang in ("javascript", "js"):
+            for candidate in ("node", "nodejs"):
+                if _shutil.which(candidate):
+                    base_cmd = [candidate]
+                    break
+            else:
+                return {
+                    "success": False,
+                    "returncode": -1,
+                    "error": "No Node.js interpreter found on PATH",
+                }
+
+        cmd = base_cmd + [str(script_path)]
+
+        # Force UTF-8 output on Windows so printed characters are not garbled
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+
+        try:
+            # stdin / stdout / stderr are NOT piped — they go straight to the
+            # real terminal so the user sees the questions and can type answers.
+            proc = subprocess.run(
+                cmd,
+                stdin=sys.stdin,
+                stdout=sys.stdout,
+                stderr=sys.stderr,
+                env=env,
+            )
+            return {"success": True, "returncode": proc.returncode, "error": ""}
+        except FileNotFoundError as exc:
+            return {"success": False, "returncode": -1, "error": str(exc)}
+        except Exception as exc:
+            return {"success": False, "returncode": -1, "error": str(exc)}
+
+    @staticmethod
+    def _run_cmd_str(lang: str, filename: str) -> str:
+        """Human-readable run command for the fallback message."""
+        return {
+            "lua": f"lua {filename}",
+            "python": f"python {filename}",
+            "javascript": f"node {filename}",
+            "js": f"node {filename}",
+            "shell": f"bash {filename}",
+        }.get(lang, f"./{filename}")
 
     def _entity_name(self, context: dict) -> str:
         """Pick the entity name to write results back into the graph.
