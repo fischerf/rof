@@ -87,6 +87,16 @@ Usage
 
     # Disable learned routing (use static routing only)
     python rof_ai_demo.py --provider github_copilot --no-routing
+
+    # Fujitsu AI Foundation Chat-AI  (rof_providers optional extension)
+    python rof_ai_demo.py --provider fujitsu --api-key <KEY>
+    python rof_ai_demo.py --provider fujitsu --api-key <KEY> --model gpt-4o-2024-08-06
+    python rof_ai_demo.py --provider fujitsu \\
+                          --api-key <KEY> \\
+                          --endpoint https://my-proxy.corp.com/chat-ai/gpt4
+    # Key may also be supplied via the environment:
+    #   export FUJITSU_API_KEY="<KEY>"
+    python rof_ai_demo.py --provider fujitsu
 """
 
 from __future__ import annotations
@@ -101,7 +111,7 @@ import textwrap
 import time
 import traceback
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 # ---------------------------------------------------------------------------
 # 0.  Windows-safe console output
@@ -184,6 +194,18 @@ from rof_framework.rof_llm import (  # type: ignore
     RetryManager,
     create_provider,
 )
+
+# rof_providers is an optional extension package (lives outside rof_framework).
+# Loaded only when --provider fujitsu is requested so the demo degrades
+# gracefully when rof_providers is not installed.
+try:
+    from rof_providers import FujitsuChatAIProvider as _FujitsuChatAIProvider
+    from rof_providers.fujitsu_chatai_provider import _DEFAULT_ENDPOINT as _FUJITSU_DEFAULT_EP
+
+    _HAS_FUJITSU = True
+except ImportError:
+    _HAS_FUJITSU = False
+    _FUJITSU_DEFAULT_EP = "https://api.ai-service.global.fujitsu.com/ai-foundation/chat-ai/gpt4"
 
 # rof_tools is optional (graceful degradation)
 _HAS_TOOLS = rof_tools is not None
@@ -675,7 +697,7 @@ def print_headline(*, newline: bool = True) -> None:
 # Planning system prompt – teaches the LLM to produce valid .rl workflows
 # ===========================================================================
 
-PLANNER_SYSTEM = """\
+_PLANNER_SYSTEM_BASE = """\
 You are a RelateLang Workflow Planner.
 
 Your ONLY job is to convert a natural language request into a valid RelateLang
@@ -811,6 +833,69 @@ ensure generate python code for writing climate.csv with columns title, url, sni
 """
 
 # ===========================================================================
+# Planner system-prompt helpers
+# ===========================================================================
+
+
+def _build_planner_system(knowledge_hint: str = "") -> str:
+    """
+    Return the planner system prompt, optionally extended with a
+    knowledge-base hint block when a RAGTool corpus is pre-loaded.
+
+    ``knowledge_hint`` is produced by :func:`_make_knowledge_hint`;
+    an empty string means the base prompt is returned unchanged.
+    """
+    if not knowledge_hint:
+        return _PLANNER_SYSTEM_BASE
+    return _PLANNER_SYSTEM_BASE + "\n" + knowledge_hint
+
+
+def _make_knowledge_hint(knowledge_dir: Optional[Path], doc_count: int = 0) -> str:
+    """
+    Build the knowledge-base section appended to ``_PLANNER_SYSTEM_BASE``
+    when ``--knowledge-dir`` is active or ``--rag-backend chromadb`` has
+    documents already stored on disk.
+
+    Instructs the planner to:
+      1. Prefer RAGTool over WebSearchTool for questions answerable from
+         the loaded corpus.
+      2. Always follow a RAGTool goal with a synthesis LLM goal so the
+         retrieved ``KnowledgeDoc`` entities are actually consumed.
+    """
+    dir_label = str(knowledge_dir) if knowledge_dir else "pre-loaded corpus"
+    count_note = f" ({doc_count} document(s) indexed)" if doc_count else ""
+    return f"""\
+## Knowledge base (active)
+A local knowledge base is pre-loaded from: {dir_label}{count_note}
+RAGTool has access to this corpus. Follow these additional rules:
+
+11. When the user asks a question that could be answered from internal
+    knowledge, ALWAYS prefer RAGTool over WebSearchTool.
+    Use:   ensure retrieve information about <topic> from the knowledge base.
+    NOT:   ensure retrieve web_information about <topic>.
+
+12. After EVERY RAGTool goal you MUST add a second LLM synthesis goal
+    immediately after it:
+    ensure synthesise the retrieved knowledge documents and answer the question.
+    This goal has no tool trigger — the orchestrator calls the LLM directly
+    with the KnowledgeDoc entities injected as context, so the retrieved
+    text is used to produce the final answer.
+
+### Example: "How does authentication work?"
+define Query as "Authentication question".
+Query has topic of "authentication".
+ensure retrieve information about authentication from the knowledge base.
+ensure synthesise the retrieved knowledge documents and answer the question.
+
+### Example: "Summarise our error handling guidelines"
+define Query as "Error handling summary".
+Query has topic of "error handling".
+ensure retrieve information about error handling guidelines from the knowledge base.
+ensure synthesise the retrieved knowledge documents and answer the question.
+"""
+
+
+# ===========================================================================
 # Planner  –  converts natural language to RelateLang workflow
 # ===========================================================================
 
@@ -821,10 +906,14 @@ class Planner:
     Retries up to `retries` times if the parser rejects the output.
     """
 
-    def __init__(self, llm: LLMProvider, retries: int = 2, max_tokens: int = 512):
+    def __init__(
+        self, llm: LLMProvider, retries: int = 2, max_tokens: int = 512, knowledge_hint: str = ""
+    ):
         self._llm = llm
         self._retries = retries
         self._max_tokens = max_tokens
+        self._knowledge_hint = knowledge_hint  # kept for dynamic prompt rebuilding
+        self._system = _build_planner_system(knowledge_hint)
 
     def plan(self, user_prompt: str) -> tuple[str, WorkflowAST]:
         """
@@ -843,7 +932,7 @@ class Planner:
             resp = self._llm.complete(
                 LLMRequest(
                     prompt=prompt,
-                    system=PLANNER_SYSTEM,
+                    system=self._system,
                     max_tokens=self._max_tokens,
                     temperature=0.1,
                     output_mode="rl",  # planner always produces .rl text, never JSON
@@ -895,6 +984,12 @@ class ROFSession:
         debug: bool = False,
         log_comms: bool = False,
         comms_log_path: Optional[Path] = None,
+        routing_memory_path: Optional[Path] = None,
+        rag_backend: str = "in_memory",
+        rag_persist_dir: Optional[Path] = None,
+        knowledge_dir: Optional[Path] = None,
+        step_retries: int = 1,
+        llm_fallback_on_tool_failure: bool = True,
     ):
         self._llm = _attach_debug_hooks(llm, debug, log_comms, comms_log_path)
         self._output_dir = output_dir
@@ -902,10 +997,19 @@ class ROFSession:
         self._use_routing = use_routing and _HAS_ROUTING
 
         # Shared RoutingMemory — accumulates learned confidence across all
-        # calls within this session (not persisted to disk by default).
+        # calls within this session.  When routing_memory_path is set the
+        # memory is loaded from that JSON file on startup and saved back to
+        # it on shutdown (or on demand via save_routing_memory()).
+        self._routing_memory_path: Optional[Path] = (
+            routing_memory_path if self._use_routing else None
+        )
         self._routing_memory: Optional["RoutingMemory"] = (
             RoutingMemory() if self._use_routing else None
         )
+
+        # Load persisted routing memory from disk (if the file exists).
+        if self._use_routing and self._routing_memory is not None and self._routing_memory_path:
+            self._load_routing_memory()
 
         if verbose:
             logging.getLogger("rof").setLevel(logging.DEBUG)
@@ -915,16 +1019,40 @@ class ROFSession:
             AICodeGenTool(llm=llm, output_dir=output_dir),
             LLMPlayerTool(llm=llm, output_dir=output_dir),
         ]
+        self._rag_tool: Optional[object] = None  # kept for knowledge ingestion
         if _HAS_TOOLS:
             self._tools.append(FileSaveTool())
             # Add all rof_tools built-ins (includes LuaRunTool, RAGTool, DatabaseTool, …)
+            # Pass the RAG backend so create_default_registry constructs the right backend.
+            # persist_dir is patched in afterwards because factory.py does not yet
+            # expose that parameter — we set it before _init_chroma() re-runs so
+            # ChromaDB opens (or re-opens) the correct on-disk collection.
             registry = create_default_registry(
                 human_mode=HumanInLoopMode.STDIN,
                 db_read_only=True,
+                rag_backend=rag_backend,
             )
-            # Remove the placeholder tools if we prefer our configured ones
+
+            # Single pass: find the RAGTool, patch persist_dir if needed, keep ref.
+            from rof_framework.rof_tools import RAGTool as _RAGTool  # type: ignore
+
+            for _t in registry.all_tools().values():
+                if isinstance(_t, _RAGTool):
+                    self._rag_tool = _t
+                    # Patch ChromaDB persist directory when explicitly requested.
+                    # _init_chroma() is idempotent — calling it again with a new
+                    # persist_dir swaps the client to the correct on-disk path.
+                    if rag_backend == "chromadb" and rag_persist_dir:
+                        _t._persist_dir = str(rag_persist_dir)
+                        _t._init_chroma()
+                    break
+
             for t in registry.all_tools().values():
                 self._tools.append(t)
+
+        # Pre-load knowledge documents from --knowledge-dir (if supplied).
+        if knowledge_dir and self._rag_tool is not None:
+            self._load_knowledge_dir(knowledge_dir)
 
         self._bus = EventBus()
         self._bus.subscribe("step.started", lambda e: step("GOAL", f"{e.payload.get('goal', '')}"))
@@ -967,15 +1095,43 @@ class ROFSession:
         if verbose:
             self._bus.subscribe("*", lambda e: print(dim(f"  [EVENT] {e.name}: {e.payload}")))
 
-        self._planner = Planner(llm=self._llm)
+        # Build the knowledge hint now — _rag_tool and its document count are
+        # already known at this point (registry was built + knowledge_dir loaded).
+        _doc_count = 0
+        if self._rag_tool is not None:
+            if rag_backend == "chromadb":
+                try:
+                    _doc_count = self._rag_tool._chroma_collection.count()  # type: ignore[union-attr]
+                except Exception:
+                    pass
+            else:
+                _doc_count = len(getattr(self._rag_tool, "_docs", []))
+        _knowledge_hint = (
+            _make_knowledge_hint(knowledge_dir, _doc_count)
+            if (knowledge_dir is not None or (rag_backend == "chromadb" and _doc_count > 0))
+            else ""
+        )
+        self._step_retries: int = max(0, step_retries)
+        self._llm_fallback_on_tool_failure: bool = llm_fallback_on_tool_failure
+
+        self._planner = Planner(llm=self._llm, knowledge_hint=_knowledge_hint)
+
+        # Tracks ToolProvider instances loaded from AICodeGenTool-generated .py files.
+        # key = tool name (str), value = ToolProvider instance.
+        # Populated by _try_register_generated_tools() after each orch.run() pass.
+        self._generated_tools: dict[str, ToolProvider] = {}
 
         # Resolve output_mode: "auto" defers to the provider at runtime.
         # "json" enforces the rof_graph_update JSON schema (cloud models).
         # "rl"   requests plain RelateLang text (any model, Ollama-friendly).
+        #
+        # pause_on_error=False — we handle failure recovery ourselves in
+        # _execute_with_retry(); we need the orchestrator to continue past
+        # a failed step so that dependency-chain skipping can be applied.
         self._orch_config = OrchestratorConfig(
             max_iterations=20,
             auto_save_state=False,
-            pause_on_error=True,
+            pause_on_error=False,
             output_mode=output_mode,
             system_preamble=(
                 "You are a RelateLang workflow executor. "
@@ -1025,6 +1181,44 @@ class ROFSession:
             f"{len(ast.conditions)} conditions"
         )
 
+        # ── Auto-synthesis: ensure RAG results are consumed by the LLM ───────
+        # When the Planner produced a RAGTool goal but no follow-up pure-LLM
+        # goal, the retrieved KnowledgeDoc entities land in the graph but are
+        # never actually read.  Detect this and append a synthesis goal so the
+        # orchestrator always calls the LLM with the documents as context.
+        #
+        # A "pure-LLM goal" is any goal expression that does NOT contain any
+        # registered tool's trigger keywords — meaning the orchestrator will
+        # call the LLM directly rather than routing to a tool.
+        if self._rag_tool is not None and ast.goals:
+            _rag_kws: set[str] = {
+                kw.lower() for kw in getattr(self._rag_tool, "trigger_keywords", [])
+            }
+            _all_tool_kws: set[str] = {
+                kw.lower() for _t in self._tools for kw in getattr(_t, "trigger_keywords", [])
+            }
+
+            _has_rag_goal = any(
+                any(kw in g.goal_expr.lower() for kw in _rag_kws) for g in ast.goals
+            )
+            # A synthesis/LLM goal: no tool keyword matches at all.
+            _has_synthesis_goal = any(
+                not any(kw in g.goal_expr.lower() for kw in _all_tool_kws) for g in ast.goals
+            )
+
+            if _has_rag_goal and not _has_synthesis_goal:
+                _synthesis_stmt = (
+                    "ensure synthesise the retrieved knowledge documents and answer the question."
+                )
+                _patched_src = rl_src.rstrip() + "\n" + _synthesis_stmt
+                try:
+                    _patched_ast = RLParser().parse(_patched_src)
+                    rl_src = _patched_src
+                    ast = _patched_ast
+                    step("RAG", "auto-appended synthesis goal — KnowledgeDocs will be used by LLM")
+                except Exception:
+                    pass  # leave original ast untouched if re-parse fails
+
         # ── Always save the .rl plan to output_dir ───────────────────
         # rl_file = self._output_dir / f"rof_plan_{result_id}.rl"  # see note below
         # (we save after we have run_id; move this save to after orch.run)
@@ -1057,7 +1251,7 @@ class ROFSession:
             )
 
         t1 = time.perf_counter()
-        result = orch.run(ast)
+        result = self._execute_with_retry(orch, ast)
         exec_ms = int((time.perf_counter() - t1) * 1000)
         _STATS.last_exec_ms = exec_ms
 
@@ -1158,6 +1352,476 @@ class ROFSession:
     # Routing memory inspector
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Knowledge / RAG helpers
+    # ------------------------------------------------------------------
+
+    #: Extensions scanned when --knowledge-dir is given.
+    _KNOWLEDGE_EXTENSIONS: frozenset = frozenset({".txt", ".md", ".rst", ".html", ".json", ".csv"})
+
+    # ------------------------------------------------------------------
+    # Step retry + LLM fallback
+    # ------------------------------------------------------------------
+
+    # Keywords whose presence in a goal expression means the orchestrator
+    # will route it to a tool.  Used to strip them when building a
+    # pure-LLM fallback goal.
+    _TOOL_TRIGGER_STRIP = re.compile(
+        r"\b(retrieve information|retrieve web_information|rag query|knowledge base|"
+        r"retrieve knowledge|retrieve document|search web|look up|"
+        r"generate (?:python|lua|javascript|code)|write code|create code|"
+        r"run (?:python|lua|javascript|code|script)|execute code|"
+        r"call api|http request|fetch url|read file|parse file|"
+        r"query database|sql query|database lookup|execute sql|"
+        r"validate (?:output|schema)|wait for human|human approval|"
+        r"save (?:file|csv|results|data|output)|write (?:file|csv|data))\b",
+        re.IGNORECASE,
+    )
+
+    def _goals_are_dependent(self, later_goal_expr: str, failed_goal_expr: str) -> bool:
+        """
+        Return True when *later_goal_expr* is likely to depend on the output
+        of *failed_goal_expr*.
+
+        Heuristic: extract all capitalised tokens (entity names) from the
+        failed goal and check whether any appear in the later goal.  This
+        catches the common pattern where a follow-up goal references the
+        same entity (e.g. ``SearchResult``, ``KnowledgeDoc``) that the
+        failed step was supposed to produce.
+        """
+        # Collect capitalised words from the failed goal as proxy entity names.
+        failed_tokens = {w for w in re.findall(r"\b[A-Z][A-Za-z0-9]+\b", failed_goal_expr)}
+        if not failed_tokens:
+            return False
+        later_lower = later_goal_expr.lower()
+        return any(tok.lower() in later_lower for tok in failed_tokens)
+
+    def _build_fallback_ast(
+        self,
+        original_goal_expr: str,
+        error_msg: str,
+        graph_snapshot: dict,
+    ) -> "tuple[Optional[WorkflowAST], str]":
+        """
+        Build a minimal WorkflowAST that retries *original_goal_expr* as a
+        pure-LLM step (no tool triggers) with the failure reason injected as
+        entity context, so the LLM can answer directly.
+
+        Returns None if RLParser rejects the constructed source.
+        """
+        # Sanitise error for RL string embedding (strip quotes, newlines).
+        safe_error = error_msg.replace('"', "'").replace("\n", " ").strip()[:200]
+
+        # Build a short description of what failed.
+        safe_goal = original_goal_expr.replace('"', "'").strip()[:120]
+
+        # Strip tool trigger phrases so the orchestrator routes to LLM.
+        llm_goal = self._TOOL_TRIGGER_STRIP.sub("", original_goal_expr).strip(" ,.-")
+        if not llm_goal:
+            llm_goal = "provide the best answer based on available context"
+
+        rl_src = (
+            f'define FallbackContext as "LLM fallback after tool failure".\n'
+            f'FallbackContext has failed_goal of "{safe_goal}".\n'
+            f'FallbackContext has tool_error of "{safe_error}".\n'
+            f"ensure {llm_goal}.\n"
+        )
+        try:
+            return RLParser().parse(rl_src), rl_src
+        except Exception:
+            return None, rl_src
+
+    def _execute_with_retry(self, orch, ast: "WorkflowAST") -> "RunResult":
+        """
+        Run *ast* through *orch*, then inspect the result for failed steps.
+
+        For each failed step (in order):
+          1. Retry the goal up to ``self._step_retries`` times by re-running
+             the orchestrator with a single-goal AST for that goal only.
+             Subsequent goals that reference the same entities are skipped
+             (dependency guard) if the retry also fails.
+          2. If all retries are exhausted and ``self._llm_fallback_on_tool_failure``
+             is True, attempt one final LLM-only pass without tool trigger
+             keywords so the LLM can answer directly with the error as context.
+
+        Returns the final :class:`RunResult` (merged steps from all passes).
+        """
+        from rof_framework.rof_core import GoalStatus as _GoalStatus  # type: ignore
+        from rof_framework.rof_core import RunResult as _RunResult  # type: ignore
+
+        result = orch.run(ast)
+        # Register any ToolProviders exported by generated scripts so that
+        # subsequent goals in this same run (and future REPL turns) can route to them.
+        self._try_register_generated_tools(result.snapshot, orch)
+        all_steps = list(result.steps)
+
+        # Collect which goal expressions already succeeded in the first pass.
+        achieved: set[str] = {s.goal_expr for s in all_steps if s.status == _GoalStatus.ACHIEVED}
+        # Track goals that are blocked due to a failed dependency.
+        blocked: set[str] = set()
+
+        failed_steps = [s for s in all_steps if s.status == _GoalStatus.FAILED]
+        if not failed_steps:
+            return result
+
+        warn(
+            f"{len(failed_steps)} step(s) failed — starting retry loop "
+            f"(max {self._step_retries} retry/step, "
+            f"llm_fallback={self._llm_fallback_on_tool_failure})"
+        )
+
+        for failed in failed_steps:
+            goal_expr = failed.goal_expr
+            error_msg = failed.error or (
+                str(failed.tool_response.error)
+                if failed.tool_response and failed.tool_response.error
+                else "unknown error"
+            )
+
+            # ── Dependency guard ─────────────────────────────────────────
+            # If this goal depends on a goal that ALSO failed (and thus its
+            # output is missing from the graph), mark it blocked and skip.
+            for prev_failed in failed_steps:
+                if prev_failed.goal_expr == goal_expr:
+                    continue
+                if prev_failed.goal_expr not in achieved and self._goals_are_dependent(
+                    goal_expr, prev_failed.goal_expr
+                ):
+                    blocked.add(goal_expr)
+                    warn(
+                        f"Skipping '{goal_expr[:60]}' — depends on failed goal "
+                        f"'{prev_failed.goal_expr[:60]}'"
+                    )
+                    break
+
+            if goal_expr in blocked:
+                continue
+
+            # ── Retry loop ───────────────────────────────────────────────
+            retry_succeeded = False
+            for attempt in range(1, self._step_retries + 1):
+                warn(f"Retry {attempt}/{self._step_retries}: '{goal_expr[:70]}'")
+
+                # Build a single-goal AST using the original RL source line.
+                single_rl = f"ensure {goal_expr}.\n"
+                try:
+                    single_ast = RLParser().parse(single_rl)
+                except Exception:
+                    break  # can't even parse — give up
+
+                retry_result = orch.run(single_ast)
+                self._try_register_generated_tools(retry_result.snapshot, orch)
+                retry_step = retry_result.steps[0] if retry_result.steps else None
+                all_steps.append(retry_step) if retry_step else None
+
+                if retry_step and retry_step.status == _GoalStatus.ACHIEVED:
+                    step("RETRY", f"succeeded on attempt {attempt}: '{goal_expr[:60]}'")
+                    achieved.add(goal_expr)
+                    retry_succeeded = True
+                    error_msg = ""
+                    break
+                else:
+                    error_msg = (retry_step.error or error_msg) if retry_step else error_msg
+                    err(f"Retry {attempt} failed: {error_msg[:120]}")
+
+            if retry_succeeded:
+                continue
+
+            # ── LLM fallback ─────────────────────────────────────────────
+            if self._llm_fallback_on_tool_failure:
+                warn(f"All retries exhausted for '{goal_expr[:60]}' — trying LLM fallback")
+                fallback_ast, fallback_src = self._build_fallback_ast(
+                    goal_expr, error_msg, result.snapshot
+                )
+                if fallback_ast is not None:
+                    step("FALLBK", f"LLM fallback: '{goal_expr[:50]}'")
+                    # Show the fallback RL so the user can see what was sent.
+                    for line in fallback_src.splitlines():
+                        print(f"    {dim(line)}")
+                    fallback_result = orch.run(fallback_ast)
+                    self._try_register_generated_tools(fallback_result.snapshot, orch)
+                    fallback_step = fallback_result.steps[0] if fallback_result.steps else None
+                    all_steps.append(fallback_step) if fallback_step else None
+                    if fallback_step and fallback_step.status == _GoalStatus.ACHIEVED:
+                        step("FALLBK", f"LLM fallback succeeded for '{goal_expr[:50]}'")
+                        achieved.add(goal_expr)
+                    else:
+                        fb_err = fallback_step.error if fallback_step else "no step produced"
+                        err(f"LLM fallback also failed: {fb_err}")
+                else:
+                    err(f"Could not build LLM fallback AST for '{goal_expr[:60]}'")
+
+        # Re-compute overall success from merged step list.
+        final_success = all(s.status == _GoalStatus.ACHIEVED for s in all_steps if s is not None)
+        return _RunResult(
+            run_id=result.run_id,
+            success=final_success,
+            steps=[s for s in all_steps if s is not None],
+            snapshot=result.snapshot,
+            error=result.error,
+        )
+
+    # ------------------------------------------------------------------
+    # Generated-tool registration
+    # ------------------------------------------------------------------
+
+    def _try_register_generated_tools(self, snapshot: dict, orch: Any) -> None:
+        """
+        Scan *snapshot* for entities whose ``saved_to`` attribute points to a
+        Python file, import the file, and register any :class:`ToolProvider`
+        subclasses or ``@rof_tool``-decorated :class:`FunctionTool` instances
+        it exports into ``self._tools`` and the live orchestrator.
+
+        This makes code generated by :class:`AICodeGenTool` immediately
+        available as a routable tool for subsequent goals in the same run
+        *and* for all future REPL turns in this session.
+
+        Rules
+        -----
+        - Only ``.py`` files are imported (other languages cannot be imported).
+        - A file is imported at most once per session (tracked by absolute path).
+        - Top-level names that are :class:`ToolProvider` instances (but not
+          built-in framework types) are registered.
+        - If the file exports a module-level ``TOOLS`` list, every item in it
+          is registered instead (explicit export convention).
+        - Errors during import are logged as warnings and skipped — they must
+          never break the orchestrator flow.
+        """
+        import importlib.util as _ilu
+
+        if not _HAS_TOOLS:
+            return
+
+        # Names of built-in framework tool classes that must never be re-registered
+        # as "generated" tools even if they somehow appear in a generated file.
+        builtin_tool_types = {
+            "AICodeGenTool",
+            "LLMPlayerTool",
+            "FileSaveTool",
+            "WebSearchTool",
+            "CodeRunnerTool",
+            "HumanInLoopTool",
+            "RAGTool",
+            "APICallTool",
+            "DatabaseTool",
+            "FileReaderTool",
+            "ValidatorTool",
+            "LuaRunTool",
+        }
+
+        entities = snapshot.get("entities", {})
+        for _ent_name, _ent_data in entities.items():
+            attrs = _ent_data.get("attributes", {})
+            saved_to = attrs.get("saved_to", "")
+            if not saved_to or not saved_to.endswith(".py"):
+                continue
+
+            fpath = Path(saved_to)
+            if not fpath.exists():
+                continue
+
+            fpath_abs = str(fpath.resolve())
+            # Skip already-imported files (idempotent across retry / fallback passes)
+            if any(
+                getattr(t, "_generated_from", None) == fpath_abs
+                for t in self._generated_tools.values()
+            ):
+                continue
+
+            try:
+                spec = _ilu.spec_from_file_location(f"_rof_gen_{fpath.stem}", fpath)
+                if spec is None or spec.loader is None:
+                    continue
+                mod = _ilu.module_from_spec(spec)
+                spec.loader.exec_module(mod)  # type: ignore[union-attr]
+            except Exception as exc:
+                warn(f"Generated tool import failed ({fpath.name}): {exc}")
+                continue
+
+            # Collect candidates: explicit TOOLS list takes priority
+            candidates: list[ToolProvider] = []
+            if hasattr(mod, "TOOLS") and isinstance(mod.TOOLS, (list, tuple)):
+                candidates = [t for t in mod.TOOLS if isinstance(t, ToolProvider)]
+            else:
+                for _attr_val in vars(mod).values():
+                    if (
+                        isinstance(_attr_val, ToolProvider)
+                        and type(_attr_val).__name__ not in builtin_tool_types
+                    ):
+                        candidates.append(_attr_val)
+
+            for tool in candidates:
+                if tool.name in self._generated_tools:
+                    continue  # already registered this session
+
+                # Mark the tool with its source file so we can deduplicate
+                try:
+                    object.__setattr__(tool, "_generated_from", fpath_abs)
+                except (AttributeError, TypeError):
+                    tool._generated_from = fpath_abs  # type: ignore[attr-defined]
+
+                self._tools.append(tool)
+                self._generated_tools[tool.name] = tool
+
+                # Patch the live orchestrator so the current run can already use it
+                if hasattr(orch, "tools") and isinstance(orch.tools, dict):
+                    orch.tools[tool.name] = tool
+
+                # Also patch the ConfidentOrchestrator's router registry if present
+                if hasattr(orch, "_confident_router") and orch._confident_router is not None:
+                    try:
+                        orch._confident_router._registry.register(tool, force=True)
+                    except Exception:
+                        try:
+                            orch._confident_router._registry.register(tool)
+                        except Exception:
+                            pass
+
+                # Rebuild the planner system prompt so the new tool appears
+                # in the Available Tools section for all future REPL turns.
+                self._planner._system = (
+                    _build_planner_system(self._planner._knowledge_hint)
+                    + self._generated_tools_hint()
+                )
+
+                info(
+                    f"Generated tool registered: {bold(cyan(tool.name))}  "
+                    f"triggers={tool.trigger_keywords[:3]}"
+                )
+
+    def _generated_tools_hint(self) -> str:
+        """Return a planner system-prompt appendix listing registered generated tools."""
+        if not self._generated_tools:
+            return ""
+        lines = [
+            "\n## Generated tools (registered this session)",
+            "These tools were created by AICodeGenTool and are now available.",
+            "You MAY route goals to them using their trigger keywords:\n",
+        ]
+        for t in self._generated_tools.values():
+            kws = "  /  ".join(f'"{k}"' for k in t.trigger_keywords[:4])
+            lines.append(f"  {t.name:<28} – {kws}")
+        return "\n".join(lines) + "\n"
+
+    # ------------------------------------------------------------------
+    # Knowledge / RAG helpers
+    # ------------------------------------------------------------------
+
+    def _load_knowledge_dir(self, knowledge_dir: Path) -> int:
+        """
+        Recursively scan *knowledge_dir* for text files and ingest them into
+        the session's :class:`RAGTool` via ``add_documents()``.
+
+        Returns the number of documents ingested.
+        Silently skips files that cannot be read.
+        """
+        if not knowledge_dir.is_dir():
+            warn(f"--knowledge-dir {knowledge_dir!r} does not exist or is not a directory.")
+            return 0
+
+        docs: list[dict] = []
+        for path in sorted(knowledge_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in self._KNOWLEDGE_EXTENSIONS:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace").strip()
+                if not text:
+                    continue
+                # Derive a stable document id from the relative path.
+                rel = path.relative_to(knowledge_dir)
+                doc_id = str(rel).replace("\\", "/")
+                docs.append(
+                    {
+                        "id": doc_id,
+                        "text": text,
+                        "source": doc_id,
+                        "filename": path.name,
+                    }
+                )
+            except Exception as exc:
+                warn(f"Skipping {path.name}: {exc}")
+
+        if docs:
+            self._rag_tool.add_documents(docs)  # type: ignore[union-attr]
+            info(
+                f"Knowledge loaded: {len(docs)} document(s) from {knowledge_dir}  "
+                f"(backend={getattr(self._rag_tool, '_backend', '?')})"
+            )
+        else:
+            warn(f"No readable documents found in {knowledge_dir}")
+
+        return len(docs)
+
+    def knowledge_summary(self) -> None:
+        """Print a short summary of the RAGTool state."""
+        if self._rag_tool is None:
+            print(f"  {dim('RAGTool not available (rof_tools not installed).')}")
+            return
+        backend = getattr(self._rag_tool, "_backend", "?")
+        n_docs = len(getattr(self._rag_tool, "_docs", []))
+        persist = getattr(self._rag_tool, "_persist_dir", None)
+        if backend == "chromadb":
+            try:
+                n_docs = self._rag_tool._chroma_collection.count()  # type: ignore[union-attr]
+            except Exception:
+                pass
+        lines = [
+            f"  Backend   : {bold(backend)}",
+            f"  Documents : {n_docs}",
+        ]
+        if persist:
+            lines.append(f"  Persist   : {persist}")
+        for line in lines:
+            print(line)
+
+    # ------------------------------------------------------------------
+    # Routing memory persistence helpers
+    # ------------------------------------------------------------------
+
+    def save_routing_memory(self) -> Optional[Path]:
+        """
+        Persist the current RoutingMemory to ``self._routing_memory_path``.
+
+        Returns the path written to, or None when persistence is disabled
+        (``--no-persist-routing`` / routing unavailable / no path set).
+        """
+        if not self._use_routing or self._routing_memory is None:
+            return None
+        if not self._routing_memory_path:
+            return None
+        try:
+            self._routing_memory_path.parent.mkdir(parents=True, exist_ok=True)
+            data = self._routing_memory.to_dict()
+            self._routing_memory_path.write_text(
+                json.dumps(data, indent=2, default=str), encoding="utf-8"
+            )
+            info(f"Routing memory saved: {self._routing_memory_path}  ({len(data)} entries)")
+            return self._routing_memory_path
+        except Exception as exc:
+            warn(f"Could not save routing memory: {exc}")
+            return None
+
+    def _load_routing_memory(self) -> bool:
+        """
+        Load RoutingMemory from ``self._routing_memory_path``.
+
+        Returns True when data was successfully loaded.
+        Silently skips when the file does not exist yet.
+        """
+        path = self._routing_memory_path
+        if path is None or not path.exists():
+            return False
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            self._routing_memory.from_dict(raw)  # type: ignore[union-attr]
+            info(f"Routing memory loaded: {path}  ({len(raw)} entries)")
+            return True
+        except Exception as exc:
+            warn(f"Could not load routing memory from {path}: {exc}")
+            return False
+
     def routing_summary(self) -> None:
         """Print a human-readable summary of the accumulated RoutingMemory."""
         if not self._use_routing or self._routing_memory is None:
@@ -1168,6 +1832,10 @@ class ROFSession:
         if _HAS_ROUTING:
             inspector = RoutingMemoryInspector(self._routing_memory)
             print(inspector.summary())
+            if self._routing_memory_path:
+                print(f"  {dim('Persistence file: ')}{dim(str(self._routing_memory_path))}")
+            else:
+                print(f"  {dim('Persistence: disabled (--no-persist-routing)')}")
         else:
             print(f"  {dim('rof_routing not installed.')}")
 
@@ -1253,6 +1921,7 @@ PROVIDER_DEFAULTS = {
     "openai": ("gpt-4o", "OPENAI_API_KEY"),
     "ollama": ("deepseek-r1:8b", None),
     "github_copilot": ("gpt-4o", "GITHUB_TOKEN"),
+    "fujitsu": ("gpt-4o-2024-08-06", "FUJITSU_API_KEY"),
 }
 
 
@@ -1273,6 +1942,8 @@ def _setup_wizard(args: argparse.Namespace) -> LLMProvider:
         "copilot": "github_copilot",
         "github-copilot": "github_copilot",
         "gh-copilot": "github_copilot",
+        "fujitsu-chatai": "fujitsu",
+        "fujitsu_chatai": "fujitsu",
     }
 
     # --- Provider --------------------------------------------------------
@@ -1287,13 +1958,18 @@ def _setup_wizard(args: argparse.Namespace) -> LLMProvider:
             f"    {cyan('3')}. {bold('ollama')}         (local models: deepseek-r1:8b, mistral, \u2026)"
         )
         print(f"    {cyan('4')}. {bold('github_copilot')} (Copilot Chat via PAT / OAuth token)")
+        fujitsu_note = "" if _HAS_FUJITSU else dim("  (needs: pip install rof_providers)")
+        print(
+            f"    {cyan('5')}. {bold('fujitsu')}        (Fujitsu AI Foundation Chat-AI){fujitsu_note}"
+        )
         print()
-        choice = input(f"  {bold('Choose provider')} [1/2/3/4] or name: ").strip()
+        choice = input(f"  {bold('Choose provider')} [1/2/3/4/5] or name: ").strip()
         provider = {
             "1": "anthropic",
             "2": "openai",
             "3": "ollama",
             "4": "github_copilot",
+            "5": "fujitsu",
         }.get(choice, choice)
         if not provider:
             provider = "anthropic"
@@ -1428,6 +2104,71 @@ def _setup_wizard(args: argparse.Namespace) -> LLMProvider:
         return llm, output_dir
 
     # =========================================================================
+    # Fujitsu AI Foundation Chat-AI  (rof_providers optional extension)
+    # =========================================================================
+    if provider == "fujitsu":
+        if not _HAS_FUJITSU:
+            err(
+                "rof_providers is not installed — cannot use the Fujitsu provider.\n"
+                "  Install it with:  pip install -e .  (from the project root)\n"
+                "  or add src/ to PYTHONPATH so rof_providers can be imported."
+            )
+            sys.exit(1)
+
+        # Resolve API key: --api-key > FUJITSU_API_KEY env var > interactive prompt
+        api_key = args.api_key or os.environ.get("FUJITSU_API_KEY", "")
+        if not api_key:
+            api_key = input(f"  {bold('Fujitsu API key')} (or set FUJITSU_API_KEY): ").strip()
+            if not api_key:
+                err("No Fujitsu API key provided.")
+                sys.exit(1)
+
+        # Resolve endpoint: --endpoint arg > FUJITSU_CHATAI_ENDPOINT env var > default
+        endpoint = (
+            getattr(args, "endpoint", None)
+            or os.environ.get("FUJITSU_CHATAI_ENDPOINT", "")
+            or _FUJITSU_DEFAULT_EP
+        )
+
+        masked_key = api_key[:8] + "*" * max(0, len(api_key) - 8)
+        print()
+        _print_config_box(
+            provider,
+            model,
+            output_dir,
+            extra_rows=[
+                ("API key", masked_key),
+                ("Endpoint", endpoint),
+                ("Package", "rof_providers.FujitsuChatAIProvider"),
+                ("Auth header", dim("api-key  (not Authorization: Bearer)")),
+            ],
+        )
+
+        try:
+            base_llm = _FujitsuChatAIProvider(
+                api_key=api_key,
+                endpoint=endpoint,
+                model=model,
+                # The executor stage drives output_mode; inject_json_schema is
+                # handled internally by the provider when output_mode=="json".
+                inject_json_schema=True,
+            )
+        except AuthError as exc:
+            err(f"Fujitsu provider initialisation failed: {exc}")
+            sys.exit(1)
+
+        llm = RetryManager(
+            provider=base_llm,
+            config=RetryConfig(
+                max_retries=3,
+                backoff_strategy=BackoffStrategy.JITTERED,
+                base_delay_s=1.0,
+                max_delay_s=30.0,
+            ),
+        )
+        return llm, output_dir
+
+    # =========================================================================
     # All other providers — standard API-key path
     # =========================================================================
     api_key = args.api_key or ""
@@ -1489,15 +2230,6 @@ def _print_config_box(
 # REPL loop
 # ===========================================================================
 
-_HELP_COMMANDS = [
-    ("help", "show this message"),
-    ("stats", "print live stats headline"),
-    ("clear", "clear the screen"),
-    ("verbose", "toggle verbose logging"),
-    ("routing", "show learned routing memory (rof_routing)"),
-    ("quit", "exit"),
-]
-
 _EXAMPLE_PROMPTS = [
     "Create a small questionnaire for CLI, executed in Lua",
     "Create a small text adventure in Python, let the LLM play it, and save the choices",
@@ -1507,6 +2239,18 @@ _EXAMPLE_PROMPTS = [
     "Generate a JavaScript function to validate email addresses",
     "Write a Lua script that implements a simple calculator",
 ]
+
+
+_HELP_COMMANDS = (
+    ("help", "Show this help"),
+    ("stats", "Print session statistics"),
+    ("routing", "Print learned routing memory summary"),
+    ("save routing", "Flush routing memory to disk immediately"),
+    ("knowledge", "Print RAGTool backend and document count"),
+    ("verbose", "Toggle verbose / debug logging"),
+    ("clear", "Clear the terminal"),
+    ("quit / exit", "Exit the REPL"),
+)
 
 
 def _print_help() -> None:
@@ -1580,6 +2324,16 @@ def _repl(session: ROFSession) -> None:
             section("Learned routing memory")
             session.routing_summary()
             continue
+        if low in ("save routing", "saverouting"):
+            section("Save routing memory")
+            path = session.save_routing_memory()
+            if path is None:
+                warn("Routing persistence is disabled or unavailable.")
+            continue
+        if low == "knowledge":
+            section("Knowledge base (RAGTool)")
+            session.knowledge_summary()
+            continue
 
         try:
             session.run(prompt)
@@ -1593,6 +2347,8 @@ def _repl(session: ROFSession) -> None:
                 traceback.print_exc()
 
     print()
+    # Persist learned routing memory before exit
+    session.save_routing_memory()
     # Final headline before exit
     print_headline()
     print()
@@ -1617,6 +2373,15 @@ def _parse_args() -> argparse.Namespace:
               github_copilot – GitHub Copilot    (no key needed! browser login on first run,
                                                   token cached at ~/.config/rof/copilot_oauth.json
                                                   for all future runs automatically)
+              fujitsu        – Fujitsu AI Foundation Chat-AI  (--api-key or FUJITSU_API_KEY;
+                                                  optional --endpoint to override the URL;
+                                                  requires: rof_providers package)
+
+            Fujitsu tips:
+              python rof_ai_demo.py --provider fujitsu --api-key <KEY>
+              python rof_ai_demo.py --provider fujitsu  # reads FUJITSU_API_KEY from env
+              python rof_ai_demo.py --provider fujitsu --endpoint https://proxy.corp.com/chat-ai/gpt4
+              python rof_ai_demo.py --provider fujitsu --output-mode rl  # safest for all models
 
             Output modes (--output-mode):
               auto  (default) – json if provider.supports_structured_output(), else rl
@@ -1669,8 +2434,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--provider",
         help=(
-            "LLM provider: anthropic | openai | ollama | github_copilot "
-            "(aliases: copilot, github-copilot)"
+            "LLM provider: anthropic | openai | ollama | github_copilot | fujitsu "
+            "(aliases: copilot, github-copilot, fujitsu-chatai)"
         ),
     )
     p.add_argument("--model", help="Model name (e.g. claude-opus-4-5, gpt-4o)")
@@ -1683,6 +2448,17 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument("--base-url", dest="base_url", help="Ollama/vLLM base URL")
+    p.add_argument(
+        "--endpoint",
+        dest="endpoint",
+        metavar="URL",
+        default="",
+        help=(
+            "Fujitsu Chat-AI endpoint URL override. "
+            "Defaults to FUJITSU_CHATAI_ENDPOINT env var, then: "
+            f"{_FUJITSU_DEFAULT_EP}"
+        ),
+    )
     p.add_argument("--output-dir", dest="output_dir", help="Directory for generated files")
     p.add_argument(
         "--one-shot",
@@ -1711,6 +2487,30 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--step-retries",
+        dest="step_retries",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "How many times to retry a failed tool step before giving up or "
+            "falling back to the LLM.  0 disables retries entirely. "
+            "Default: 1"
+        ),
+    )
+    p.add_argument(
+        "--no-llm-fallback",
+        dest="no_llm_fallback",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable the LLM fallback that fires when all step retries are "
+            "exhausted.  By default, after every retry attempt fails the "
+            "orchestrator strips tool trigger keywords from the goal and lets "
+            "the LLM answer directly using the error as context."
+        ),
+    )
+    p.add_argument(
         "--no-routing",
         dest="no_routing",
         action="store_true",
@@ -1719,6 +2519,84 @@ def _parse_args() -> argparse.Namespace:
             "Disable learned routing (rof_routing). "
             "Uses the plain static ToolRouter instead of ConfidentOrchestrator. "
             "Useful for debugging or when rof_routing is not installed."
+        ),
+    )
+    # ------------------------------------------------------------------ #
+    # Knowledge / RAG options                                             #
+    # ------------------------------------------------------------------ #
+    knowledge = p.add_argument_group(
+        "Knowledge base options (RAGTool)",
+        (
+            "Control the vector store that backs RAGTool. "
+            "Documents pre-loaded via --knowledge-dir are immediately available "
+            "to any workflow goal that triggers RAGTool (keywords: retrieve, "
+            "lookup, knowledge base, rag query, …)."
+        ),
+    )
+    knowledge.add_argument(
+        "--rag-backend",
+        dest="rag_backend",
+        choices=["in_memory", "chromadb"],
+        default="in_memory",
+        help=(
+            "Vector store backend for RAGTool. "
+            "'in_memory' — TF-IDF cosine similarity, zero extra dependencies, "
+            "documents are lost on exit. "
+            "'chromadb' — persistent ChromaDB store; embeddings survive between "
+            "sessions (requires: pip install chromadb sentence-transformers). "
+            "Default: in_memory"
+        ),
+    )
+    knowledge.add_argument(
+        "--rag-persist-dir",
+        dest="rag_persist_dir",
+        metavar="PATH",
+        default="",
+        help=(
+            "Directory used by ChromaDB to store its embedding database. "
+            "Only relevant when --rag-backend chromadb is set. "
+            "Defaults to <output-dir>/chroma_store when chromadb is selected "
+            "and this flag is not given."
+        ),
+    )
+    knowledge.add_argument(
+        "--knowledge-dir",
+        dest="knowledge_dir",
+        metavar="PATH",
+        default="",
+        help=(
+            "Directory of documents to pre-load into RAGTool at startup. "
+            "Files with extensions .txt, .md, .rst, .html, .json, and .csv "
+            "are scanned recursively and ingested via add_documents(). "
+            "When --rag-backend chromadb is also set the documents are stored "
+            "persistently and reloaded on the next run automatically — "
+            "you only need to pass --knowledge-dir once to seed the store."
+        ),
+    )
+
+    p.add_argument(
+        "--routing-memory",
+        dest="routing_memory",
+        metavar="PATH",
+        default="",
+        help=(
+            "Path to the JSON file used to persist learned routing confidence "
+            "across sessions.  The file is loaded on startup (if it exists) and "
+            "written on exit and after every REPL 'save routing' command. "
+            "Defaults to <output-dir>/routing_memory.json when routing is enabled. "
+            "Pass an explicit path to share one memory file across multiple "
+            "output directories."
+        ),
+    )
+    p.add_argument(
+        "--no-persist-routing",
+        dest="no_persist_routing",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable routing-memory persistence.  Learned confidence still "
+            "accumulates within the session but is discarded on exit. "
+            "Equivalent to omitting --routing-memory and setting no default path."
         ),
     )
     p.add_argument(
@@ -1733,6 +2611,24 @@ def _parse_args() -> argparse.Namespace:
             "'json' enforces the rof_graph_update JSON schema (cloud models). "
             "'rl' requests plain RelateLang text (works with any model including Ollama). "
             "Default: auto"
+        ),
+    )
+
+    # ------------------------------------------------------------------ #
+    # Fujitsu options                                                     #
+    # ------------------------------------------------------------------ #
+    fujitsu = p.add_argument_group(
+        "Fujitsu AI Foundation options",
+        "Used when --provider is fujitsu.  Requires the rof_providers package.",
+    )
+    fujitsu.add_argument(
+        "--fujitsu-endpoint",
+        dest="endpoint",  # same dest as --endpoint so both flags work
+        metavar="URL",
+        default=argparse.SUPPRESS,  # only overrides if explicitly passed
+        help=(
+            "Alias for --endpoint (Fujitsu Chat-AI URL). "
+            "Defaults to FUJITSU_CHATAI_ENDPOINT env var, then the public endpoint."
         ),
     )
 
@@ -1848,16 +2744,49 @@ def main() -> None:
         ts_tag = time.strftime("%Y%m%d_%H%M%S")
         comms_log_path = output_dir / _COMMS_DIR_NAME / f"comms_{ts_tag}.jsonl"
 
+    # Resolve routing-memory persistence path.
+    # Priority: explicit --routing-memory > default <output_dir>/routing_memory.json
+    # Disabled entirely when --no-persist-routing or --no-routing is given.
+    use_routing: bool = not getattr(args, "no_routing", False)
+    no_persist: bool = getattr(args, "no_persist_routing", False)
+    routing_memory_path: Optional[Path] = None
+    if use_routing and not no_persist:
+        explicit = getattr(args, "routing_memory", "").strip()
+        routing_memory_path = Path(explicit) if explicit else output_dir / "routing_memory.json"
+
+    # Resolve RAG / knowledge options.
+    rag_backend: str = getattr(args, "rag_backend", "in_memory")
+    rag_persist_dir: Optional[Path] = None
+    if rag_backend == "chromadb":
+        explicit_rag = getattr(args, "rag_persist_dir", "").strip()
+        rag_persist_dir = Path(explicit_rag) if explicit_rag else output_dir / "chroma_store"
+    knowledge_dir_str: str = getattr(args, "knowledge_dir", "").strip()
+    knowledge_dir: Optional[Path] = Path(knowledge_dir_str) if knowledge_dir_str else None
+
     session = ROFSession(
         llm=llm,
         output_dir=output_dir,
         verbose=args.verbose or debug,
-        use_routing=not getattr(args, "no_routing", False),
+        use_routing=use_routing,
         output_mode=getattr(args, "output_mode", "auto"),
         debug=debug,
         log_comms=log_comms,
         comms_log_path=comms_log_path,
+        routing_memory_path=routing_memory_path,
+        rag_backend=rag_backend,
+        rag_persist_dir=rag_persist_dir,
+        knowledge_dir=knowledge_dir,
+        step_retries=max(0, getattr(args, "step_retries", 1)),
+        llm_fallback_on_tool_failure=not getattr(args, "no_llm_fallback", False),
     )
+
+    # Show active RAG configuration so users know the knowledge backend at a glance.
+    _rag_info = bold(cyan(rag_backend))
+    if rag_backend == "chromadb" and rag_persist_dir:
+        _rag_info += f"  {dim('→')}  {dim(str(rag_persist_dir))}"
+    if knowledge_dir:
+        _rag_info += f"  {dim('| docs:')}  {dim(str(knowledge_dir))}"
+    info(f"RAG backend   : {_rag_info}")
 
     if args.one_shot:
         # Non-interactive single-prompt mode
@@ -1866,6 +2795,9 @@ def main() -> None:
         except Exception as e:
             err(str(e))
             sys.exit(1)
+        finally:
+            # Persist routing memory even in one-shot mode
+            session.save_routing_memory()
     else:
         _repl(session)
 
