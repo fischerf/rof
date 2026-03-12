@@ -69,7 +69,7 @@ class DefinitionParser(StatementParser):
     def parse(self, line: str, lineno: int) -> Definition:
         m = self._RE.match(line)
         if not m:
-            raise ParseError(f"Ungültige Definition: {line!r}", lineno)
+            raise ParseError(f"Invalid Definition: {line!r}", lineno)
         return Definition(source_line=lineno, entity=m.group(1), description=m.group(2))
 
 
@@ -85,7 +85,7 @@ class PredicateParser(StatementParser):
     def parse(self, line: str, lineno: int) -> Predicate:
         m = self._RE.match(line)
         if not m:
-            raise ParseError(f"Ungültiges Predicate: {line!r}", lineno)
+            raise ParseError(f"Invalid Predicate: {line!r}", lineno)
         return Predicate(source_line=lineno, entity=m.group(1), value=m.group(2).strip().strip('"'))
 
 
@@ -98,7 +98,7 @@ class AttributeParser(StatementParser):
     def parse(self, line: str, lineno: int) -> Attribute:
         m = self._RE.match(line)
         if not m:
-            raise ParseError(f"Ungültiges Attribute: {line!r}", lineno)
+            raise ParseError(f"Invalid Attribute: {line!r}", lineno)
         raw = m.group(3).strip().strip('"')
         value: Any = raw
         try:
@@ -122,7 +122,7 @@ class RelationParser(StatementParser):
     def parse(self, line: str, lineno: int) -> Relation:
         m = self._RE.match(line)
         if not m:
-            raise ParseError(f"Ungültige Relation: {line!r}", lineno)
+            raise ParseError(f"Invalid Relation: {line!r}", lineno)
         return Relation(
             source_line=lineno,
             entity1=m.group(1),
@@ -141,7 +141,7 @@ class ConditionParser(StatementParser):
     def parse(self, line: str, lineno: int) -> Condition:
         m = self._RE.match(line)
         if not m:
-            raise ParseError(f"Ungültige Condition: {line!r}", lineno)
+            raise ParseError(f"Invalid Condition: {line!r}", lineno)
         return Condition(
             source_line=lineno, condition_expr=m.group(1).strip(), action=m.group(2).strip()
         )
@@ -156,7 +156,7 @@ class GoalParser(StatementParser):
     def parse(self, line: str, lineno: int) -> Goal:
         m = self._RE.match(line)
         if not m:
-            raise ParseError(f"Ungültiges Goal: {line!r}", lineno)
+            raise ParseError(f"Invalid Goal: {line!r}", lineno)
         return Goal(source_line=lineno, goal_expr=m.group(1).strip())
 
 
@@ -214,7 +214,7 @@ class ExecuteParser(StatementParser):
         m = self._RE_SIMPLE.match(line)
         if m:
             return Goal(source_line=lineno, goal_expr=f"execute {m.group(1)}")
-        raise ParseError(f"Ungültiger Execute-Statement: {line!r}", lineno)
+        raise ParseError(f"Invalid Execute-Statement: {line!r}", lineno)
 
 
 class AssessParser(StatementParser):
@@ -235,7 +235,7 @@ class AssessParser(StatementParser):
     def parse(self, line: str, lineno: int) -> Goal:
         m = self._RE.match(line)
         if not m:
-            raise ParseError(f"Ungültiger Assess-Statement: {line!r}", lineno)
+            raise ParseError(f"Invalid Assess-Statement: {line!r}", lineno)
         return Goal(source_line=lineno, goal_expr=f"assess {m.group(1)} for {m.group(2)}")
 
 
@@ -256,7 +256,7 @@ class AggregateParser(StatementParser):
     def parse(self, line: str, lineno: int) -> Relation:
         m = self._RE.match(line)
         if not m:
-            raise ParseError(f"Ungültiger Aggregate-Statement: {line!r}", lineno)
+            raise ParseError(f"Invalid Aggregate-Statement: {line!r}", lineno)
         return Relation(
             source_line=lineno,
             entity1=m.group(1),
@@ -284,7 +284,7 @@ class DetermineParser(StatementParser):
     def parse(self, line: str, lineno: int) -> Predicate:
         m = self._RE.match(line)
         if not m:
-            raise ParseError(f"Ungültiger Determine-Statement: {line!r}", lineno)
+            raise ParseError(f"Invalid Determine-Statement: {line!r}", lineno)
         return Predicate(source_line=lineno, entity=m.group(1), value=m.group(2))
 
 
@@ -329,7 +329,7 @@ class RLParser:
         for lineno, raw in statements:
             node = self._parse_statement(raw, lineno)
             if node is None:
-                logger.warning("[Line %d] Unbekannter Statement: %r", lineno, raw)
+                logger.warning("[Line %d] Unknown Statement: %r", lineno, raw)
                 continue
             self._append(ast, node)
 
@@ -375,7 +375,7 @@ class RLParser:
                 buffer = ""
 
         if buffer:
-            raise ParseError(f"Unvollständiger Statement am Dateiende: {buffer!r}", start_line)
+            raise ParseError(f"Incomplete statement at the end of the file: {buffer!r}", start_line)
 
         return cleaned
 
