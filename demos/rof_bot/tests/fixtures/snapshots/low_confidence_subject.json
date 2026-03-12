@@ -1,0 +1,111 @@
+{
+  "_comment": "Snapshot fixture — a subject with low-confidence analysis signals. Used by test_full_pipeline_defer_decision.",
+  "_usage": "Pass as seed_snapshot to build_pipeline_for_test(). Expect Decision.action == 'defer'.",
+
+  "run_id": "fixture-low-confidence-001",
+  "target": "target_a",
+  "cycle": 1,
+  "workflow_version": "1.0",
+  "created_at": "2025-01-01T00:00:00+00:00",
+
+  "entities": {
+    "Subject": {
+      "id": "Subject",
+      "attributes": {
+        "id": "SUBJECT-LOW-001",
+        "source": "primary_system",
+        "status": "open",
+        "priority": "low",
+        "data_complete": "true",
+        "raw_content": "This is a low-priority subject with minimal signal. The content is ambiguous and does not clearly indicate a required action.",
+        "created_at": "2025-01-01T00:00:00+00:00"
+      },
+      "predicates": []
+    },
+
+    "Context": {
+      "id": "Context",
+      "attributes": {
+        "history_available": "false",
+        "enrichment_type": "basic",
+        "enrichment_data": "No historical context available for this subject."
+      },
+      "predicates": []
+    },
+
+    "Analysis": {
+      "id": "Analysis",
+      "attributes": {
+        "primary_score": "0.18",
+        "confidence_level": "low",
+        "subject_category": "routine",
+        "signal_available": "true",
+        "degraded": "false",
+        "recency_score": "0.40",
+        "priority_boost": "0.0",
+        "score_breakdown": "primary=0.18 recency=0.40 priority_boost=0.0"
+      },
+      "predicates": [
+        "is_analysed"
+      ]
+    },
+
+    "ExternalSignal": {
+      "id": "ExternalSignal",
+      "attributes": {
+        "signal_available": "true",
+        "signal_type": "market_context",
+        "signal_value": "0.20",
+        "signal_direction": "neutral",
+        "retrieved_at": "2025-01-01T00:00:00+00:00"
+      },
+      "predicates": []
+    },
+
+    "Constraints": {
+      "id": "Constraints",
+      "attributes": {
+        "resource_utilisation": "0.35",
+        "concurrent_action_count": "1",
+        "daily_error_rate": "0.01"
+      },
+      "predicates": [
+        "within_limits",
+        "operational_limits_clear"
+      ]
+    },
+
+    "ResourceBudget": {
+      "id": "ResourceBudget",
+      "attributes": {
+        "available": "true",
+        "resource_utilisation": "0.35",
+        "headroom": "0.65"
+      },
+      "predicates": []
+    },
+
+    "BotState": {
+      "id": "BotState",
+      "attributes": {
+        "resource_utilisation": "0.35",
+        "concurrent_action_count": "1",
+        "daily_error_rate": "0.01",
+        "last_action_at": "2025-01-01T00:00:00+00:00",
+        "last_action_type": "defer",
+        "cycle_count_today": "3",
+        "dry_run": "true",
+        "dry_run_mode": "log_only"
+      },
+      "predicates": []
+    }
+  },
+
+  "metadata": {
+    "fixture_version": "1.0",
+    "expected_decision_action": "defer",
+    "expected_confidence_level": "low",
+    "expected_subject_category": "routine",
+    "note": "Low primary_score (0.18) and low confidence_level should trigger defer path in 04_decide.rl"
+  }
+}

@@ -8,3 +8,4 @@ demos/rof_self_demo/
 *.pyc
 demos/rof_ai_demo/rof_output/
 src/rof_providers/
+.coverage

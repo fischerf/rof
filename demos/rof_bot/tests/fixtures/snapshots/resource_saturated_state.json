@@ -1,0 +1,114 @@
+{
+  "_comment": "Snapshot fixture — a resource-saturated bot state. Used by test_guardrail_blocks_on_resource_limit.",
+  "_usage": "Pass as seed_snapshot to build_pipeline_for_test(). Expect Constraints is resource_limit_reached and Decision.action == 'defer'.",
+
+  "run_id": "fixture-resource-saturated-001",
+  "target": "target_a",
+  "cycle": 1,
+  "workflow_version": "1.0",
+  "created_at": "2025-01-01T00:00:00+00:00",
+
+  "entities": {
+    "Subject": {
+      "id": "Subject",
+      "attributes": {
+        "id": "SUBJECT-SAT-001",
+        "source": "primary_system",
+        "status": "open",
+        "priority": "normal",
+        "data_complete": "true",
+        "raw_content": "Subject requesting standard processing. Analysis indicates a proceed candidate, but resource limits are saturated.",
+        "created_at": "2025-01-01T00:00:00+00:00"
+      },
+      "predicates": [
+        "immediate_action_candidate"
+      ]
+    },
+
+    "Context": {
+      "id": "Context",
+      "attributes": {
+        "history_available": "true",
+        "enrichment_type": "full",
+        "enrichment_data": "Historical context available. Previous cycles completed successfully."
+      },
+      "predicates": []
+    },
+
+    "Analysis": {
+      "id": "Analysis",
+      "attributes": {
+        "primary_score": "0.78",
+        "confidence_level": "high",
+        "subject_category": "priority",
+        "signal_available": "true",
+        "degraded": "false",
+        "recency_score": "0.85",
+        "priority_boost": "0.10",
+        "score_breakdown": "primary=0.78 recency=0.85 priority_boost=0.10"
+      },
+      "predicates": [
+        "is_analysed"
+      ]
+    },
+
+    "ExternalSignal": {
+      "id": "ExternalSignal",
+      "attributes": {
+        "signal_available": "true",
+        "signal_type": "market_context",
+        "signal_value": "0.80",
+        "signal_direction": "positive",
+        "retrieved_at": "2025-01-01T00:00:00+00:00"
+      },
+      "predicates": []
+    },
+
+    "Constraints": {
+      "id": "Constraints",
+      "attributes": {
+        "resource_utilisation": "0.93",
+        "concurrent_action_count": "5",
+        "daily_error_rate": "0.02"
+      },
+      "predicates": [
+        "resource_limit_reached",
+        "concurrency_limit_reached"
+      ]
+    },
+
+    "ResourceBudget": {
+      "id": "ResourceBudget",
+      "attributes": {
+        "available": "false",
+        "resource_utilisation": "0.93",
+        "headroom": "0.07"
+      },
+      "predicates": [
+        "exhausted"
+      ]
+    },
+
+    "BotState": {
+      "id": "BotState",
+      "attributes": {
+        "resource_utilisation": "0.93",
+        "concurrent_action_count": "5",
+        "daily_error_rate": "0.02",
+        "last_action_at": "2025-01-01T00:00:00+00:00",
+        "last_action_type": "proceed",
+        "cycle_count_today": "42",
+        "dry_run": "true",
+        "dry_run_mode": "log_only"
+      },
+      "predicates": []
+    }
+  },
+
+  "metadata": {
+    "fixture_version": "1.0",
+    "expected_decision_action": "defer",
+    "expected_predicate_constraints": "resource_limit_reached",
+    "note": "resource_utilisation=0.93 exceeds the 0.80 guardrail threshold. 03_validate.rl must set Constraints is resource_limit_reached and 04_decide.rl must force-defer regardless of high analysis confidence."
+  }
+}

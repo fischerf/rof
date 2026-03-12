@@ -1,0 +1,48 @@
+{
+  "_comment": "Stub LLM response fixture — simulates a medium-confidence escalate decision from 04_decide.rl.",
+  "_usage": "Used by tests that assert the pipeline escalates when confidence is medium and subject is priority category.",
+
+  "stage": "decide",
+  "model": "stub",
+  "response": {
+    "entities": {
+      "Decision": {
+        "attributes": {
+          "action": "escalate",
+          "confidence_score": "0.72",
+          "reasoning_summary": "Medium confidence with priority subject — escalating to human operator for review rather than acting autonomously.",
+          "dry_run_active": "true"
+        },
+        "predicates": []
+      }
+    },
+    "goals_resolved": [
+      "evaluate EscalateAction for Decision",
+      "determine final Decision as one of: proceed, defer, escalate, skip",
+      "assign confidence_score to Decision between 0.0 and 1.0",
+      "assign reasoning_summary to Decision in plain text",
+      "annotate Decision with dry_run_active from BotState configuration"
+    ],
+    "goals_deferred": [
+      "evaluate PrimaryAction for Decision with confidence threshold 0.65"
+    ],
+    "goals_skipped": [
+      "evaluate DeferAction for Decision"
+    ]
+  },
+
+  "raw_llm_text": "The subject is in the priority category but analysis confidence is only medium. Autonomous action carries unacceptable risk at this confidence level. Escalating to a human operator for final review and decision.\n\nDecision has action of \"escalate\".\nDecision has confidence_score of 0.72.\nDecision has reasoning_summary of \"Medium confidence with priority subject — escalating to human operator for review rather than acting autonomously.\".\nDecision has dry_run_active of \"true\".",
+
+  "metadata": {
+    "fixture_version": "1.0",
+    "expected_decision_action": "escalate",
+    "expected_confidence_score_min": 0.50,
+    "expected_confidence_score_max": 0.85,
+    "triggers_escalate_path": true,
+    "triggers_primary_action": false,
+    "triggers_defer_path": false,
+    "requires_confidence_level": "medium",
+    "requires_subject_category": "priority",
+    "requires_operational_limits_clear": true
+  }
+}
