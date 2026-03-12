@@ -80,8 +80,11 @@ class SnapshotSerializer:
 
             for attr, val in entity_data.get("attributes", {}).items():
                 if isinstance(val, str):
-                    # Escape embedded quotes
-                    safe_val = val.replace('"', '\\"')
+                    # Escape embedded quotes and newlines so multi-line values
+                    # (e.g. rl_context strings from tool output) do not break
+                    # the RL tokenizer, which splits statements on bare periods
+                    # at the end of lines.
+                    safe_val = val.replace('"', '\\"').replace("\n", "\\n").replace("\r", "")
                     lines.append(f'{entity_name} has {attr} of "{safe_val}".')
                 elif isinstance(val, bool):
                     lines.append(f"{entity_name} has {attr} of {str(val).lower()}.")

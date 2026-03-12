@@ -4,8 +4,25 @@ tools/tools/database.py
 
 from __future__ import annotations
 
-import copy, csv, hashlib, io, json, logging, math, os, queue, re, shlex, shutil
-import subprocess, sys, tempfile, textwrap, threading, time, uuid
+import copy
+import csv
+import hashlib
+import io
+import json
+import logging
+import math
+import os
+import queue
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
+import threading
+import time
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -20,6 +37,7 @@ logger = logging.getLogger("rof.tools")
 
 
 __all__ = ["DatabaseTool"]
+
 
 # rof_tools/tools/database.py
 class DatabaseTool(ToolProvider):
@@ -100,7 +118,24 @@ class DatabaseTool(ToolProvider):
                         break
 
         if not query.strip():
-            return ToolResponse(success=False, error="No SQL query provided.")
+            # When called by the orchestrator (no SQL in context), treat as a
+            # graceful no-op rather than a hard failure.  The stage continues
+            # and the audit record is simply skipped for this cycle.
+            logger.warning(
+                "DatabaseTool: no SQL query in request — returning no-op success. Input keys: %s",
+                list(request.input.keys()),
+            )
+            return ToolResponse(
+                success=True,
+                output={
+                    "query": "",
+                    "columns": [],
+                    "rows": [],
+                    "rowcount": 0,
+                    "skipped": True,
+                    "reason": "No SQL query provided — no-op.",
+                },
+            )
 
         if self._read_only:
             low = query.strip().lower()
@@ -191,5 +226,3 @@ class DatabaseTool(ToolProvider):
                 "rowcount": len(rows),
             },
         )
-
-
