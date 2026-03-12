@@ -143,37 +143,58 @@ demos/rof_bot/
 # 1. Clone / navigate to the project root
 cd /path/to/rof
 
-# 2. Install the framework and bot dependencies
+# 2. Install the framework
 pip install -e ".[all]"
-pip install fastapi "uvicorn[standard]" apscheduler sqlalchemy aiosqlite \
-            httpx pydantic-settings python-dotenv
 
-# 3. Create your .env file
+# 3. Install the bot's own dependencies
+cd demos/rof_bot
+pip install -r requirements.txt
+
+# 4. Create your .env file
 cp demos/rof_bot/.env.example demos/rof_bot/.env
 # Edit .env — set ROF_API_KEY at minimum (see Configuration below)
 
-# 4. (Optional) Seed the knowledge base
-python demos/rof_bot/scripts/ingest_knowledge.py \
-    --knowledge-dir demos/rof_bot/knowledge \
-    --chromadb-path ./data/chromadb
+# 5. (Optional) Seed the knowledge base
+python scripts/ingest_knowledge.py --knowledge-dir knowledge --chromadb-path ./data/chromadb
 
-# 5. Start the service
-cd demos/rof_bot
+# 6. Start the service
 uvicorn bot_service.main:app --reload --port 8080
 
-# 6. Confirm it's running
+# 7. Confirm it's running
 curl http://localhost:8080/health
 # → {"status": "ok", "state": "stopped"}
 
-# 7. Start the bot cycling
+# 8. Start the bot cycling
 curl -X POST http://localhost:8080/control/start
 # → {"state": "running", "lint_files_checked": 5}
 
-# 8. Watch the live feed
+# 9. Watch the live feed
 # Open http://localhost:8080/ws/feed in a WebSocket client
 # Or poll:
 curl http://localhost:8080/status
 ```
+
+### What `requirements.txt` installs
+
+| Package | Why needed |
+|---------|------------|
+| `fastapi`, `uvicorn[standard]`, `websockets` | Web framework and live `/ws/feed` endpoint |
+| `sqlalchemy`, `aiosqlite` | Async database layer — **`aiosqlite` is required** for the default SQLite backend; without it the service logs `ERROR: pysqlite is not async` and runs without persistence |
+| `apscheduler` | Interval / cron scheduler — without it the service logs `WARNING: scheduler will not run cycles automatically` and jobs never fire |
+| `prometheus-client` | `/metrics` endpoint — without it the service logs `WARNING: MetricsCollector will use no-op implementation` and metrics are unavailable |
+| `pydantic`, `pydantic-settings`, `python-dotenv` | `.env` file loading and typed settings |
+| `httpx` | HTTP client used by `DataSourceTool`, `ExternalSignalTool`, `ActionExecutorTool` |
+| `anthropic` | Default LLM provider SDK (swap for `openai` / `google-generativeai` if needed) |
+| `chromadb`, `sentence-transformers` | RAG knowledge base — without them the service logs `WARNING: RAGTool not registered` and historical retrieval is skipped |
+| `pyyaml` | `pipeline.yaml` / `domain.yaml` parsing |
+
+> **Minimum viable install** (no RAG, no Prometheus — warnings will appear but the service runs):
+> ```bash
+> pip install -e ".[all]"
+> pip install fastapi "uvicorn[standard]" sqlalchemy aiosqlite apscheduler \
+>             pydantic-settings python-dotenv httpx pyyaml anthropic
+> ```
+
 
 > **Note:** The bot starts in `BOT_DRY_RUN=true` mode by default. No external system is ever called until you explicitly set `BOT_DRY_RUN=false` after completing the [graduation checklist](knowledge/operational/dry_run_guide.md).
 
@@ -1100,7 +1121,7 @@ docker compose restart bot-service
 
 ### `RAGTool not registered — chromadb unavailable`
 
-**Cause:** The `chromadb` package is not installed, or the ChromaDB data directory does not exist.
+**Cause:** The `chromadb` and/or `sentence-transformers` packages are not installed, or the ChromaDB data directory does not exist.
 
 **Fix:**
 ```bash
@@ -1109,6 +1130,11 @@ pip install chromadb sentence-transformers
 # Then seed the knowledge base
 python demos/rof_bot/scripts/ingest_knowledge.py \
     --chromadb-path ./data/chromadb
+```
+
+Or simply install the full bot requirements:
+```bash
+pip install -r demos/rof_bot/requirements.txt
 ```
 
 The pipeline runs without RAG retrieval until the collection is seeded; no restart is needed once the collection exists.
@@ -1178,6 +1204,47 @@ See the async boundary notes in `bot_service/state_adapter.py` for the full cont
 
 ---
 
+### `WARNING: APScheduler not installed — scheduler will not run cycles automatically`
+
+**Cause:** The `apscheduler` package is missing. The service starts but cycles never fire automatically; only `POST /control/force-run` works.
+
+**Fix:**
+```bash
+pip install apscheduler
+# or install all bot dependencies at once:
+pip install -r demos/rof_bot/requirements.txt
+```
+
+---
+
+### `WARNING: prometheus_client not installed — MetricsCollector will use no-op implementation`
+
+**Cause:** The `prometheus-client` package is missing. The `/metrics` endpoint returns an empty response and no Prometheus metrics are collected.
+
+**Fix:**
+```bash
+pip install prometheus-client
+# or install all bot dependencies at once:
+pip install -r demos/rof_bot/requirements.txt
+```
+
+---
+
+### `ERROR: database connection failed — pysqlite is not async`
+
+**Cause:** The `aiosqlite` package is missing. SQLAlchemy's async engine cannot use the built-in `pysqlite` driver. The service starts but run history and state persistence are disabled.
+
+**Fix:**
+```bash
+pip install aiosqlite
+# or install all bot dependencies at once:
+pip install -r demos/rof_bot/requirements.txt
+```
+
+> **Note:** Do **not** install the old `pysqlite` package — it is Python 2 only and will fail to build on Python 3. The correct package is `aiosqlite`.
+
+---
+
 ### Test suite fails with `ModuleNotFoundError: rof_framework`
 
 **Cause:** The `rof_framework` package is not installed in the active Python environment.
@@ -1213,6 +1280,7 @@ Fix the reported errors, then retry `POST /control/reload`.
 ## See Also
 
 - **[User Manual](MANUAL.md)** — step-by-step operator guide covering every control, status field, and operational procedure
+- **[requirements.txt](requirements.txt)** — all Python dependencies for the bot service with inline explanations
 - **[Implementation Plan](../../rof_bot_implementation_plan.md)** — complete architectural reference and design decisions
 - **[Knowledge Base README](knowledge/README.md)** — corpus structure, ingest instructions, and domain adaptation guide
 - **[Dry-Run Guide](knowledge/operational/dry_run_guide.md)** — burn-in procedure and production graduation checklist

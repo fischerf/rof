@@ -121,7 +121,14 @@ def _build_trigger(settings: Any) -> Any:
     When trigger=event the scheduler is started without a cycle job — the
     bot waits for POST /control/force-run to start each cycle.
     """
-    trigger_type = str(getattr(settings, "bot_cycle_trigger", "interval")).lower().strip()
+    _raw_trigger = getattr(settings, "bot_cycle_trigger", "interval")
+    # CycleTrigger is a str-Enum, but str() of the enum gives "CycleTrigger.INTERVAL"
+    # whereas .value gives "interval".  Support both plain strings and enum instances.
+    trigger_type = (
+        (_raw_trigger.value if hasattr(_raw_trigger, "value") else str(_raw_trigger))
+        .lower()
+        .strip()
+    )
 
     if trigger_type == "interval":
         interval_s = int(getattr(settings, "bot_cycle_interval_seconds", 60))

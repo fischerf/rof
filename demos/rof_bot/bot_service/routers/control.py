@@ -87,7 +87,6 @@ try:
     from bot_service.scheduler import (
         BotState,
         _execute_cycle,
-        build_pipeline,
         execute_abort_procedure,
         run_bot_cycle,
     )
@@ -99,14 +98,11 @@ except ImportError:
             execute_abort_procedure,
             run_bot_cycle,
         )
-
-        build_pipeline = None  # type: ignore[assignment]
     except ImportError:
         BotState = None  # type: ignore[assignment,misc]
         run_bot_cycle = None  # type: ignore[assignment,misc]
         _execute_cycle = None  # type: ignore[assignment,misc]
         execute_abort_procedure = None  # type: ignore[assignment,misc]
-        build_pipeline = None  # type: ignore[assignment]
 
 try:
     from bot_service.pipeline_factory import build_pipeline as _build_pipeline_factory

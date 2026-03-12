@@ -83,6 +83,6 @@ route goal "execute PrimaryAction"  via ActionExecutorTool with min_confidence 0
 route goal "execute EscalateAction" via ActionExecutorTool with min_confidence 0.95.
 route goal "execute DeferAction"    via ActionExecutorTool with min_confidence 0.90.
 route goal "record SkipDecision"    via DatabaseTool       with min_confidence 0.85.
-route goal "record Action"          via DatabaseTool       with min_confidence 0.90.
+route goal "record Action"          via ActionExecutorTool with min_confidence 0.90.
 route goal "update BotState"        via StateManagerTool   with min_confidence 0.90.
 route goal "mark Action"            via any                with min_confidence 0.60.

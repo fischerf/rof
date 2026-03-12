@@ -8,6 +8,7 @@ This manual is written for the operator — the person responsible for starting,
 
 ## Contents
 
+- [Installation Prerequisites](#installation-prerequisites)
 - [Bot Lifecycle States](#bot-lifecycle-states)
 - [Starting and Stopping](#starting-and-stopping)
   - [Start](#start)
@@ -80,10 +81,119 @@ This manual is written for the operator — the person responsible for starting,
   - [Error rate guardrail has fired](#error-rate-guardrail-has-fired)
   - [Resource utilisation guardrail has fired](#resource-utilisation-guardrail-has-fired)
   - [Authentication failure detected](#authentication-failure-detected)
+  - [Missing package: `aiosqlite` — database connection failed](#missing-package-aiosqlite--database-connection-failed)
+  - [Missing package: `apscheduler` — scheduler not running](#missing-package-apscheduler--scheduler-not-running)
+  - [Missing package: `prometheus-client` — metrics unavailable](#missing-package-prometheus-client--metrics-unavailable)
   - [LLM provider is unreachable](#llm-provider-is-unreachable)
   - [Database is unavailable](#database-is-unavailable)
   - [Service is unresponsive](#service-is-unresponsive)
 - [On-Call Quick Reference](#on-call-quick-reference)
+
+---
+
+## Installation Prerequisites
+
+Before operating the bot, ensure all Python dependencies are installed. Missing packages cause the three most common startup warnings and errors.
+
+### Install all dependencies
+
+```bash
+# Step 1 — install the ROF framework from the project root
+cd /path/to/rof
+pip install -e ".[all]"
+
+# Step 2 — install the bot's own dependencies
+cd demos/rof_bot
+pip install -r requirements.txt
+```
+
+### What each package group does
+
+| Package(s) | Role | Missing = |
+|------------|------|-----------|
+| `fastapi`, `uvicorn[standard]`, `websockets` | Web framework and live `/ws/feed` endpoint | Service won't start |
+| `sqlalchemy`, `aiosqlite` | Async database layer for run history and state persistence | `ERROR: pysqlite is not async` — runs without persistence |
+| `apscheduler` | Interval / cron / event-driven cycle scheduler | `WARNING: scheduler will not run cycles automatically` — only `POST /control/force-run` works |
+| `prometheus-client` | Prometheus `/metrics` endpoint | `WARNING: MetricsCollector will use no-op implementation` — metrics unavailable |
+| `pydantic`, `pydantic-settings`, `python-dotenv` | `.env` loading and typed settings | Service won't start |
+| `httpx` | HTTP client used by `DataSourceTool`, `ExternalSignalTool`, `ActionExecutorTool` | Tool calls fail at runtime |
+| `anthropic` (or `openai` / `google-generativeai`) | LLM provider SDK matching `ROF_PROVIDER` in `.env` | Pipeline falls back to stub — every decision returns `defer` |
+| `chromadb`, `sentence-transformers` | Vector store for `RAGTool` and the knowledge-base ingest script | `WARNING: RAGTool not registered` — historical retrieval skipped |
+| `pyyaml` | `pipeline.yaml` / `domain.yaml` parsing | Service won't start |
+
+### Common startup warnings and their fixes
+
+**`WARNING: APScheduler not installed — scheduler will not run cycles automatically`**
+
+```bash
+pip install apscheduler
+```
+
+The bot starts and responds to API calls, but no cycles fire on the configured interval or cron schedule. Only `POST /control/force-run` triggers a cycle. Install `apscheduler` and restart.
+
+---
+
+**`WARNING: prometheus_client not installed — MetricsCollector will use no-op implementation`**
+
+```bash
+pip install prometheus-client
+```
+
+The `/metrics` endpoint returns an empty body. No Prometheus metrics are collected or exported. The bot otherwise runs normally.
+
+---
+
+**`ERROR: database connection failed — pysqlite is not async`**
+
+```bash
+pip install aiosqlite
+```
+
+The SQLAlchemy async engine cannot use the built-in `pysqlite` driver. The service starts but run history, action log, and routing-memory persistence are all disabled for that session.
+
+> **Do not** install the old `pysqlite` package — it is Python 2 only and will fail to build on Python 3. The correct async driver is `aiosqlite`.
+
+---
+
+**`WARNING: RAGTool not registered — chromadb unavailable`**
+
+```bash
+pip install chromadb sentence-transformers
+```
+
+The RAGTool is omitted from the tool registry. Stage 2 (Analysis) cannot retrieve historical cases from the knowledge base. The pipeline runs normally for all other stages.
+
+---
+
+### Verifying the installation
+
+```bash
+python -c "
+import importlib, sys
+required = [
+    ('fastapi',           'fastapi'),
+    ('uvicorn',           'uvicorn'),
+    ('sqlalchemy',        'sqlalchemy'),
+    ('aiosqlite',         'aiosqlite'),
+    ('apscheduler',       'apscheduler'),
+    ('prometheus_client', 'prometheus-client'),
+    ('pydantic_settings', 'pydantic-settings'),
+    ('httpx',             'httpx'),
+    ('anthropic',         'anthropic'),
+    ('chromadb',          'chromadb'),
+    ('yaml',              'pyyaml'),
+]
+ok = True
+for mod, pip in required:
+    try:
+        m = importlib.import_module(mod)
+        print(f'  OK  {pip} ({getattr(m, \"__version__\", \"?\")})' )
+    except ImportError:
+        print(f'  MISSING  {pip}  →  pip install {pip}')
+        ok = False
+sys.exit(0 if ok else 1)
+"
+```
 
 ---
 
@@ -1756,6 +1866,108 @@ curl -X POST http://localhost:8080/control/force-run \
 LAST_RUN=$(curl -s "http://localhost:8080/runs?limit=1" | jq -r '.runs[0].run_id')
 curl -s "http://localhost:8080/runs/${LAST_RUN}" | jq '.final_snapshot.entities.Subject.attributes.fetch_error'
 # Should be null
+```
+
+---
+
+### Missing package: `aiosqlite` — database connection failed
+
+**Symptom:** Startup log contains:
+```
+ERROR | rof.main | lifespan: database connection failed — The asyncio extension requires
+an async driver to be used. The loaded 'pysqlite' is not async.
+WARNING | rof.main | lifespan: continuing without database — run history and state
+persistence disabled
+```
+
+**Cause:** The `aiosqlite` package is not installed. SQLAlchemy's async engine cannot use the built-in `pysqlite` driver for the default SQLite database URL.
+
+**Impact:** The service starts and cycles normally, but:
+- No pipeline run history is saved
+- No action log entries are written
+- Routing memory cannot be persisted or warm-loaded across restarts
+- `GET /runs` returns an empty list
+
+**Fix:**
+```bash
+pip install aiosqlite
+# or install the full bot requirements:
+pip install -r requirements.txt
+```
+
+Restart the service after installing. Confirm the error is gone:
+```bash
+# Should show the SQLAlchemy connected line, not the pysqlite error
+docker logs rof-bot-service 2>&1 | grep -E "connected|pysqlite"
+# → INFO | rof.db | SQLAlchemyDatabase connected: sqlite+aiosqlite:///./rof_bot.db
+```
+
+> **Do not** install the old `pysqlite` package — it is Python 2 only and will fail to build on Python 3. The correct async SQLite driver is `aiosqlite`.
+
+---
+
+### Missing package: `apscheduler` — scheduler not running
+
+**Symptom:** Startup log contains:
+```
+WARNING | rof.scheduler | APScheduler not installed — scheduler will not run cycles
+automatically. Install with: pip install apscheduler
+WARNING | rof.scheduler | AsyncIOScheduler stub: start() called — no jobs will fire
+```
+
+**Cause:** The `apscheduler` package is not installed. The stub scheduler accepts job registrations but never actually fires them.
+
+**Impact:**
+- Configured interval / cron trigger is completely ignored
+- `POST /control/start` succeeds and shows `state: running`, but no cycle ever fires
+- Only `POST /control/force-run` can trigger a cycle
+- `memory_checkpoint` and `limits_guard` background jobs also never fire
+
+**Fix:**
+```bash
+pip install apscheduler
+# or install the full bot requirements:
+pip install -r requirements.txt
+```
+
+Restart the service. Confirm real APScheduler is active:
+```bash
+docker logs rof-bot-service 2>&1 | grep -E "apscheduler|Scheduler started"
+# → INFO | apscheduler.scheduler | Scheduler started
+```
+
+---
+
+### Missing package: `prometheus-client` — metrics unavailable
+
+**Symptom:** Startup log contains:
+```
+WARNING | rof.metrics | prometheus_client not installed — MetricsCollector will use
+no-op implementation. Install with: pip install prometheus-client
+WARNING | rof.metrics | create_metrics_collector: prometheus_client not installed —
+returning NoOpMetricsCollector
+```
+
+**Cause:** The `prometheus-client` package is not installed. All metric operations silently no-op.
+
+**Impact:**
+- `GET /metrics` returns an empty body
+- Prometheus scrape jobs report no data
+- Grafana dashboards show no metrics
+- No alerts fire, even for genuine problems
+
+**Fix:**
+```bash
+pip install prometheus-client
+# or install the full bot requirements:
+pip install -r requirements.txt
+```
+
+Restart the service. Confirm metrics are now live:
+```bash
+curl http://localhost:8080/metrics | head -5
+# → # HELP bot_cycles_total ...
+# → # TYPE bot_cycles_total counter
 ```
 
 ---

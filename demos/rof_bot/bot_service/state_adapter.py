@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from typing import Optional
 
 logger = logging.getLogger("rof.state_adapter")
@@ -166,6 +167,7 @@ class SQLAlchemyStateAdapter(_BaseStateAdapter):
         self._pool_size = pool_size
         self._max_overflow = max_overflow
         self._engine = None  # lazy-init on first use
+        self._engine_lock = threading.Lock()
         self._is_postgres = "postgresql" in dsn or "postgres" in dsn
         self._is_sqlite = "sqlite" in dsn or "://" not in dsn
 
@@ -177,32 +179,46 @@ class SQLAlchemyStateAdapter(_BaseStateAdapter):
         if self._engine is not None:
             return self._engine
 
-        try:
-            from sqlalchemy import create_engine, text  # noqa: F401
-        except ImportError as exc:
-            raise ImportError(
-                "SQLAlchemy is required for SQLAlchemyStateAdapter.\n"
-                "  pip install sqlalchemy\n"
-                "  For PostgreSQL also: pip install psycopg2-binary"
-            ) from exc
+        with self._engine_lock:
+            # Double-checked locking: another thread may have initialised
+            # the engine while we were waiting for the lock.
+            if self._engine is not None:
+                return self._engine
 
-        from sqlalchemy import create_engine
+            try:
+                from sqlalchemy import create_engine, text  # noqa: F401
+            except ImportError as exc:
+                raise ImportError(
+                    "SQLAlchemy is required for SQLAlchemyStateAdapter.\n"
+                    "  pip install sqlalchemy\n"
+                    "  For PostgreSQL also: pip install psycopg2-binary"
+                ) from exc
 
-        kwargs: dict = {}
-        if not self._is_sqlite:
-            kwargs["pool_size"] = self._pool_size
-            kwargs["max_overflow"] = self._max_overflow
+            from sqlalchemy import create_engine
 
-        self._engine = create_engine(self._dsn, **kwargs)
-        self._ensure_table()
-        return self._engine
+            kwargs: dict = {}
+            if not self._is_sqlite:
+                kwargs["pool_size"] = self._pool_size
+                kwargs["max_overflow"] = self._max_overflow
+
+            engine = create_engine(self._dsn, **kwargs)
+            # Run DDL before publishing the engine to other threads.
+            # Only assign self._engine after the table exists so that no
+            # thread can ever see a non-None engine with a missing table.
+            self._ensure_table_on(engine)
+            self._engine = engine
+            return self._engine
 
     def _ensure_table(self) -> None:
-        """Create routing_memory table if it does not exist."""
+        """Create routing_memory table if it does not exist (uses self._engine)."""
+        self._ensure_table_on(self._engine)
+
+    def _ensure_table_on(self, engine) -> None:
+        """Create routing_memory table on the given engine."""
         from sqlalchemy import text
 
         ddl = _DDL_POSTGRES if self._is_postgres else _DDL_SQLITE
-        with self._engine.begin() as conn:
+        with engine.begin() as conn:
             conn.execute(text(ddl))
 
     # ------------------------------------------------------------------

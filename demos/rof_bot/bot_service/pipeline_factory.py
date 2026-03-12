@@ -106,22 +106,24 @@ def create_provider(provider_name: str, model: str, api_key: str = "") -> Any:
 
     try:
         if provider_name == "anthropic":
-            from rof_framework.llm.anthropic_provider import AnthropicProvider  # type: ignore
+            from rof_framework.llm.providers.anthropic_provider import (
+                AnthropicProvider,  # type: ignore
+            )
 
             return AnthropicProvider(model=model, api_key=api_key or None)
 
         if provider_name == "openai":
-            from rof_framework.llm.openai_provider import OpenAIProvider  # type: ignore
+            from rof_framework.llm.providers.openai_provider import OpenAIProvider  # type: ignore
 
             return OpenAIProvider(model=model, api_key=api_key or None)
 
         if provider_name in ("gemini", "google"):
-            from rof_framework.llm.gemini_provider import GeminiProvider  # type: ignore
+            from rof_framework.llm.providers.gemini_provider import GeminiProvider  # type: ignore
 
             return GeminiProvider(model=model, api_key=api_key or None)
 
         if provider_name == "ollama":
-            from rof_framework.llm.ollama_provider import OllamaProvider  # type: ignore
+            from rof_framework.llm.providers.ollama_provider import OllamaProvider  # type: ignore
 
             return OllamaProvider(model=model)
 
@@ -332,7 +334,7 @@ def build_tool_registry(
 
         rag_tool = RAGTool(
             backend="chromadb",
-            chromadb_path=resolved_chroma,
+            persist_dir=resolved_chroma,
         )
         registry.register(rag_tool)
         logger.debug("build_tool_registry: registered RAGTool (chromadb path=%s)", resolved_chroma)
@@ -534,7 +536,7 @@ def build_pipeline(
     confident_pipeline = ConfidentPipeline(
         steps=plain_pipeline._steps,
         llm_provider=default_llm,
-        tools=tools,
+        tools=execute_tools,  # includes read-write DatabaseTool for stage 5
         config=plain_pipeline._config,
         bus=bus,
         routing_memory=memory,

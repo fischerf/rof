@@ -982,8 +982,17 @@ def _create_database(url: str) -> DatabaseInterface:
 
                 async_url = url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
             except ImportError:
-                # aiosqlite not installed — SQLAlchemyDatabase will use sync fallback
-                pass
+                # aiosqlite not installed — fall back to built-in SQLiteDatabase
+                # rather than passing a sync sqlite:/// URL to the async engine
+                # (which would raise "pysqlite is not async").
+                path = url.replace("sqlite:///", "").replace("sqlite://", "") or "./rof_bot.db"
+                logger.warning(
+                    "aiosqlite not installed — using built-in SQLite fallback (%s). "
+                    "Install aiosqlite for full async SQLAlchemy support: "
+                    "pip install aiosqlite",
+                    path,
+                )
+                return SQLiteDatabase(path)
         elif url.startswith("postgresql://"):
             async_url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
 

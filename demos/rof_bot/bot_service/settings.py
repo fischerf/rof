@@ -214,7 +214,7 @@ if _PYDANTIC_AVAILABLE:
             postgresql://...  →  postgresql+asyncpg://...
             sqlite:///...     →  left as-is (aiosqlite not required for the service)
             """
-            if self.async_database_url is None:
+            if not self.async_database_url:
                 sync = self.database_url
                 if sync.startswith("postgresql://"):
                     self.async_database_url = sync.replace(

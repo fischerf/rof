@@ -73,7 +73,8 @@ class TestDataSourceTool:
     def _make_tool(self, **kwargs) -> Any:
         from tools.data_source import DataSourceTool
 
-        return DataSourceTool(dry_run=True, **kwargs)
+        kwargs.setdefault("dry_run", True)
+        return DataSourceTool(**kwargs)
 
     def test_dry_run_returns_stub_data(self):
         """Dry-run mode returns synthetic stub data without any HTTP call."""
