@@ -72,8 +72,9 @@ ensure update BotState with Action result.
 // ── Completion marker ─────────────────────────────────────────────────────────
 // Write a terminal entity so the pipeline runner can confirm this stage
 // completed cleanly and include it in the WebSocket broadcast payload.
-
-ensure mark Action as completed for this cycle.
+// NOTE: goal wording avoids "mark/approve/confirm" keywords that could
+// accidentally route to HumanInLoopTool via keyword or memory drift.
+ensure record Action completion status for this cycle.
 
 // ── Declarative routing hints ─────────────────────────────────────────────────
 // Execution goals require the highest confidence — actions are irreversible
@@ -85,4 +86,4 @@ route goal "execute DeferAction"    via ActionExecutorTool with min_confidence 0
 route goal "record SkipDecision"    via DatabaseTool       with min_confidence 0.85.
 route goal "record Action"          via ActionExecutorTool with min_confidence 0.90.
 route goal "update BotState"        via StateManagerTool   with min_confidence 0.90.
-route goal "mark Action"            via any                with min_confidence 0.60.
+route goal "record Action"          via StateManagerTool   with min_confidence 0.70.

@@ -17,7 +17,7 @@ The bot is domain-neutral by design. Adapting it to a new use case requires fill
 - [Configuration](#configuration)
 - [Domain Adaptation](#domain-adaptation)
 - [The Five-Stage Pipeline](#the-five-stage-pipeline)
-- [pipeline.yaml Reference](#pipelineyaml-reference) _(reference only — not loaded at runtime)_
+- [pipeline.yaml Reference](#pipelineyaml-reference)
 - [Workflow Variants](#workflow-variants)
 - [Multi-Target Fan-Out](#multi-target-fan-out)
 - [Custom Tools](#custom-tools)
@@ -85,7 +85,7 @@ demos/rof_bot/
 │   ├── 03_validate.rl            ← Stage 3: constraint evaluation & guardrails
 │   ├── 04_decide.rl              ← Stage 4: decision synthesis (powerful LLM)
 │   ├── 05_execute.rl             ← Stage 5: action execution & audit trail
-│   ├── pipeline.yaml             ← Reference topology doc (not loaded at runtime)
+│   ├── pipeline.yaml             ← Stage topology, context filters, model overrides (loaded at runtime)
 │   └── variants/                 ← A/B test variants (conservative, aggressive)
 │
 ├── tools/                        ← Custom Python tool implementations
@@ -184,10 +184,11 @@ curl http://localhost:8080/status
 | `apscheduler` | Interval / cron scheduler — without it the service logs `WARNING: scheduler will not run cycles automatically` and jobs never fire |
 | `prometheus-client` | `/metrics` endpoint — without it the service logs `WARNING: MetricsCollector will use no-op implementation` and metrics are unavailable |
 | `pydantic`, `pydantic-settings`, `python-dotenv` | `.env` file loading and typed settings |
-| `httpx` | HTTP client used by `DataSourceTool`, `ExternalSignalTool`, `ActionExecutorTool` |
+| `httpx` | HTTP client used by `DataSourceTool`, `ExternalSignalTool`, `ActionExecutorTool`, `APICallTool` |
 | `anthropic` | Default LLM provider SDK (swap for `openai` / `google-generativeai` if needed) |
 | `chromadb`, `sentence-transformers` | RAG knowledge base — without them the service logs `WARNING: RAGTool not registered` and historical retrieval is skipped |
 | `pyyaml` | `pipeline.yaml` / `domain.yaml` parsing |
+| `ddgs` | DuckDuckGo backend for `WebSearchTool` — free, no API key needed; without it web search falls back to the offline mock |
 
 > **Minimum viable install** (no RAG, no Prometheus — warnings will appear but the service runs):
 > ```bash
@@ -268,6 +269,9 @@ All settings are read from environment variables. A `.env` file in the `demos/ro
 | `EXTERNAL_API_KEY` | _(empty)_ | Primary external system API key |
 | `EXTERNAL_SIGNAL_BASE_URL` | `https://signals.example.com` | Signal source base URL |
 | `EXTERNAL_SIGNAL_API_KEY` | _(empty)_ | Signal source API key |
+| `WEB_SEARCH_BACKEND` | `auto` | WebSearchTool backend: `auto` \| `duckduckgo` \| `serpapi` \| `brave` |
+| `WEB_SEARCH_API_KEY` | _(empty)_ | SerpAPI or Brave Search key (leave empty for free DuckDuckGo) |
+| `WEB_SEARCH_MAX_RESULTS` | `8` | Maximum web search results returned per query (1–50) |
 | `BOT_MAX_CONCURRENT_ACTIONS` | `5` | Concurrency guardrail limit |
 | `BOT_DAILY_ERROR_BUDGET` | `0.05` | Fraction of daily cycles allowed to fail |
 | `BOT_RESOURCE_UTILISATION_LIMIT` | `0.80` | Resource utilisation soft guardrail |
@@ -340,11 +344,11 @@ Each bot cycle runs the following stages in sequence:
 
 | Stage | File | Purpose | LLM | Tools |
 |-------|------|---------|-----|-------|
-| 1 — Collect | `01_collect.rl` | Fetch subject data; normalise fields | Default | `DataSourceTool`, `ContextEnrichmentTool`, `ValidatorTool` |
-| 2 — Analyse | `02_analyse.rl` | Score subject; retrieve external signals and historical patterns | Default | `AnalysisTool`, `ExternalSignalTool`, `RAGTool` |
-| 3 — Validate | `03_validate.rl` | Evaluate guardrails; request human approval if configured | Default | `BotStateManagerTool`, `HumanInLoopTool` |
-| 4 — Decide | `04_decide.rl` | Synthesise final decision with confidence score | **Powerful** | _(LLM-only, no tool calls) |
-| 5 — Execute | `05_execute.rl` | Execute action; write audit record; update bot state | Default | `ActionExecutorTool`, `DatabaseTool` (RW), `BotStateManagerTool` |
+| 1 — Collect | `01_collect.rl` | Fetch subject data; normalise fields | Default | `DataSourceTool`, `ContextEnrichmentTool`, `ValidatorTool`, `WebSearchTool`, `FileReaderTool` |
+| 2 — Analyse | `02_analyse.rl` | Score subject; retrieve external signals and historical patterns | Default | `AnalysisTool`, `ExternalSignalTool`, `RAGTool`, `APICallTool` |
+| 3 — Validate | `03_validate.rl` | Evaluate guardrails; enforce operational limits | Default | `BotStateManagerTool`, `ValidatorTool` |
+| 4 — Decide | `04_decide.rl` | Synthesise final decision with confidence score | **Powerful** | _(LLM-only, no tool calls)_ |
+| 5 — Execute | `05_execute.rl` | Execute action; write audit record; update bot state | Default | `ActionExecutorTool`, `DatabaseTool` (RW), `BotStateManagerTool`, `FileSaveTool`, `CodeRunnerTool` |
 
 ### Decision outcomes
 
@@ -373,13 +377,23 @@ Each stage receives only the entities it needs, keeping the LLM context window l
 
 ## `pipeline.yaml` Reference
 
-> **Note — reference document only.**  `pipeline.yaml` is **not loaded at runtime**.
-> The stage topology, context filters, LLM overrides, and pipeline config are
-> hardcoded in `bot_service/pipeline_factory.py` (`build_pipeline()`).
-> `pipeline.yaml` lives in `workflows/` as a human-readable companion to the `.rl`
-> files — use it to understand or plan changes, then apply them in `pipeline_factory.py`.
-> A `POST /control/reload` rebuilds the pipeline from the Python factory, **not** from
-> this file.
+`workflows/pipeline.yaml` is loaded at runtime by `bot_service/pipeline_factory.py`
+(`_load_pipeline_yaml()`).  It controls the parts of the pipeline that are pure
+data — stage names, order, `.rl` file paths, per-stage context filters, the
+`inject_context` flag, the decide-stage model override, and pipeline-level config.
+
+Non-serialisable Python concerns that **cannot** live in YAML remain in
+`pipeline_factory.py`:
+
+- LLM provider object construction (needs API key, provider class)
+- Tool instantiation and per-stage tool list overrides
+  (the `execute` stage gets an extra read-write `DatabaseTool` appended at build time)
+- `ConfidentPipeline` / `RoutingMemory` wiring
+
+A `POST /control/reload` re-reads `pipeline.yaml` and rebuilds the pipeline
+without restarting the service.  If the file is missing or PyYAML is not
+installed, `build_pipeline()` falls back to built-in defaults so the service
+can always start.
 
 ```
 pipeline.yaml
@@ -406,7 +420,10 @@ pipeline.yaml
 
 ### Stage entity visibility
 
-Each stage in `pipeline_factory.py` passes a `context_filter` lambda that restricts which prior entities flow into its context window. `pipeline.yaml` documents the same filters for reference. This is the mechanism that keeps the LLM context lean while allowing full snapshot accumulation:
+Each stage declares a `context_filter.entities` list in `pipeline.yaml`.
+`pipeline_factory.py` converts this list into a lambda at build time, restricting
+which prior snapshot entities flow into each stage's context window.  This is the
+mechanism that keeps the LLM context lean while allowing full snapshot accumulation:
 
 | Stage | `inject_context` | `context_filter.entities` |
 |-------|-----------------|--------------------------|
@@ -416,7 +433,9 @@ Each stage in `pipeline_factory.py` passes a `context_filter` lambda that restri
 | decide | `true` | `Subject`, `Analysis`, `Constraints`, `ResourceBudget` |
 | execute | `true` | `Decision`, `Subject`, `ResourceBudget`, `BotState` |
 
-**Changing context filters** requires editing the `context_filter` lambda in `build_pipeline()` inside `bot_service/pipeline_factory.py`, then calling `POST /control/reload`. Also update `pipeline.yaml` to keep the reference doc in sync.
+**Changing context filters** requires only editing the `context_filter.entities`
+list for the relevant stage in `pipeline.yaml`, then calling `POST /control/reload`.
+No Python changes are needed.
 
 ### Per-stage model override
 
@@ -429,7 +448,13 @@ stages:
       model: claude-opus-4-6
 ```
 
-`ROF_MODEL` (default `claude-sonnet-4-6`) is used for all other stages. To change the decide-stage model, set `ROF_DECIDE_MODEL` in `.env` (or update `decide_model` in `build_pipeline()`) and call `POST /control/reload`. Also update the `llm_override` block in `pipeline.yaml` to keep the reference doc in sync.
+`ROF_MODEL` (default `claude-sonnet-4-6`) is used for all other stages.
+To change the decide-stage model you have two options:
+
+- **Without redeploying:** set `ROF_DECIDE_MODEL` in `.env` — this takes
+  precedence over the `llm_override.model` value in `pipeline.yaml`.
+- **Permanently:** update `llm_override.model` in `pipeline.yaml` and call
+  `POST /control/reload`.
 
 ---
 
@@ -535,13 +560,55 @@ DATABASE_URL=postgresql://bot:pass@shared-db/rof_bot
 
 All tools follow the `ToolProvider` interface from `rof_framework`. They are registered at startup via `build_tool_registry()` in `pipeline_factory.py` and selected by the `ConfidentToolRouter` during pipeline execution.
 
+### Registered tool registry
+
+The following tools are active in the bot. The registry is built in `bot_service/pipeline_factory.py` (`build_tool_registry()`).
+
+**Domain tools** (custom implementations in `tools/`):
+
+| Tool | Trigger keywords | Notes |
+|------|-----------------|-------|
+| `DataSourceTool` | `retrieve data`, `fetch subject`, `load subject` | SLOT 1 — implement for your data source |
+| `ContextEnrichmentTool` | `enrich`, `context`, `enrichment` | SLOT 2 — implement for your enrichment API |
+| `ActionExecutorTool` | `execute action`, `perform action` | SLOT 3 — implement for your external action |
+| `ExternalSignalTool` | `signal`, `external signal`, `advisory` | SLOT 4 — implement for your signal source |
+| `AnalysisTool` | `analyse`, `score`, `compute`, `summarise` | Scoring engine — generic, usually no changes |
+| `BotStateManagerTool` | `state`, `update state`, `retrieve state` | Shared with scheduler — generic, no changes |
+
+**Built-in ROF tools** (from `rof_framework.tools`):
+
+| Tool | Trigger keywords | Notes |
+|------|-----------------|-------|
+| `WebSearchTool` | `retrieve web_information`, `search web`, `web search`, `search internet` | Auto-selects DuckDuckGo → SerpAPI → Brave → offline mock. Configure via `WEB_SEARCH_*` env vars |
+| `RAGTool` | `retrieve`, `lookup`, `knowledge base`, `rag` | ChromaDB backend; requires `chromadb` + `sentence-transformers` |
+| `DatabaseTool` | `database`, `sql`, `query`, `db` | Read-only for stages 1–4; read-write instance injected for stage 5 only |
+| `ValidatorTool` | `validate`, `check schema`, `verify format` | Data completeness and RL schema checks |
+| `FileSaveTool` | `save file`, `write file`, `export file` | Writes reports / exports to disk |
+| `FileReaderTool` | `read file`, `pdf`, `csv`, `docx`, `document` | Reads .txt/.md/.csv/.json/.pdf/.docx/.xlsx |
+| `APICallTool` | `api`, `http`, `rest`, `request`, `fetch` | Generic HTTP REST caller via httpx |
+| `CodeRunnerTool` | `run`, `execute code`, `script` | Sandboxed Python/JS/Lua/shell execution |
+
+> **`HumanInLoopTool` is intentionally not registered.** It blocks `sys.stdin` and
+> cannot be used safely in a headless server process. If you need a human approval
+> gate, implement a webhook-based callback tool and register it instead.
+
 ### Tool routing
 
 Tools are selected by matching goal text against each tool's `trigger_keywords` list. After 10+ pipeline runs, `RoutingMemory` learns EMA-weighted confidence scores per goal pattern and biases routing toward the tools with the best historical outcomes.
 
+> **Avoid `mark`/`approve`/`confirm` language in goal expressions.** These words
+> resemble `HumanInLoopTool` trigger keywords. Even though the tool is not
+> registered, routing memory accumulated from earlier runs may still carry stale
+> weights. Use `record … status` or `set … as completed` instead (as the `.rl`
+> files already do). If you ever clear or migrate the database, also run:
+> ```bash
+> sqlite3 rof_bot.db "DELETE FROM routing_memory;"
+> ```
+> to flush any stale patterns before the first new cycle.
+
 ### Dry-run mode
 
-Every tool accepts a `dry_run` constructor argument. When `True`, the tool returns synthetic stub data without making any external call. The dry-run gate in `ActionExecutorTool` is a hard control that cannot be bypassed by LLM logic.
+Every domain tool accepts a `dry_run` constructor argument. When `True`, the tool returns synthetic stub data without making any external call. The dry-run gate in `ActionExecutorTool` is a hard control that cannot be bypassed by LLM logic.
 
 ### Extending the registry
 
@@ -1063,7 +1130,7 @@ The bot ships with multiple overlapping safety controls.
 | Concurrent action limit | 5 | `PUT /config/limits` or `BOT_MAX_CONCURRENT_ACTIONS` |
 | Daily error budget | 0.05 | `PUT /config/limits` or `BOT_DAILY_ERROR_BUDGET` |
 | Confidence floor (< 0.50 → defer) | 0.50 | Edit `04_decide.rl` only (requires code review) |
-| Human-in-the-loop approval | Disabled | Enable in `03_validate.rl` via `HumanInLoopTool` |
+| Human-in-the-loop approval | Not supported — headless service | Implement a webhook-based callback tool if needed |
 
 ### Graduation to production
 

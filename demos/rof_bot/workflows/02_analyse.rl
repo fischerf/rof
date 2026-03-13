@@ -1,73 +1,51 @@
 // 02_analyse.rl
-// Stage 2 — Analysis & Enrichment
+// Stage 2 — News Analysis
 //
-// Purpose: Apply analytical reasoning to collected data. Routes to
-// deterministic tools for computation-heavy steps. The LLM interprets
-// results and derives the Analysis entity.
-//
-// Receives: Subject, Context (from 01_collect.rl via context_filter)
-// Produces: Analysis
+// Purpose: Analyse credibility signals in the search results.
+// Receives: NewsQuery, SearchResults
+// Produces: NewsAnalysis
 //
 // output_mode: rl
 
-define Subject        as "The item being processed this cycle".
-define Context        as "Supporting data retrieved alongside the subject".
-define Analysis       as "Derived analytical result for the current Subject".
-define ExternalSignal as "Advisory signal from a third-party system".
+define NewsQuery     as "The search topic and parameters for this monitoring cycle".
+define SearchResults as "Raw web search results for the configured topic".
+define NewsAnalysis  as "Credibility and significance assessment of retrieved news".
 
-// ── Primary analysis — only run when data collection succeeded ────────────────
+// ── Conditional analysis — only meaningful when results were returned ─────────
 
-if Subject has data_complete of true,
-    then ensure compute primary_score for Analysis using Subject data.
+if SearchResults has result_count > 0,
+    then ensure compute credibility_signals for NewsAnalysis.
 
-if Subject has data_complete of true,
-    then ensure compute secondary_signals for Analysis.
+if SearchResults has result_count > 0,
+    then ensure assess source_diversity for NewsAnalysis.
 
-// ── External signal retrieval — advisory input, not hard dependency ───────────
-// ExternalSignalTool returns signal_available = false on any connectivity
-// failure. Downstream rules branch on availability, never hard-fail here.
+// ── Empty-results fallback ────────────────────────────────────────────────────
+// When the search returned nothing, mark coverage quality explicitly so
+// 03_validate.rl can gate without relying on absent attributes.
 
-ensure retrieve ExternalSignal data for Subject.
+if SearchResults has result_count of 0,
+    then ensure NewsAnalysis has coverage_quality of "none".
 
-// ── Historical pattern matching via RAG ──────────────────────────────────────
-// Retrieves similar past cases from the ChromaDB knowledge base.
-// Low confidence threshold: even a partial match adds value.
+// ── Goals ─────────────────────────────────────────────────────────────────────
 
-ensure retrieve similar_historical_cases matching current Subject from knowledge base.
+// Evaluate credibility signals across all retrieved articles.
+// Considers: source reputation, publication recency, claim density, tone.
+ensure compute credibility_signals for NewsAnalysis.
 
-// ── Classification — uses combined signal from scores + history + external ────
+// Assess how many distinct sources contributed to the result set.
+// A single-source result set is a weak signal regardless of credibility.
+ensure assess source_diversity for NewsAnalysis.
 
-if Subject has data_complete of true,
-    then ensure classify subject_category for Analysis based on primary_score and signals.
+// Score how closely the retrieved articles match NewsQuery topic.
+// High relevance means the search term is unambiguous and well-covered.
+ensure assess topic_relevance for NewsAnalysis given NewsQuery.
 
-// ── Signal quality annotation ─────────────────────────────────────────────────
-
-if ExternalSignal has signal_available of "false",
-    then ensure Analysis has signal_quality of "unavailable".
-
-if ExternalSignal has signal_available of "true",
-    then ensure Analysis has signal_quality of "available".
-
-// ── Confidence summary ────────────────────────────────────────────────────────
-// LLM synthesises all evidence into a single confidence level.
-// Used by 04_decide.rl to choose the decision path.
-
-ensure summarise confidence_level for Analysis as high or medium or low.
-
-// ── Data-incomplete fallback ──────────────────────────────────────────────────
-// When collection failed, mark Analysis explicitly so downstream stages can
-// gate correctly without relying on absent attributes.
-
-if Subject has data_complete of false,
-    then ensure Analysis has confidence_level of "low".
-
-if Subject has data_complete of false,
-    then ensure Analysis has subject_category of "unknown".
+// Synthesise all signals into an overall significance level.
+// The LLM must choose exactly one of: high, medium, or low.
+ensure summarise overall_significance for NewsAnalysis as high, medium, or low.
 
 // ── Declarative routing hints ─────────────────────────────────────────────────
-route goal "compute primary_score"             via AnalysisTool      with min_confidence 0.90.
-route goal "compute secondary_signals"         via AnalysisTool      with min_confidence 0.90.
-route goal "retrieve ExternalSignal"           via ExternalSignalTool with min_confidence 0.75.
-route goal "retrieve similar_historical_cases" via RAGTool           with min_confidence 0.65.
-route goal "classify subject_category"         via any               with min_confidence 0.60.
-route goal "summarise confidence_level"        via any               with min_confidence 0.60.
+route goal "compute credibility_signals"    via any with min_confidence 0.65.
+route goal "assess source_diversity"        via any with min_confidence 0.65.
+route goal "assess topic_relevance"         via any with min_confidence 0.65.
+route goal "summarise overall_significance" via any with min_confidence 0.65.

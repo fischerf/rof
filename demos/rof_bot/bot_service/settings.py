@@ -104,6 +104,26 @@ if _PYDANTIC_AVAILABLE:
             description="Redis TTL for cached external signals (seconds)",
         )
 
+        # ── Web search ───────────────────────────────────────────────────
+        web_search_backend: str = Field(
+            default="auto",
+            description=(
+                "WebSearchTool backend: auto | duckduckgo | serpapi | brave. "
+                "'auto' tries DuckDuckGo first (no key needed), then falls back "
+                "to SerpAPI / Brave if web_search_api_key is set."
+            ),
+        )
+        web_search_api_key: str = Field(
+            default="",
+            description="API key for SerpAPI or Brave Search (leave empty for DuckDuckGo).",
+        )
+        web_search_max_results: int = Field(
+            default=8,
+            ge=1,
+            le=50,
+            description="Maximum number of web search results returned per query.",
+        )
+
         # ── Storage ─────────────────────────────────────────────────────
         database_url: str = Field(
             default="sqlite:///./rof_bot.db",
@@ -285,6 +305,10 @@ else:
                 "EXTERNAL_SIGNAL_BASE_URL", "https://signals.example.com"
             )
             self.signal_cache_ttl_seconds = int(e.get("SIGNAL_CACHE_TTL_SECONDS", "300"))
+
+            self.web_search_backend = e.get("WEB_SEARCH_BACKEND", "auto")
+            self.web_search_api_key = e.get("WEB_SEARCH_API_KEY", "")
+            self.web_search_max_results = int(e.get("WEB_SEARCH_MAX_RESULTS", "8"))
 
             self.database_url = e.get("DATABASE_URL", "sqlite:///./rof_bot.db")
             self.redis_url = e.get("REDIS_URL", "redis://localhost:6379/0")

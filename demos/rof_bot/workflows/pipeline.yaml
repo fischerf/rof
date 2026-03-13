@@ -1,73 +1,82 @@
-# pipeline.yaml  (lives in workflows/ alongside the .rl files)
-# ROF Bot — 5-stage agentic pipeline topology
+# demos/rof_bot/demos/news_monitor/pipeline.yaml
+# ────────────────────────────────────────────────────────────────────────────
+# News Monitor — ROF Pipeline
 #
-# REFERENCE DOCUMENT ONLY — this file is NOT loaded at runtime.
-# The live pipeline is built by bot_service/pipeline_factory.py (build_pipeline()).
-# Edit this file to plan or document topology changes, then apply them in
-# pipeline_factory.py and call POST /control/reload.
+# Searches the web for recent news on a configurable topic,
+# analyses credibility signals, and produces a markdown report.
 #
-# rl_file paths are relative to this file's location (workflows/).
+# Usage:
+#   rof pipeline run demos/rof_bot/demos/news_monitor/pipeline.yaml \
+#     --provider anthropic
+#
+# To target a different topic, edit NewsQuery.topic in 01_search.rl
+# or pass a seed snapshot with the desired topic pre-set.
+# ────────────────────────────────────────────────────────────────────────────
 
-name: rof-bot
-description: "5-stage ROF general-purpose agentic bot pipeline"
+name: news-monitor
+description: "Search, analyse, and report on recent news for a configurable topic"
 
-config:
-  on_failure: continue # never halt the service on a single-cycle failure
-  retry_count: 2
-  retry_delay_s: 2.0
-  inject_prior_context: true # each stage receives prior-stage snapshot as context
-  max_snapshot_entities: 50 # budget: prevents context window overflow
-  snapshot_merge: accumulate # entities accumulate across stages within a run
+# ── LLM provider (all optional — CLI flags and env vars take precedence) ──
+# provider: anthropic       # openai | anthropic | gemini | ollama
+# model:    claude-sonnet-4-6
+# api_key:  ...             # prefer ROF_API_KEY / ANTHROPIC_API_KEY env vars
 
+# ── Pipeline stages ───────────────────────────────────────────────────────
 stages:
-  # ── Stage 1: Data Collection ──────────────────────────────────────────────
-  # Always runs on fresh data — never seeded from a prior cycle snapshot.
-  # Produces: Subject, Context
-  - name: collect
-    rl_file: 01_collect.rl
-    description: "Data collection and normalisation from primary source"
-    inject_context: false # always fresh — never seed from prior cycle
 
-  # ── Stage 2: Analysis & Enrichment ───────────────────────────────────────
-  # Receives Subject and Context from the collect stage.
-  # Produces: Analysis, ExternalSignal
+  # ── Stage 1: Web Search ──────────────────────────────────────────────────
+  # Always fresh — topic comes from NewsQuery seed values in 01_search.rl.
+  # Routes retrieve goal to WebSearchTool.
+  # Produces: NewsQuery, SearchResults
+  - name: search
+    rl_file: 01_search.rl
+    description: "Search the web for recent news on the configured topic"
+    inject_context: false        # always fresh — topic comes from NewsQuery seed values
+
+  # ── Stage 2: News Analysis ───────────────────────────────────────────────
+  # Scores credibility signals, source diversity, and topic relevance.
+  # Produces: NewsAnalysis
   - name: analyse
     rl_file: 02_analyse.rl
-    description: "Analysis, scoring, external signal retrieval, and enrichment"
+    description: "Score credibility signals, source diversity, and topic relevance"
     context_filter:
-      entities: [Subject, Context]
+      entities: [NewsQuery, SearchResults]
 
-  # ── Stage 3: Constraints & Guardrails ────────────────────────────────────
-  # Enforces operational limits before any decision is made.
-  # Hard guardrails block the pipeline; soft guardrails trigger human review.
-  # Produces: Constraints, ResourceBudget
+  # ── Stage 3: Guardrails ──────────────────────────────────────────────────
+  # Enforces operational constraints before the decision stage.
+  # Produces: MonitorConstraints
   - name: validate
     rl_file: 03_validate.rl
-    description: "Constraint evaluation and guardrail enforcement"
+    description: "Validate completeness and enforce operational guardrails"
     context_filter:
-      entities: [Subject, Analysis, BotState]
+      entities: [SearchResults, NewsAnalysis]
 
   # ── Stage 4: Decision ─────────────────────────────────────────────────────
-  # The only stage that uses a powerful (expensive) LLM model.
-  # Receives the fully enriched snapshot; produces a typed Decision entity.
-  # The llm_override below is applied by pipeline_factory.py at build time.
-  # Produces: Decision
+  # LLM-heavy stage. Determines whether to generate a report, skip, or defer.
+  # Uses a more capable model via llm_override.
+  # Produces: ReportDecision
   - name: decide
     rl_file: 04_decide.rl
-    description: "Decision synthesis (powerful LLM — claude-opus-4-6)"
+    description: "Decide whether the news warrants a report, a skip, or a deferral"
     context_filter:
-      entities: [Subject, Analysis, Constraints, ResourceBudget]
+      entities: [NewsAnalysis, MonitorConstraints]
     llm_override:
-      model: claude-opus-4-6 # overrides ROF_MODEL for this stage only
+      model: claude-opus-4-6     # overrides ROF_MODEL for this stage only
 
-  # ── Stage 5: Execution ────────────────────────────────────────────────────
-  # Executes the decision via ActionExecutorTool.
-  # dry_run gate is enforced at the tool layer — never in .rl logic.
-  # on_failure: continue — a failed action never crashes the service.
-  # Produces: Action (written to action_log), updated BotState
-  - name: execute
-    rl_file: 05_execute.rl
-    description: "Action execution and audit trail"
+  # ── Stage 5: Report Generation ────────────────────────────────────────────
+  # Composes and writes a markdown report via FileSaveTool.
+  # No external side-effects — writes news_report.md locally only.
+  # Produces: NewsReport
+  - name: report
+    rl_file: 05_report.rl
+    description: "Compose and write the markdown news report via FileSaveTool"
     context_filter:
-      entities: [Decision, Subject, ResourceBudget, BotState]
-    on_failure: continue # execution failures are logged, never fatal
+      entities: [ReportDecision, NewsAnalysis, SearchResults, NewsQuery]
+    on_failure: continue         # a report-write failure never aborts the run
+
+# ── Pipeline-level configuration ─────────────────────────────────────────
+config:
+  on_failure:             continue  # log and continue on any stage failure
+  retry_count:            1         # one retry before marking a stage failed
+  inject_prior_context:   true      # accumulated snapshot flows into each stage
+  max_snapshot_entities:  40        # lean budget — news results can be verbose
