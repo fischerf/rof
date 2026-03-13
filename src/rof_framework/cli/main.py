@@ -710,7 +710,41 @@ def cmd_run(args: argparse.Namespace) -> int:
         config=config,
     )
 
+    # ── Load seed snapshot ────────────────────────────────────────────────
+    seed_snap_path = getattr(args, "seed_snapshot", None)
+    seed_snapshot: dict | None = None
+    if seed_snap_path:
+        snap_file = Path(seed_snap_path)
+        if not snap_file.exists():
+            _err(f"Seed snapshot not found: {snap_file}")
+            return 2
+        try:
+            seed_snapshot = json.loads(snap_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            _err(f"Failed to load seed snapshot: {exc}")
+            return 2
+        if not as_json:
+            _info(f"Seeding from snapshot: {snap_file.name}")
+
     t0 = time.perf_counter()
+    # Orchestrator.run() accepts a WorkflowAST; pre-seed entity attributes
+    # from the snapshot into the AST's static data so the graph picks them up.
+    # WorkflowAST stores attributes in a flat ast.attributes list (not per-Definition).
+    if seed_snapshot:
+        try:
+            for ent_name, ent_data in seed_snapshot.get("entities", {}).items():
+                for attr_name, attr_val in ent_data.get("attributes", {}).items():
+                    # Update an existing Attribute node if present, otherwise append.
+                    for existing in ast.attributes:
+                        if existing.entity == ent_name and existing.name == attr_name:
+                            existing.value = attr_val
+                            break
+                    else:
+                        ast.attributes.append(
+                            core.Attribute(entity=ent_name, name=attr_name, value=attr_val)
+                        )
+        except Exception as exc:
+            _warn(f"Snapshot seeding partially failed: {exc}")
     result = orch.run(ast)
     elapsed = round(time.perf_counter() - t0, 3)
 
@@ -1080,8 +1114,24 @@ def cmd_pipeline_run(args: argparse.Namespace) -> int:
         print(f"  Provider : {type(provider).__name__}")
         print()
 
+    # ── Load seed snapshot ────────────────────────────────────────────────
+    seed_snap_path = getattr(args, "seed_snapshot", None)
+    seed_snapshot: dict | None = None
+    if seed_snap_path:
+        snap_file = Path(seed_snap_path)
+        if not snap_file.exists():
+            _err(f"Seed snapshot not found: {snap_file}")
+            return 2
+        try:
+            seed_snapshot = json.loads(snap_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            _err(f"Failed to load seed snapshot: {exc}")
+            return 2
+        if not as_json:
+            _info(f"Seeding from snapshot: {snap_file.name}")
+
     t0 = time.perf_counter()
-    result = pipeline.run()
+    result = pipeline.run(seed_snapshot=seed_snapshot)
     elapsed = round(time.perf_counter() - t0, 3)
 
     if as_json:
@@ -1310,16 +1360,32 @@ def cmd_pipeline_debug(args: argparse.Namespace) -> int:
     if as_json:
         bus.subscribe("*", lambda e: debug_log.append({"event": e.name, "payload": e.payload}))
 
+    # ── Load seed snapshot ────────────────────────────────────────────────
+    seed_snap_path = getattr(args, "seed_snapshot", None)
+    seed_snapshot: dict | None = None
+    if seed_snap_path:
+        snap_file = Path(seed_snap_path)
+        if not snap_file.exists():
+            _err(f"Seed snapshot not found: {snap_file}")
+            return 2
+        try:
+            seed_snapshot = json.loads(snap_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            _err(f"Failed to load seed snapshot: {exc}")
+            return 2
+
     if not as_json:
         _banner(f"ROF Pipeline Debug  →  {config_path.name}")
         print(f"  Stages   : {len(stages_cfg)}")
         print(f"  Provider : {type(provider).__name__}")
         if step:
             print(f"  Mode     : {yellow('step-through')}  (press Enter after each step)")
+        if seed_snapshot is not None:
+            print(f"  Seed     : {cyan(str(seed_snap_path))}")
         print()
 
     t0 = time.perf_counter()
-    result = pipeline.run()
+    result = pipeline.run(seed_snapshot=seed_snapshot)
     elapsed = round(time.perf_counter() - t0, 3)
 
     if as_json:
@@ -1402,6 +1468,19 @@ def build_parser() -> argparse.ArgumentParser:
               rof pipeline debug pipeline.yaml
               rof pipeline debug pipeline.yaml --step
               rof version
+
+            Snapshot seeding (replay / resume a prior run):
+              # Save the snapshot of any run to a file:
+              rof run customer.rl --output-snapshot snap.json --provider anthropic
+
+              # Re-run the same .rl file starting from a saved snapshot:
+              rof run customer.rl --seed-snapshot snap.json --provider anthropic
+
+              # Re-run a pipeline starting from a saved snapshot:
+              rof pipeline run pipeline.yaml --seed-snapshot snap.json --provider anthropic
+
+              # Debug-step through a pipeline replay:
+              rof pipeline debug pipeline.yaml --seed-snapshot snap.json --provider anthropic --step
 
             Environment variables:
               ROF_PROVIDER   openai | anthropic | gemini | ollama
@@ -1486,6 +1565,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Enable DEBUG logging (show parser, orchestrator, and LLM events)",
     )
     p_pip_run.add_argument("--json", action="store_true")
+    p_pip_run.add_argument(
+        "--seed-snapshot",
+        metavar="FILE.json",
+        dest="seed_snapshot",
+        help="Load initial snapshot from a JSON file (replay / resume a prior run)",
+    )
     _provider_args(p_pip_run)
 
     p_pip_dbg = pip_sub.add_parser("debug", help="Debug a pipeline with full prompt/response trace")
@@ -1498,6 +1583,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pause and wait for Enter after each LLM step",
     )
     p_pip_dbg.add_argument("--json", action="store_true", help="Output full trace as JSON")
+    p_pip_dbg.add_argument(
+        "--seed-snapshot",
+        metavar="FILE.json",
+        dest="seed_snapshot",
+        help="Load initial snapshot from a JSON file (replay / resume a prior run)",
+    )
     _provider_args(p_pip_dbg)
 
     # ── version ───────────────────────────────────────────────────────────

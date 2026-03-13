@@ -1731,3 +1731,678 @@ class TestExtendedLiveIntegration:
 
         code, out = run_cli(*args)
         assert code == 0
+
+
+# ─── Seed snapshot tests ─────────────────────────────────────────────────────
+
+
+class TestSeedSnapshot:
+    """
+    Tests for --seed-snapshot (rof run) and --seed-snapshot (rof pipeline run/debug).
+
+    All tests in this class are hermetic: no live LLM calls are made.
+    The mock provider returns a deterministic response so the orchestrator
+    can mark every goal ACHIEVED without touching an API.
+    """
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _make_mock_provider():
+        """Return a mock LLMProvider that always replies 'completed'."""
+        from rof_framework.rof_core import LLMProvider, LLMResponse
+
+        mock = Mock(spec=LLMProvider)
+        mock.complete.return_value = LLMResponse(
+            content="Task completed successfully.", raw={}, tool_calls=[]
+        )
+        mock.supports_tool_calling.return_value = False
+        mock.context_limit = 8192
+        return mock
+
+    @staticmethod
+    def _write_snapshot(path: Path, entities: dict | None = None) -> None:
+        """Write a minimal valid snapshot JSON to *path*."""
+        snapshot = {
+            "run_id": "test-seed-001",
+            "entities": entities
+            or {
+                "Customer": {
+                    "attributes": {
+                        "total_purchases": 99999,
+                        "account_age_days": 9999,
+                        "support_tickets": 0,
+                    },
+                    "predicates": [],
+                }
+            },
+        }
+        path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _pipeline_config(tmp_path: Path, stages: list[dict]) -> Path:
+        """Write a minimal pipeline.yaml into *tmp_path* and return its path."""
+        import yaml  # type: ignore
+
+        cfg = {
+            "stages": stages,
+            "config": {
+                "on_failure": "halt",
+                "retry_count": 1,
+                "inject_prior_context": True,
+            },
+        }
+        p = tmp_path / "pipeline.yaml"
+        p.write_text(yaml.dump(cfg), encoding="utf-8")
+        return p
+
+    # ── parser / argument tests ───────────────────────────────────────────────
+
+    class TestArgParserSeedSnapshot:
+        """Verify --seed-snapshot is accepted by the argument parser."""
+
+        def test_run_seed_snapshot_flag_parsed(self):
+            p = build_parser()
+            args = p.parse_args(["run", "foo.rl", "--seed-snapshot", "snap.json"])
+            assert args.seed_snapshot == "snap.json"
+
+        def test_run_seed_snapshot_default_is_none(self):
+            p = build_parser()
+            args = p.parse_args(["run", "foo.rl"])
+            assert args.seed_snapshot is None
+
+        def test_run_output_snapshot_flag_parsed(self):
+            p = build_parser()
+            args = p.parse_args(["run", "foo.rl", "--output-snapshot", "out.json"])
+            assert args.output_snapshot == "out.json"
+
+        def test_run_output_snapshot_default_is_none(self):
+            p = build_parser()
+            args = p.parse_args(["run", "foo.rl"])
+            assert args.output_snapshot is None
+
+        def test_pipeline_run_seed_snapshot_flag_parsed(self):
+            p = build_parser()
+            args = p.parse_args(
+                ["pipeline", "run", "pipeline.yaml", "--seed-snapshot", "snap.json"]
+            )
+            assert args.seed_snapshot == "snap.json"
+
+        def test_pipeline_run_seed_snapshot_default_is_none(self):
+            p = build_parser()
+            args = p.parse_args(["pipeline", "run", "pipeline.yaml"])
+            assert args.seed_snapshot is None
+
+        def test_pipeline_debug_seed_snapshot_flag_parsed(self):
+            p = build_parser()
+            args = p.parse_args(
+                ["pipeline", "debug", "pipeline.yaml", "--seed-snapshot", "snap.json"]
+            )
+            assert args.seed_snapshot == "snap.json"
+
+        def test_pipeline_debug_seed_snapshot_default_is_none(self):
+            p = build_parser()
+            args = p.parse_args(["pipeline", "debug", "pipeline.yaml"])
+            assert args.seed_snapshot is None
+
+        def test_run_accepts_both_seed_and_output_together(self):
+            p = build_parser()
+            args = p.parse_args(
+                [
+                    "run",
+                    "foo.rl",
+                    "--seed-snapshot",
+                    "in.json",
+                    "--output-snapshot",
+                    "out.json",
+                ]
+            )
+            assert args.seed_snapshot == "in.json"
+            assert args.output_snapshot == "out.json"
+
+    # ── missing / bad file error handling ────────────────────────────────────
+
+    def test_run_seed_snapshot_missing_file_exits_two(self):
+        """Passing a non-existent seed snapshot to rof run must exit 2."""
+        code, _ = run_cli(
+            "run",
+            str(EXAMPLES / "customer_segmentation.rl"),
+            "--seed-snapshot",
+            "/nonexistent/snap.json",
+            "--provider",
+            "openai",
+            "--api-key",
+            "sk-test",
+        )
+        assert code == 2
+
+    def test_run_seed_snapshot_invalid_json_exits_two(self, tmp_path):
+        """A seed snapshot file containing invalid JSON must exit 2."""
+        bad_snap = tmp_path / "bad.json"
+        bad_snap.write_text("{ this is not json }", encoding="utf-8")
+
+        code, _ = run_cli(
+            "run",
+            str(EXAMPLES / "customer_segmentation.rl"),
+            "--seed-snapshot",
+            str(bad_snap),
+            "--provider",
+            "openai",
+            "--api-key",
+            "sk-test",
+        )
+        assert code == 2
+
+    def test_pipeline_run_seed_snapshot_missing_file_exits_two(self, tmp_path):
+        """Passing a non-existent seed snapshot to rof pipeline run must exit 2."""
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            pytest.skip("pyyaml not installed")
+
+        pipeline_config = EXAMPLES / "pipeline_load_approval" / "pipeline.yaml"
+        if not pipeline_config.exists():
+            pytest.skip("pipeline fixture not present")
+
+        code, _ = run_cli(
+            "pipeline",
+            "run",
+            str(pipeline_config),
+            "--seed-snapshot",
+            "/nonexistent/snap.json",
+            "--provider",
+            "openai",
+            "--api-key",
+            "sk-test",
+        )
+        assert code == 2
+
+    def test_pipeline_debug_seed_snapshot_missing_file_exits_two(self, tmp_path):
+        """Passing a non-existent seed snapshot to rof pipeline debug must exit 2."""
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            pytest.skip("pyyaml not installed")
+
+        pipeline_config = EXAMPLES / "pipeline_load_approval" / "pipeline.yaml"
+        if not pipeline_config.exists():
+            pytest.skip("pipeline fixture not present")
+
+        code, _ = run_cli(
+            "pipeline",
+            "debug",
+            str(pipeline_config),
+            "--seed-snapshot",
+            "/nonexistent/snap.json",
+            "--provider",
+            "openai",
+            "--api-key",
+            "sk-test",
+        )
+        assert code == 2
+
+    def test_pipeline_run_seed_snapshot_invalid_json_exits_two(self, tmp_path):
+        """A corrupted seed snapshot file must cause rof pipeline run to exit 2."""
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            pytest.skip("pyyaml not installed")
+
+        pipeline_config = EXAMPLES / "pipeline_load_approval" / "pipeline.yaml"
+        if not pipeline_config.exists():
+            pytest.skip("pipeline fixture not present")
+
+        bad_snap = tmp_path / "bad.json"
+        bad_snap.write_text("not-json", encoding="utf-8")
+
+        code, _ = run_cli(
+            "pipeline",
+            "run",
+            str(pipeline_config),
+            "--seed-snapshot",
+            str(bad_snap),
+            "--provider",
+            "openai",
+            "--api-key",
+            "sk-test",
+        )
+        assert code == 2
+
+    # ── functional: rof run --seed-snapshot ──────────────────────────────────
+
+    @patch("rof_framework.cli.main._make_provider")
+    def test_run_with_seed_snapshot_succeeds(self, mock_make_provider, tmp_path):
+        """
+        rof run with a valid seed snapshot must complete without error.
+        The snapshot attributes should be visible inside the workflow.
+        """
+        mock_make_provider.return_value = self._make_mock_provider()
+
+        snap = tmp_path / "seed.json"
+        self._write_snapshot(snap)
+
+        code, out = run_cli(
+            "run",
+            str(EXAMPLES / "customer_segmentation.rl"),
+            "--seed-snapshot",
+            str(snap),
+            "--provider",
+            "openai",
+            "--api-key",
+            "sk-test",
+        )
+        assert code == 0
+
+    @patch("rof_framework.cli.main._make_provider")
+    def test_run_with_seed_snapshot_json_output(self, mock_make_provider, tmp_path):
+        """
+        rof run --seed-snapshot --json must emit valid JSON that includes
+        a snapshot key.
+        """
+        mock_make_provider.return_value = self._make_mock_provider()
+
+        snap = tmp_path / "seed.json"
+        self._write_snapshot(snap)
+
+        code, out = run_cli(
+            "run",
+            str(EXAMPLES / "customer_segmentation.rl"),
+            "--seed-snapshot",
+            str(snap),
+            "--provider",
+            "openai",
+            "--api-key",
+            "sk-test",
+            "--json",
+        )
+        assert code == 0
+        data = json.loads(out)
+        assert "snapshot" in data
+        assert "success" in data
+
+    @patch("rof_framework.cli.main._make_provider")
+    def test_run_seed_attributes_override_rl_defaults(self, mock_make_provider, tmp_path):
+        """
+        Attributes supplied in the seed snapshot must overwrite values
+        declared in the .rl file.  We verify by inspecting the snapshot
+        that the orchestrator produces: the seeded value (99999) must
+        appear, not the original (15000).
+        """
+        mock_make_provider.return_value = self._make_mock_provider()
+
+        snap = tmp_path / "seed.json"
+        self._write_snapshot(
+            snap,
+            entities={
+                "Customer": {
+                    "attributes": {"total_purchases": 99999},
+                    "predicates": [],
+                }
+            },
+        )
+
+        code, out = run_cli(
+            "run",
+            str(EXAMPLES / "customer_segmentation.rl"),
+            "--seed-snapshot",
+            str(snap),
+            "--provider",
+            "openai",
+            "--api-key",
+            "sk-test",
+            "--json",
+        )
+        assert code == 0
+        data = json.loads(out)
+        customer = data.get("snapshot", {}).get("entities", {}).get("Customer", {})
+        attrs = customer.get("attributes", {})
+        assert attrs.get("total_purchases") == 99999, (
+            f"Expected seeded value 99999 but got {attrs.get('total_purchases')!r}"
+        )
+
+    @patch("rof_framework.cli.main._make_provider")
+    def test_run_seed_snapshot_empty_entities_is_safe(self, mock_make_provider, tmp_path):
+        """
+        A seed snapshot whose 'entities' dict is empty must not crash the run.
+        """
+        mock_make_provider.return_value = self._make_mock_provider()
+
+        snap = tmp_path / "empty_entities.json"
+        snap.write_text(json.dumps({"run_id": "x", "entities": {}}), encoding="utf-8")
+
+        code, _ = run_cli(
+            "run",
+            str(EXAMPLES / "customer_segmentation.rl"),
+            "--seed-snapshot",
+            str(snap),
+            "--provider",
+            "openai",
+            "--api-key",
+            "sk-test",
+        )
+        assert code == 0
+
+    @patch("rof_framework.cli.main._make_provider")
+    def test_run_seed_snapshot_unknown_entity_is_safe(self, mock_make_provider, tmp_path):
+        """
+        A seed snapshot that references an entity not defined in the .rl file
+        must not crash — unknown entities are simply appended as new attributes.
+        """
+        mock_make_provider.return_value = self._make_mock_provider()
+
+        snap = tmp_path / "unknown_entity.json"
+        self._write_snapshot(
+            snap,
+            entities={
+                "Nonexistent": {
+                    "attributes": {"foo": "bar"},
+                    "predicates": [],
+                }
+            },
+        )
+
+        code, _ = run_cli(
+            "run",
+            str(EXAMPLES / "customer_segmentation.rl"),
+            "--seed-snapshot",
+            str(snap),
+            "--provider",
+            "openai",
+            "--api-key",
+            "sk-test",
+        )
+        assert code == 0
+
+    # ── functional: output-snapshot → seed-snapshot round-trip ──────────────
+
+    @patch("rof_framework.cli.main._make_provider")
+    def test_output_snapshot_then_seed_roundtrip(self, mock_make_provider, tmp_path):
+        """
+        End-to-end round-trip:
+          1. Run a workflow and save its snapshot via --output-snapshot.
+          2. Re-run the same workflow using that snapshot as --seed-snapshot.
+        Both runs must succeed and the second run must produce a valid snapshot.
+        """
+        mock_make_provider.return_value = self._make_mock_provider()
+
+        out_snap = tmp_path / "first_run.json"
+
+        # ── first run: save snapshot ──────────────────────────────────────
+        code1, _ = run_cli(
+            "run",
+            str(EXAMPLES / "customer_segmentation.rl"),
+            "--output-snapshot",
+            str(out_snap),
+            "--provider",
+            "openai",
+            "--api-key",
+            "sk-test",
+        )
+        assert code1 == 0
+        assert out_snap.exists(), "--output-snapshot did not create the file"
+
+        saved = json.loads(out_snap.read_text(encoding="utf-8"))
+        assert "entities" in saved, "Saved snapshot has no 'entities' key"
+
+        # ── second run: seed from saved snapshot ──────────────────────────
+        mock_make_provider.return_value = self._make_mock_provider()
+
+        code2, out2 = run_cli(
+            "run",
+            str(EXAMPLES / "customer_segmentation.rl"),
+            "--seed-snapshot",
+            str(out_snap),
+            "--provider",
+            "openai",
+            "--api-key",
+            "sk-test",
+            "--json",
+        )
+        assert code2 == 0
+        data2 = json.loads(out2)
+        assert "snapshot" in data2
+
+    # ── functional: rof pipeline run --seed-snapshot ─────────────────────────
+
+    @patch("rof_framework.cli.main._make_provider")
+    def test_pipeline_run_with_seed_snapshot_succeeds(self, mock_make_provider, tmp_path):
+        """
+        rof pipeline run with a valid seed snapshot must complete without error.
+        """
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            pytest.skip("pyyaml not installed")
+
+        pipeline_config = EXAMPLES / "pipeline_load_approval" / "pipeline.yaml"
+        if not pipeline_config.exists():
+            pytest.skip("pipeline fixture not present")
+
+        mock_make_provider.return_value = self._make_mock_provider()
+
+        snap = tmp_path / "seed.json"
+        self._write_snapshot(
+            snap,
+            entities={
+                "Applicant": {
+                    "attributes": {"annual_income": 120000, "employment_years": 10},
+                    "predicates": [],
+                },
+                "LoanRequest": {
+                    "attributes": {"amount": 5000, "term_months": 12},
+                    "predicates": [],
+                },
+            },
+        )
+
+        code, _ = run_cli(
+            "pipeline",
+            "run",
+            str(pipeline_config),
+            "--seed-snapshot",
+            str(snap),
+            "--provider",
+            "openai",
+            "--api-key",
+            "sk-test",
+        )
+        assert code in (0, 1)  # may fail on content but must not crash
+
+    @patch("rof_framework.cli.main._make_provider")
+    def test_pipeline_run_seed_snapshot_json_output(self, mock_make_provider, tmp_path):
+        """
+        rof pipeline run --seed-snapshot --json must emit valid JSON.
+        """
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            pytest.skip("pyyaml not installed")
+
+        pipeline_config = EXAMPLES / "pipeline_load_approval" / "pipeline.yaml"
+        if not pipeline_config.exists():
+            pytest.skip("pipeline fixture not present")
+
+        mock_make_provider.return_value = self._make_mock_provider()
+
+        snap = tmp_path / "seed.json"
+        self._write_snapshot(snap)
+
+        code, out = run_cli(
+            "pipeline",
+            "run",
+            str(pipeline_config),
+            "--seed-snapshot",
+            str(snap),
+            "--provider",
+            "openai",
+            "--api-key",
+            "sk-test",
+            "--json",
+        )
+        assert code in (0, 1)
+        if out.strip():
+            data = json.loads(out)
+            assert isinstance(data, dict)
+            assert "success" in data
+
+    # ── functional: rof pipeline debug --seed-snapshot ───────────────────────
+
+    @patch("rof_framework.cli.main._make_provider")
+    def test_pipeline_debug_with_seed_snapshot_succeeds(self, mock_make_provider, tmp_path):
+        """
+        rof pipeline debug with a valid seed snapshot must complete without error.
+        """
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            pytest.skip("pyyaml not installed")
+
+        pipeline_config = EXAMPLES / "pipeline_load_approval" / "pipeline.yaml"
+        if not pipeline_config.exists():
+            pytest.skip("pipeline fixture not present")
+
+        mock_make_provider.return_value = self._make_mock_provider()
+
+        snap = tmp_path / "seed.json"
+        self._write_snapshot(snap)
+
+        code, _ = run_cli(
+            "pipeline",
+            "debug",
+            str(pipeline_config),
+            "--seed-snapshot",
+            str(snap),
+            "--provider",
+            "openai",
+            "--api-key",
+            "sk-test",
+        )
+        assert code in (0, 1)
+
+    @patch("rof_framework.cli.main._make_provider")
+    def test_pipeline_debug_seed_snapshot_shown_in_header(self, mock_make_provider, tmp_path):
+        """
+        rof pipeline debug must print the seed snapshot path in its header
+        when --seed-snapshot is supplied (non-JSON mode).
+        """
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            pytest.skip("pyyaml not installed")
+
+        pipeline_config = EXAMPLES / "pipeline_load_approval" / "pipeline.yaml"
+        if not pipeline_config.exists():
+            pytest.skip("pipeline fixture not present")
+
+        mock_make_provider.return_value = self._make_mock_provider()
+
+        snap = tmp_path / "my_seed.json"
+        self._write_snapshot(snap)
+
+        code, out = run_cli(
+            "pipeline",
+            "debug",
+            str(pipeline_config),
+            "--seed-snapshot",
+            str(snap),
+            "--provider",
+            "openai",
+            "--api-key",
+            "sk-test",
+        )
+        assert code in (0, 1)
+        assert "my_seed.json" in out, (
+            "Expected the seed snapshot filename to appear in debug header output"
+        )
+
+    @patch("rof_framework.cli.main._make_provider")
+    def test_pipeline_debug_seed_snapshot_json_output(self, mock_make_provider, tmp_path):
+        """
+        rof pipeline debug --seed-snapshot --json must emit valid JSON that
+        contains a final_snapshot key.
+        """
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            pytest.skip("pyyaml not installed")
+
+        pipeline_config = EXAMPLES / "pipeline_load_approval" / "pipeline.yaml"
+        if not pipeline_config.exists():
+            pytest.skip("pipeline fixture not present")
+
+        mock_make_provider.return_value = self._make_mock_provider()
+
+        snap = tmp_path / "seed.json"
+        self._write_snapshot(snap)
+
+        code, out = run_cli(
+            "pipeline",
+            "debug",
+            str(pipeline_config),
+            "--seed-snapshot",
+            str(snap),
+            "--provider",
+            "openai",
+            "--api-key",
+            "sk-test",
+            "--json",
+        )
+        assert code in (0, 1)
+        if out.strip():
+            data = json.loads(out)
+            assert isinstance(data, dict)
+            # Both pipeline run and debug JSON outputs carry these keys
+            assert "success" in data
+
+    # ── snapshot file content validation ─────────────────────────────────────
+
+    def test_output_snapshot_is_valid_json(self, tmp_path):
+        """
+        --output-snapshot must produce a file that is valid JSON with an
+        'entities' key at the top level.
+        """
+        from unittest.mock import patch as _patch
+
+        mock_prov = self._make_mock_provider()
+        with _patch("rof_framework.cli.main._make_provider", return_value=mock_prov):
+            out_snap = tmp_path / "output.json"
+            code, _ = run_cli(
+                "run",
+                str(EXAMPLES / "customer_segmentation.rl"),
+                "--output-snapshot",
+                str(out_snap),
+                "--provider",
+                "openai",
+                "--api-key",
+                "sk-test",
+            )
+
+        assert code == 0
+        assert out_snap.exists()
+        content = json.loads(out_snap.read_text(encoding="utf-8"))
+        assert isinstance(content, dict)
+        assert "entities" in content, f"Snapshot missing 'entities' key: {list(content.keys())}"
+
+    def test_seed_snapshot_minimal_no_entities_key(self, tmp_path):
+        """
+        A seed file with no 'entities' key at all (e.g. just {}) must not
+        crash rof run — it is treated as an empty seed.
+        """
+        from unittest.mock import patch as _patch
+
+        mock_prov = self._make_mock_provider()
+        with _patch("rof_framework.cli.main._make_provider", return_value=mock_prov):
+            snap = tmp_path / "minimal.json"
+            snap.write_text(json.dumps({}), encoding="utf-8")
+
+            code, _ = run_cli(
+                "run",
+                str(EXAMPLES / "customer_segmentation.rl"),
+                "--seed-snapshot",
+                str(snap),
+                "--provider",
+                "openai",
+                "--api-key",
+                "sk-test",
+            )
+        assert code == 0

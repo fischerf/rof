@@ -541,31 +541,53 @@ curl -s "http://localhost:8080/runs/${RUN_ID}" | \
 
 ### Replaying a run
 
-Any run saved in the database can be replayed step-by-step using the ROF CLI debug mode. This is the primary tool for post-incident analysis.
+Any run saved in the database can be replayed step-by-step using the ROF CLI. This is the primary tool for post-incident analysis.
+
+> **Note:** The ROF Bot assembles its pipeline entirely in code via `pipeline_factory.py` — there is no standalone `pipeline.yaml` that the CLI reads directly. Replay therefore works at the individual stage (`.rl` file) level via `rof run`, or across the full five stages via `rof pipeline run` / `rof pipeline debug` pointing at a purpose-built `pipeline.yaml` if you create one.  For quick post-incident debugging, replaying a single suspicious stage is usually sufficient.
 
 ```bash
-# Export the snapshot from the database
+# ── Step 1: export the snapshot ───────────────────────────────────────────
+
+# From the database
+RUN_ID="abc12345-..."
 sqlite3 rof_bot.db \
   "SELECT snapshot_json FROM pipeline_runs WHERE run_id='${RUN_ID}';" \
   > /tmp/run_${RUN_ID}.json
 
-# Or via the API
+# Or via the REST API
 curl -s "http://localhost:8080/runs/${RUN_ID}" | jq '.final_snapshot' \
   > /tmp/run_${RUN_ID}.json
 
-# Replay with step-through debugging (requires rof CLI)
-rof pipeline debug pipeline.yaml \
-  --seed /tmp/run_${RUN_ID}.json \
+# ── Step 2a: replay a single stage (most common for post-incident work) ───
+
+# Step through the decide stage with the saved snapshot as initial state:
+rof run demos/rof_bot/workflows/04_decide.rl \
+  --seed-snapshot /tmp/run_${RUN_ID}.json \
+  --provider anthropic \
+  --verbose
+
+# Step through any stage interactively (prompt/response visible):
+rof debug demos/rof_bot/workflows/03_validate.rl \
+  --seed-snapshot /tmp/run_${RUN_ID}.json \
   --provider anthropic \
   --step
 
-# Replay non-interactively (all stages at once)
+# ── Step 2b: replay the full pipeline (requires a pipeline.yaml) ─────────
+
+# If you have a pipeline.yaml that mirrors the bot's stage topology,
+# you can replay all five stages in sequence:
 rof pipeline debug pipeline.yaml \
-  --seed /tmp/run_${RUN_ID}.json \
+  --seed-snapshot /tmp/run_${RUN_ID}.json \
+  --provider anthropic \
+  --step
+
+# Non-interactive full-pipeline replay:
+rof pipeline run pipeline.yaml \
+  --seed-snapshot /tmp/run_${RUN_ID}.json \
   --provider anthropic
 ```
 
-The `--step` flag pauses after each stage and shows the snapshot diff, making it easy to pinpoint exactly where reasoning diverged from expectations.
+The `--seed-snapshot` flag pre-loads all entities and their attributes from the saved snapshot into the workflow graph before execution begins.  The `--step` flag pauses after each LLM step so you can inspect the prompt and response at the exact point where reasoning diverged.
 
 ---
 

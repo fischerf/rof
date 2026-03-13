@@ -965,7 +965,18 @@ pytest demos/rof_bot/tests/ -m "not slow" \
 - **Fully hermetic** — no network calls, no real LLM, no remote databases
 - `StubLLMProvider` returns deterministic fixture responses loaded from `tests/fixtures/stubs/`
 - Snapshot fixtures in `tests/fixtures/snapshots/` seed the pipeline with pre-built entity states
-- All snapshot fixtures are replayable via the CLI: `rof pipeline debug pipeline.yaml --seed tests/fixtures/snapshots/<name>.json --step`
+- All snapshot fixtures are replayable via the CLI — replay a single stage with `rof run` or `rof debug`, or the full pipeline with `rof pipeline run` / `rof pipeline debug`:
+  ```bash
+  # Replay the decide stage from a fixture snapshot (interactive):
+  rof debug demos/rof_bot/workflows/04_decide.rl \
+    --seed-snapshot tests/fixtures/snapshots/high_confidence_subject.json \
+    --provider anthropic --step
+
+  # Replay the full pipeline from a fixture snapshot (requires a pipeline.yaml):
+  rof pipeline debug pipeline.yaml \
+    --seed-snapshot tests/fixtures/snapshots/high_confidence_subject.json \
+    --provider anthropic --step
+  ```
 
 ---
 
@@ -1182,7 +1193,7 @@ Or configure the reverse proxy idle timeout to a higher value (e.g. `proxy_read_
    WHERE created_at < datetime('now', '-30 days');
    ```
 3. **Switch to PostgreSQL** — PostgreSQL JSONB storage is more space-efficient than SQLite TEXT for large JSON documents.
-4. **Disable snapshot persistence** — set `final_snapshot = NULL` in `db.py::save_pipeline_run` for runs where snapshot replay is not needed. (Snapshot replay via `--seed` will not work for those runs.)
+4. **Disable snapshot persistence** — set `final_snapshot = NULL` in `db.py::save_pipeline_run` for runs where snapshot replay is not needed. (Snapshot replay via `--seed-snapshot` will not work for those runs.)
 
 ---
 
