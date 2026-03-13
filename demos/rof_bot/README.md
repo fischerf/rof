@@ -17,11 +17,12 @@ The bot is domain-neutral by design. Adapting it to a new use case requires fill
 - [Configuration](#configuration)
 - [Domain Adaptation](#domain-adaptation)
 - [The Five-Stage Pipeline](#the-five-stage-pipeline)
-- [pipeline.yaml Reference](#pipelineyaml-reference)
+- [pipeline.yaml Reference](#pipelineyaml-reference) _(reference only — not loaded at runtime)_
 - [Workflow Variants](#workflow-variants)
 - [Multi-Target Fan-Out](#multi-target-fan-out)
 - [Custom Tools](#custom-tools)
 - [Routing Memory](#routing-memory)
+- [GET /status/routing](#get-statusrouting)
 - [Database Schema](#database-schema)
 - [Knowledge Base Ingestion](#knowledge-base-ingestion)
 - [Control API](#control-api)
@@ -76,7 +77,6 @@ The bot is domain-neutral by design. Adapting it to a new use case requires fill
 ```
 demos/rof_bot/
 ├── domain.yaml                   ← Domain configuration (fill in four slots)
-├── pipeline.yaml                 ← Stage topology and pipeline settings
 ├── pytest.ini                    ← Test runner configuration
 │
 ├── workflows/                    ← RelateLang workflow files (domain logic)
@@ -85,6 +85,7 @@ demos/rof_bot/
 │   ├── 03_validate.rl            ← Stage 3: constraint evaluation & guardrails
 │   ├── 04_decide.rl              ← Stage 4: decision synthesis (powerful LLM)
 │   ├── 05_execute.rl             ← Stage 5: action execution & audit trail
+│   ├── pipeline.yaml             ← Reference topology doc (not loaded at runtime)
 │   └── variants/                 ← A/B test variants (conservative, aggressive)
 │
 ├── tools/                        ← Custom Python tool implementations
@@ -107,7 +108,7 @@ demos/rof_bot/
 │   ├── websocket.py              ← WebSocket broadcaster
 │   └── routers/
 │       ├── control.py            ← POST /control/* endpoints
-│       └── status.py             ← GET /status/*, GET /config, PUT /config/limits
+│       └── status.py             ← GET /status, GET /status/routing, GET /config, PUT /config/limits
 │
 ├── knowledge/                    ← RAGTool corpus (domain reference documents)
 │   ├── README.md                 ← Corpus structure and ingest instructions
@@ -372,7 +373,13 @@ Each stage receives only the entities it needs, keeping the LLM context window l
 
 ## `pipeline.yaml` Reference
 
-`pipeline.yaml` is the authoritative source of the stage topology. It is read once at startup (and again on `POST /control/reload`) by `pipeline_factory.py`. Environment variables and `domain.yaml` never override values in this file — only edits to the file itself change stage behaviour.
+> **Note — reference document only.**  `pipeline.yaml` is **not loaded at runtime**.
+> The stage topology, context filters, LLM overrides, and pipeline config are
+> hardcoded in `bot_service/pipeline_factory.py` (`build_pipeline()`).
+> `pipeline.yaml` lives in `workflows/` as a human-readable companion to the `.rl`
+> files — use it to understand or plan changes, then apply them in `pipeline_factory.py`.
+> A `POST /control/reload` rebuilds the pipeline from the Python factory, **not** from
+> this file.
 
 ```
 pipeline.yaml
@@ -399,7 +406,7 @@ pipeline.yaml
 
 ### Stage entity visibility
 
-Each stage in `pipeline.yaml` declares exactly which prior entities flow into its context window via `context_filter`. This is the mechanism that keeps the LLM context lean while allowing full snapshot accumulation:
+Each stage in `pipeline_factory.py` passes a `context_filter` lambda that restricts which prior entities flow into its context window. `pipeline.yaml` documents the same filters for reference. This is the mechanism that keeps the LLM context lean while allowing full snapshot accumulation:
 
 | Stage | `inject_context` | `context_filter.entities` |
 |-------|-----------------|--------------------------|
@@ -409,7 +416,7 @@ Each stage in `pipeline.yaml` declares exactly which prior entities flow into it
 | decide | `true` | `Subject`, `Analysis`, `Constraints`, `ResourceBudget` |
 | execute | `true` | `Decision`, `Subject`, `ResourceBudget`, `BotState` |
 
-**Changing context filters** requires only editing `pipeline.yaml` and calling `POST /control/reload`. No Python changes are needed.
+**Changing context filters** requires editing the `context_filter` lambda in `build_pipeline()` inside `bot_service/pipeline_factory.py`, then calling `POST /control/reload`. Also update `pipeline.yaml` to keep the reference doc in sync.
 
 ### Per-stage model override
 
@@ -422,7 +429,7 @@ stages:
       model: claude-opus-4-6
 ```
 
-`ROF_MODEL` (default `claude-sonnet-4-6`) is used for all other stages. To change the decide-stage model without redeploying, update this field and call `POST /control/reload`.
+`ROF_MODEL` (default `claude-sonnet-4-6`) is used for all other stages. To change the decide-stage model, set `ROF_DECIDE_MODEL` in `.env` (or update `decide_model` in `build_pipeline()`) and call `POST /control/reload`. Also update the `llm_override` block in `pipeline.yaml` to keep the reference doc in sync.
 
 ---
 
@@ -600,15 +607,68 @@ ROUTING_MEMORY_CHECKPOINT_MINUTES=2
 ### Inspecting routing memory
 
 ```bash
-# Number of entries in routing memory
-curl http://localhost:8080/status | jq '.routing_memory_entries'
+# Live routing trace summary from the last pipeline run — grouped by stage
+curl http://localhost:8080/status/routing | jq .
+
+# Number of accumulated routing memory entries
+curl http://localhost:8080/status/routing | jq '.routing_memory_entries'
+
+# Full per-stage trace list
+curl http://localhost:8080/status/routing | jq '.stages'
 
 # Raw routing memory data (SQLite)
 sqlite3 rof_bot.db "SELECT key, length(data), updated_at FROM routing_memory;"
 
-# Prometheus gauge
+# Prometheus gauges
 curl http://localhost:8080/metrics | grep bot_routing_memory_entries
 curl http://localhost:8080/metrics | grep bot_routing_ema_confidence
+```
+
+### GET /status/routing
+
+`GET /status/routing` returns a structured view of every routing decision made during the most recent pipeline run. It reads `RoutingTrace_<stage>_<hash>` entities written by `ConfidentPipeline` into the last snapshot.
+
+**Response shape:**
+
+```json
+{
+  "run_id": "829be3b2",
+  "total_traces": 11,
+  "routing_memory_entries": 42,
+  "stages": {
+    "analyse":  [ { "trace_id": "RoutingTrace_analyse_9de63d",  "goal_expr": "...", "tool_selected": "ExternalSignalTool", "composite": 1.0,    "satisfaction": 0.3, "is_uncertain": "False", ... } ],
+    "validate": [ { "trace_id": "RoutingTrace_validate_3418c1", "goal_expr": "...", "tool_selected": "StateManagerTool",   "composite": 1.0,    "satisfaction": 1.0, "is_uncertain": "False", ... } ],
+    "decide":   [ { "trace_id": "RoutingTrace_decide_21d990",   "goal_expr": "...", "tool_selected": "AnalysisTool",       "composite": 0.2489, "satisfaction": 0.7, "is_uncertain": "True",  ... } ],
+    "execute":  [ { "trace_id": "RoutingTrace_execute_4215ee",  "goal_expr": "...", "tool_selected": "StateManagerTool",   "composite": 1.0,    "satisfaction": 0.7, "is_uncertain": "False", ... } ]
+  }
+}
+```
+
+**Key fields per trace:**
+
+| Field | Description |
+|-------|-------------|
+| `tool_selected` | Tool the router chose for this goal |
+| `static_confidence` | Pattern-match confidence (dominant early on) |
+| `session_confidence` | Within-session EMA weight |
+| `hist_confidence` | Cross-session EMA weight |
+| `composite` | Final blended confidence used for routing |
+| `dominant_tier` | Which tier (`static` / `session` / `hist`) drove the composite |
+| `satisfaction` | Post-execution satisfaction score fed back into routing memory |
+| `is_uncertain` | `"True"` when composite fell below the uncertainty threshold |
+
+When `is_uncertain` is `"True"` for a goal pattern the router lacks enough history — it will self-correct after ~10 observations. If `satisfaction` is consistently low for a tool, consider adding that pattern to the static routing table in `domain.yaml`.
+
+**Before the first cycle completes**, the endpoint returns:
+
+```json
+{
+  "run_id": null,
+  "stages": {},
+  "routing_memory_entries": 0,
+  "total_traces": 0,
+  "detail": "No completed pipeline run found yet — start the bot and wait for a cycle."
+}
 ```
 
 ### Pre-warming routing memory
@@ -855,6 +915,7 @@ The service starts in `STOPPED` state. An operator must call `POST /control/star
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/status` | Bot state, metrics, last cycle summary |
+| `GET` | `/status/routing` | Routing trace summary from the last pipeline run, grouped by stage |
 | `GET` | `/runs` | Paginated pipeline run list (`?limit=50&target=x&success=true`) |
 | `GET` | `/runs/{run_id}` | Full run record with final snapshot |
 | `GET` | `/config` | Current configuration (read-only) |
