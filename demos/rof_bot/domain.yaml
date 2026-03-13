@@ -1,0 +1,123 @@
+# domain.yaml
+# ROF Bot — Domain Configuration
+#
+# Fill in the four slots before running the bot.
+# All other configuration (pipeline topology, tool registration, service
+# settings) adapts automatically to these choices.
+#
+# The `dry_run` flag is the universal sandbox switch. Keep it `true` until
+# the production graduation checklist in Section 19 of the implementation
+# plan is complete.
+#
+# Hot-reload: changes to this file take effect after POST /control/reload.
+# The pipeline.yaml and .rl workflow files must be consistent with the
+# action vocabulary defined here.
+
+domain:
+  # ── Slot 1: Identity ────────────────────────────────────────────────────────
+  name: "general-purpose-bot"          # unique name for this bot instance
+  description: >
+    A general-purpose ROF agentic bot. Replace this description and the four
+    slots below with domain-specific values before deploying.
+
+  # ── Slot 2: Subject ─────────────────────────────────────────────────────────
+  # What entity does the bot operate on each cycle?
+  #
+  # Examples:
+  #   "a support ticket"     → Support bot
+  #   "a monitoring alert"   → DevOps bot
+  #   "a news article"       → Research bot
+  #   "a user submission"    → Moderation bot
+  #   "a data file"          → Pipeline bot
+  subject: "a subject"
+
+  # ── Slot 3: Data Sources ─────────────────────────────────────────────────────
+  # What external systems does the bot collect from?
+  # Used as documentation only — actual connections are configured via env vars
+  # (EXTERNAL_API_BASE_URL, EXTERNAL_SIGNAL_BASE_URL) and tool implementations.
+  #
+  # Examples:
+  #   - CRM API
+  #   - Kafka stream
+  #   - S3 bucket
+  #   - REST API
+  #   - Database
+  #   - Web search
+  data_sources:
+    - "primary_system"         # replace with your actual source names
+
+  # ── Slot 4: Action Vocabulary ────────────────────────────────────────────────
+  # What actions can the bot take in response to a decision?
+  # These values are used by 04_decide.rl and 05_execute.rl.
+  #
+  # The generic vocabulary below maps to every domain:
+  #   proceed   → execute the primary action
+  #   defer     → delay to the next cycle or human review queue
+  #   escalate  → hand off to a human operator immediately
+  #   skip      → record and discard (data or system issue)
+  #
+  # Domain-specific examples (update 04_decide.rl when changing these):
+  #   Support bot:     resolve / reassign / escalate / close
+  #   Moderation bot:  approve / reject / review / ignore
+  #   DevOps bot:      remediate / defer / page / acknowledge
+  #   Research bot:    publish / archive / review / discard
+  action_vocabulary:
+    - proceed
+    - defer
+    - escalate
+    - skip
+
+  # ── Scheduling ───────────────────────────────────────────────────────────────
+  # Also configurable via environment variables (BOT_CYCLE_TRIGGER, etc.).
+  # Environment variables take precedence over these values.
+  cycle_trigger: "interval"            # interval | event | cron
+  cycle_interval_seconds: 60           # used when trigger=interval
+  cycle_cron: null                     # used when trigger=cron, e.g. "*/5 * * * *"
+
+  # ── Targets (fan-out) ────────────────────────────────────────────────────────
+  # The subjects processed each cycle. A single target runs the pipeline once.
+  # Multiple targets trigger FanOutGroup parallel execution — each target gets
+  # its own namespaced entities (e.g. AnalysisSummary_target_a).
+  #
+  # Also configurable via BOT_TARGETS env var (comma-separated).
+  targets:
+    - "target_a"
+
+  # ── Dry-run ──────────────────────────────────────────────────────────────────
+  # Master safety switch. When true, ActionExecutorTool logs the intended action
+  # but never executes it. One universal control — no domain-specific flag names.
+  #
+  # Also configurable via BOT_DRY_RUN env var.
+  dry_run: true
+  dry_run_mode: "log_only"             # log_only | mock_actions | shadow
+
+  # ── Operational Limits ───────────────────────────────────────────────────────
+  # These are the default soft limits referenced by 03_validate.rl.
+  # Override at runtime via PUT /config/limits without restarting the service.
+  # Environment variables (BOT_MAX_CONCURRENT_ACTIONS, etc.) take precedence.
+  operational_limits:
+    max_concurrent_actions: 5
+    daily_error_budget: 0.05           # fraction of cycles allowed to fail
+    resource_utilisation_limit: 0.80   # generic capacity cap (0.0–1.0)
+
+  # ── Human-in-the-loop Defaults ───────────────────────────────────────────────
+  # Timeout behaviour when a human approval request is not resolved in time.
+  # Can be overridden per constraint type in the .rl files.
+  human_in_loop:
+    approval_timeout_seconds: 300      # 5 minutes
+    on_timeout: "defer"                # defer | escalate | proceed (never proceed in prod)
+
+  # ── Workflow Variants ────────────────────────────────────────────────────────
+  # Named variant sets in workflows/variants/. Switch without a code deploy.
+  # Active variant is loaded at startup; POST /control/reload applies changes.
+  active_variant: null                 # null = use root workflows/ directly
+  available_variants:
+    - name: "conservative"
+      path: "workflows/variants/conservative"
+      description: "Prefer defer and escalate over autonomous action"
+    - name: "aggressive"
+      path: "workflows/variants/aggressive"
+      description: "Prefer proceed when confidence >= 0.55"
+    - name: "experimental"
+      path: "workflows/variants/experimental"
+      description: "Staging-only — not for production use"

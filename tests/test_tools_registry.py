@@ -637,11 +637,13 @@ class TestDatabaseTool:
         assert t.name == "DatabaseTool"
         assert any("database" in kw or "sql" in kw for kw in t.trigger_keywords)
 
-    def test_empty_query_returns_failure(self):
+    def test_empty_query_returns_noop_success(self):
         t = DatabaseTool()
         resp = t.execute(ToolRequest(name="DatabaseTool", input={"query": "  "}))
-        assert not resp.success
-        assert resp.error
+        assert resp.success
+        assert resp.output["skipped"] is True
+        assert resp.output["reason"] == "No SQL query provided — no-op."
+        assert resp.error == ""
 
     # ── helper ────────────────────────────────────────────────────────
     @staticmethod
@@ -1010,7 +1012,7 @@ class TestHumanInLoopTool:
             )
         )
         assert resp.success
-        assert resp.output["response"] == "approved"
+        assert resp.output["HumanResponse"]["response"] == "approved"
 
     def test_auto_mock_custom_response(self):
         t = HumanInLoopTool(mode=HumanInLoopMode.AUTO_MOCK, mock_response="rejected")
@@ -1020,15 +1022,17 @@ class TestHumanInLoopTool:
                 input={"prompt": "Approve this?"},
             )
         )
-        assert resp.output["response"] == "rejected"
+        assert resp.output["HumanResponse"]["response"] == "rejected"
 
     def test_auto_mock_output_keys(self):
         t = HumanInLoopTool(mode=HumanInLoopMode.AUTO_MOCK, mock_response="yes")
         resp = t.execute(ToolRequest(name="HumanInLoopTool", input={"prompt": "Continue?"}))
-        assert "prompt" in resp.output
-        assert "response" in resp.output
-        assert "mode" in resp.output
-        assert "elapsed_s" in resp.output
+        assert "HumanResponse" in resp.output
+        entity = resp.output["HumanResponse"]
+        assert "prompt" in entity
+        assert "response" in entity
+        assert "mode" in entity
+        assert "elapsed_s" in entity
 
     def test_auto_mock_uses_goal_as_prompt_fallback(self):
         t = HumanInLoopTool(mode=HumanInLoopMode.AUTO_MOCK, mock_response="ok")
@@ -1040,7 +1044,7 @@ class TestHumanInLoopTool:
             )
         )
         assert resp.success
-        assert resp.output["prompt"] == "wait for human approval of this step"
+        assert resp.output["HumanResponse"]["prompt"] == "wait for human approval of this step"
 
     def test_options_valid_response(self):
         t = HumanInLoopTool(mode=HumanInLoopMode.AUTO_MOCK, mock_response="yes")
@@ -1073,7 +1077,7 @@ class TestHumanInLoopTool:
             )
         )
         assert resp.success
-        assert resp.output["response"] == "callback_answer"
+        assert resp.output["HumanResponse"]["response"] == "callback_answer"
         callback.assert_called_once_with("What should I do?")
 
     def test_callback_mode_no_callback_raises_failure(self):

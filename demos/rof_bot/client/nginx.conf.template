@@ -1,0 +1,162 @@
+# ==============================================================================
+# ROF Bot Dashboard — nginx configuration template
+# ==============================================================================
+# This file is processed by envsubst at container startup.
+# Environment variables available:
+#   API_BACKEND   — upstream bot-service URL  (default: http://bot-service:8080)
+#   SERVER_NAME   — nginx server_name value   (default: _)
+# ==============================================================================
+
+upstream bot_service {
+    server ${API_BACKEND:-bot-service:8080};
+    keepalive 32;
+}
+
+server {
+    listen       80;
+    listen  [::]:80;
+    server_name  ${SERVER_NAME:-_};
+
+    root   /usr/share/nginx/html;
+    index  index.html;
+
+    # ── Security headers ────────────────────────────────────────────────────
+    add_header X-Frame-Options           "SAMEORIGIN"           always;
+    add_header X-Content-Type-Options    "nosniff"              always;
+    add_header X-XSS-Protection          "1; mode=block"        always;
+    add_header Referrer-Policy           "strict-origin"        always;
+    add_header Permissions-Policy        "camera=(), microphone=(), geolocation=()" always;
+    # Content-Security-Policy — adjust if you embed external resources
+    add_header Content-Security-Policy
+        "default-src 'self'; \
+         script-src 'self' 'unsafe-inline'; \
+         style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+         font-src 'self' https://fonts.gstatic.com; \
+         img-src 'self' data:; \
+         connect-src 'self' ws: wss:; \
+         frame-ancestors 'none';"
+        always;
+
+    # ── Compression ─────────────────────────────────────────────────────────
+    gzip            on;
+    gzip_vary       on;
+    gzip_proxied    any;
+    gzip_comp_level 6;
+    gzip_buffers    16 8k;
+    gzip_http_version 1.1;
+    gzip_min_length 256;
+    gzip_types
+        application/atom+xml
+        application/geo+json
+        application/javascript
+        application/x-javascript
+        application/json
+        application/ld+json
+        application/manifest+json
+        application/rdf+xml
+        application/rss+xml
+        application/vnd.ms-fontobject
+        application/wasm
+        application/x-web-app-manifest+json
+        application/xhtml+xml
+        application/xml
+        font/eot
+        font/otf
+        font/ttf
+        font/woff
+        font/woff2
+        image/svg+xml
+        text/cache-manifest
+        text/calendar
+        text/css
+        text/javascript
+        text/markdown
+        text/plain
+        text/vcard
+        text/vnd.rim.location.xloc
+        text/vtt
+        text/x-component
+        text/x-cross-domain-policy
+        text/xml;
+
+    # ── Static asset caching ─────────────────────────────────────────────────
+    # Vite-generated assets include a content hash in the filename — cache
+    # them aggressively with immutable.
+    location ~* \.(?:js|css|woff2?|ttf|eot|svg|png|jpg|jpeg|gif|ico|webp|avif)$ {
+        expires     1y;
+        add_header  Cache-Control "public, max-age=31536000, immutable";
+        access_log  off;
+        log_not_found off;
+    }
+
+    # ── API proxy — REST endpoints ───────────────────────────────────────────
+    # Forward all REST API calls to the FastAPI bot-service backend.
+    # The SPA uses relative paths (/status, /runs, /control/…, etc.).
+    location ~ ^/(status|runs|config|control|metrics|approvals|routing)(/.*)?$ {
+        proxy_pass          http://bot_service;
+        proxy_http_version  1.1;
+        proxy_set_header    Host              $host;
+        proxy_set_header    X-Real-IP         $remote_addr;
+        proxy_set_header    X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header    X-Forwarded-Proto $scheme;
+        proxy_set_header    Connection        "";
+
+        # Timeouts — bot cycles can be long-running
+        proxy_connect_timeout   10s;
+        proxy_send_timeout      120s;
+        proxy_read_timeout      120s;
+
+        # Buffer settings
+        proxy_buffering         on;
+        proxy_buffer_size       4k;
+        proxy_buffers           8 4k;
+    }
+
+    # ── WebSocket proxy — live event feed ───────────────────────────────────
+    # The /ws/feed endpoint requires HTTP upgrade to WebSocket.
+    location /ws/ {
+        proxy_pass          http://bot_service;
+        proxy_http_version  1.1;
+        proxy_set_header    Upgrade    $http_upgrade;
+        proxy_set_header    Connection "upgrade";
+        proxy_set_header    Host       $host;
+        proxy_set_header    X-Real-IP  $remote_addr;
+
+        # Keep WebSocket connections open for the full session
+        proxy_read_timeout  3600s;
+        proxy_send_timeout  3600s;
+
+        # Disable buffering for WebSocket traffic
+        proxy_buffering     off;
+    }
+
+    # ── Health check endpoint (used by Docker HEALTHCHECK) ──────────────────
+    location = /healthz {
+        access_log  off;
+        return 200  "ok\n";
+        add_header  Content-Type text/plain;
+    }
+
+    # ── SPA fallback — serve index.html for all unmatched routes ────────────
+    # React Router handles client-side routing; nginx must not 404 on deep
+    # links such as /live, /runs, /routing, /metrics.
+    location / {
+        try_files $uri $uri/ /index.html;
+
+        # index.html must NOT be cached — the browser must always fetch the
+        # latest shell so updated chunk hashes are picked up.
+        location = /index.html {
+            add_header Cache-Control "no-store, no-cache, must-revalidate, proxy-revalidate";
+            add_header Pragma        "no-cache";
+            expires    -1;
+        }
+    }
+
+    # ── Error pages ──────────────────────────────────────────────────────────
+    error_page 404              /index.html;
+    error_page 500 502 503 504  /index.html;
+
+    # ── Logging ──────────────────────────────────────────────────────────────
+    access_log  /var/log/nginx/access.log  combined;
+    error_log   /var/log/nginx/error.log   warn;
+}

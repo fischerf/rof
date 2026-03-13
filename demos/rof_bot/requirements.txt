@@ -1,0 +1,91 @@
+# =============================================================================
+# ROF Bot — Python dependencies
+# =============================================================================
+#
+# Install all required + recommended extras:
+#   pip install -r requirements.txt
+#
+# For a minimal local run (SQLite, no Prometheus, no ChromaDB):
+#   pip install -r requirements.txt --no-deps   # then cherry-pick below
+#
+# The rof_framework package itself must be installed separately from the
+# project root before installing these requirements:
+#   pip install -e ".[all]"   (from rof/ project root)
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# Web framework
+# -----------------------------------------------------------------------------
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0          # includes websockets + httptools
+websockets>=12.0                   # WebSocket /ws/feed endpoint
+
+
+# -----------------------------------------------------------------------------
+# Settings & configuration
+# -----------------------------------------------------------------------------
+pydantic>=2.0                      # required by pydantic-settings
+pydantic-settings>=2.0             # BaseSettings + .env file loading
+python-dotenv>=1.0                 # .env file parsing fallback
+
+
+# -----------------------------------------------------------------------------
+# Database — async SQLite (default) + SQLAlchemy ORM
+# -----------------------------------------------------------------------------
+sqlalchemy>=2.0                    # async engine + ORM
+aiosqlite>=0.20                    # async driver for SQLite  ← fixes the
+                                   # "pysqlite is not async" startup ERROR
+# For PostgreSQL in production, add:
+#   asyncpg>=0.29
+
+
+# -----------------------------------------------------------------------------
+# Scheduler
+# -----------------------------------------------------------------------------
+apscheduler>=3.10                  # interval / cron / event-driven cycles
+                                   # ← fixes "scheduler will not run" WARNING
+
+
+# -----------------------------------------------------------------------------
+# Observability
+# -----------------------------------------------------------------------------
+prometheus-client>=0.20            # /metrics endpoint + Prometheus scraping
+                                   # ← fixes "MetricsCollector will use no-op"
+                                   #   WARNING
+
+
+# -----------------------------------------------------------------------------
+# HTTP client (used by DataSourceTool, ExternalSignalTool, ActionExecutorTool)
+# -----------------------------------------------------------------------------
+httpx>=0.27                        # async-capable HTTP client
+
+
+# -----------------------------------------------------------------------------
+# LLM provider SDK  (choose the one matching ROF_PROVIDER in your .env)
+# -----------------------------------------------------------------------------
+anthropic>=0.20                    # ROF_PROVIDER=anthropic  (default)
+# openai>=1.0                      # ROF_PROVIDER=openai
+# google-generativeai>=0.5         # ROF_PROVIDER=gemini
+
+
+# -----------------------------------------------------------------------------
+# Knowledge base / RAG  (optional but recommended)
+# -----------------------------------------------------------------------------
+# Omit these if you do not use the RAGTool / knowledge-base ingest script.
+# Without them the bot starts fine but RAGTool is skipped (logged as WARNING).
+chromadb>=0.5                      # vector store backend for RAGTool
+                                   # ← fixes "RAGTool not registered" WARNING
+sentence-transformers>=2.2         # embedding model used by ChromaDB
+
+
+# -----------------------------------------------------------------------------
+# Workflow file parsing
+# -----------------------------------------------------------------------------
+pyyaml>=6.0                        # pipeline.yaml / domain.yaml parsing
+
+
+# -----------------------------------------------------------------------------
+# Utilities
+# -----------------------------------------------------------------------------
+python-dateutil>=2.9               # date parsing helpers used by scheduler

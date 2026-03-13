@@ -1,0 +1,94 @@
+# ============================================================================
+# ROF Bot Dashboard Client — .dockerignore
+# ============================================================================
+# Excludes files that should NOT be sent to the Docker build context.
+# Keeping the context small speeds up builds and avoids leaking secrets.
+# ============================================================================
+
+# ── Node modules — rebuilt inside the container ──────────────────────────────
+node_modules/
+.npm/
+
+# ── Build output — produced inside the container ─────────────────────────────
+dist/
+dist-ssr/
+build/
+out/
+
+# ── Vite cache ───────────────────────────────────────────────────────────────
+.vite/
+
+# ── Environment files — never bake secrets into the image ─────────────────────
+.env
+.env.local
+.env.*.local
+.env.development
+.env.development.local
+.env.test
+.env.test.local
+.env.production.local
+
+# ── TypeScript build info ─────────────────────────────────────────────────────
+*.tsbuildinfo
+
+# ── Editor / IDE ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS artifacts ─────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+desktop.ini
+
+# ── Git ───────────────────────────────────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── Test / coverage ───────────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+
+# ── Lint cache ────────────────────────────────────────────────────────────────
+.eslintcache
+.stylelintcache
+
+# ── Storybook ─────────────────────────────────────────────────────────────────
+storybook-static/
+
+# ── Temp ─────────────────────────────────────────────────────────────────────
+tmp/
+temp/
+
+# ── Documentation (not needed inside the image) ───────────────────────────────
+*.md
+!README.md
+
+# ── CI config ─────────────────────────────────────────────────────────────────
+.github/
+.gitlab-ci.yml
+.circleci/
+
+# ── Docker files themselves (already in build context but not needed as COPY) ─
+.dockerignore
+Dockerfile
+docker-compose*.yml
+
+# ── Alternative lock files ────────────────────────────────────────────────────
+# Keep package-lock.json (used by npm ci), ignore alternatives
+yarn.lock
+pnpm-lock.yaml

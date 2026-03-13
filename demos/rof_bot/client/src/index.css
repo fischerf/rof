@@ -1,0 +1,385 @@
+/* ============================================================================
+   ROF Bot Dashboard — Global Styles
+   ============================================================================
+   Tailwind CSS directives + custom base overrides.
+   All colour tokens are defined in tailwind.config.js.
+   ============================================================================ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------------------------------------------------------------------------
+   Base resets & body defaults
+   --------------------------------------------------------------------------- */
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html {
+    font-size: 16px;
+    -webkit-text-size-adjust: 100%;
+    tab-size: 2;
+  }
+
+  body {
+    @apply bg-bg-base text-text-primary font-sans;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    min-height: 100svh;
+    overflow-x: hidden;
+  }
+
+  /* Headings */
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-semibold text-text-primary leading-tight;
+  }
+
+  /* Links */
+  a {
+    @apply text-accent-blue transition-colors duration-100;
+  }
+  a:hover {
+    @apply text-accent-blue/80 underline;
+  }
+
+  /* Code elements */
+  code, pre, kbd, samp {
+    @apply font-mono;
+  }
+
+  /* Remove default button styles */
+  button {
+    @apply cursor-pointer select-none;
+    background: none;
+    border: none;
+    padding: 0;
+    margin: 0;
+    font: inherit;
+    color: inherit;
+    line-height: inherit;
+  }
+
+  /* Remove default list styles */
+  ul, ol {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  /* Remove default fieldset styles */
+  fieldset {
+    border: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  /* Input / select / textarea base */
+  input, select, textarea {
+    @apply font-sans;
+    color-scheme: dark;
+  }
+
+  /* Focus outline — handled per-component with focus-visible */
+  :focus {
+    outline: none;
+  }
+
+  /* Remove scrollbar in Firefox */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #30363d #0d1117;
+  }
+
+  /* Webkit scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #0d1117;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #30363d;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #484f58;
+  }
+  ::-webkit-scrollbar-corner {
+    background: #0d1117;
+  }
+
+  /* Text selection */
+  ::selection {
+    background-color: rgba(88, 166, 255, 0.2);
+    color: #e6edf3;
+  }
+
+  /* SVG defaults */
+  svg {
+    display: inline-block;
+    vertical-align: middle;
+    flex-shrink: 0;
+  }
+
+  /* Table resets */
+  table {
+    border-collapse: collapse;
+    border-spacing: 0;
+  }
+
+  /* HR */
+  hr {
+    @apply border-border-subtle;
+  }
+
+  /* Details / summary */
+  details > summary {
+    @apply cursor-pointer select-none list-none;
+  }
+  details > summary::-webkit-details-marker {
+    display: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Component layer — reusable utility classes
+   --------------------------------------------------------------------------- */
+
+@layer components {
+
+  /* ── Monospace code inline ────────────────────────────────────────────── */
+  .code-inline {
+    @apply font-mono text-xs px-1.5 py-0.5 rounded
+           bg-bg-elevated border border-border-subtle text-accent-blue;
+  }
+
+  /* ── Status dot (animated) ───────────────────────────────────────────── */
+  .status-dot {
+    @apply w-2 h-2 rounded-full flex-shrink-0 inline-block;
+  }
+  .status-dot--running {
+    @apply bg-accent-blue shadow-glow-blue animate-pulse;
+  }
+  .status-dot--success {
+    @apply bg-accent-green shadow-glow-green;
+  }
+  .status-dot--failed {
+    @apply bg-accent-red shadow-glow-red;
+  }
+  .status-dot--paused {
+    @apply bg-accent-yellow shadow-glow-yellow;
+  }
+  .status-dot--idle {
+    @apply bg-text-muted;
+  }
+
+  /* ── Panel ───────────────────────────────────────────────────────────── */
+  .panel {
+    @apply bg-bg-surface border border-border-subtle rounded-lg;
+  }
+  .panel--elevated {
+    @apply bg-bg-elevated border border-border-default rounded-lg;
+  }
+
+  /* ── Section divider ─────────────────────────────────────────────────── */
+  .section-divider {
+    @apply border-t border-border-subtle my-4;
+  }
+
+  /* ── Scrollable container ────────────────────────────────────────────── */
+  .scroll-area {
+    @apply overflow-auto;
+    /* Custom thin scrollbar already set in base */
+  }
+
+  /* ── Monospaced data value ───────────────────────────────────────────── */
+  .data-value {
+    @apply font-mono text-xs text-text-primary tabular-nums;
+  }
+
+  /* ── Truncated text with tooltip via title attr ──────────────────────── */
+  .truncate-tooltip {
+    @apply truncate cursor-default;
+  }
+
+  /* ── Full-height flex column ─────────────────────────────────────────── */
+  .flex-col-full {
+    @apply flex flex-col flex-1 min-h-0;
+  }
+
+  /* ── Interactive row ─────────────────────────────────────────────────── */
+  .interactive-row {
+    @apply cursor-pointer transition-colors duration-75
+           hover:bg-bg-elevated
+           focus-visible:outline-none focus-visible:ring-2
+           focus-visible:ring-accent-blue/50 focus-visible:ring-inset;
+  }
+
+  /* ── Key-value pair ─────────────────────────────────────────────────── */
+  .kv-pair {
+    @apply flex items-start gap-2 text-xs;
+  }
+  .kv-pair__key {
+    @apply text-text-muted font-medium flex-shrink-0 min-w-[80px];
+  }
+  .kv-pair__value {
+    @apply text-text-primary break-all;
+  }
+
+  /* ── Confidence tier pill ────────────────────────────────────────────── */
+  .tier-pill--high {
+    @apply px-1.5 py-0.5 text-2xs rounded font-semibold
+           bg-accent-green-dim/20 text-accent-green border border-accent-green-dim;
+  }
+  .tier-pill--medium {
+    @apply px-1.5 py-0.5 text-2xs rounded font-semibold
+           bg-accent-yellow-dim/20 text-accent-yellow border border-accent-yellow-dim;
+  }
+  .tier-pill--low {
+    @apply px-1.5 py-0.5 text-2xs rounded font-semibold
+           bg-accent-red-dim/20 text-accent-red border border-accent-red-dim;
+  }
+
+  /* ── Alert severity banner ───────────────────────────────────────────── */
+  .alert-banner {
+    @apply flex items-start gap-3 p-3 rounded-lg border text-sm;
+  }
+  .alert-banner--error {
+    @apply bg-accent-red-dim/20 border-accent-red-dim text-accent-red;
+  }
+  .alert-banner--warning {
+    @apply bg-accent-yellow-dim/20 border-accent-yellow-dim text-accent-yellow;
+  }
+  .alert-banner--info {
+    @apply bg-accent-blue-dim/20 border-accent-blue-dim text-accent-blue;
+  }
+  .alert-banner--success {
+    @apply bg-accent-green-dim/20 border-accent-green-dim text-accent-green;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Utility layer — one-off helpers
+   --------------------------------------------------------------------------- */
+
+@layer utilities {
+
+  /* Visually hide but keep accessible for screen readers */
+  .sr-only-focusable:not(:focus):not(:focus-within) {
+    @apply sr-only;
+  }
+
+  /* Prevent text orphans */
+  .balance {
+    text-wrap: balance;
+  }
+
+  /* Tabular numbers shorthand */
+  .nums {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
+
+  /* Smoothly resize width with animation */
+  .animate-width {
+    transition: width 0.5s ease;
+  }
+
+  /* Mono text colour overrides for syntax highlighting in TreeNode */
+  .syntax-string  { @apply text-accent-green; }
+  .syntax-number  { @apply text-accent-cyan; }
+  .syntax-boolean { @apply text-accent-purple; }
+  .syntax-null    { @apply text-text-muted italic; }
+  .syntax-key     { @apply text-accent-blue; }
+
+  /* Glass-morphism surface — used for modals on blur-capable browsers */
+  .glass {
+    background: rgba(22, 27, 34, 0.85);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+
+  /* Suppress spinner arrows on number inputs */
+  .no-spinner {
+    -moz-appearance: textfield;
+  }
+  .no-spinner::-webkit-outer-spin-button,
+  .no-spinner::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
+  /* Full bleed — escape container padding */
+  .full-bleed {
+    width: 100vw;
+    margin-left: calc(50% - 50vw);
+  }
+
+  /* Overflow fade — applies a fade-to-transparent gradient at the bottom */
+  .overflow-fade-bottom {
+    mask-image: linear-gradient(to bottom, black 80%, transparent 100%);
+    -webkit-mask-image: linear-gradient(to bottom, black 80%, transparent 100%);
+  }
+
+  /* Running pulse ring for stage nodes */
+  .pulse-ring {
+    @apply absolute inset-0 rounded-xl border border-accent-blue/30
+           animate-ping opacity-30 pointer-events-none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Recharts overrides — force dark theme
+   --------------------------------------------------------------------------- */
+
+.recharts-cartesian-grid-horizontal line,
+.recharts-cartesian-grid-vertical line {
+  stroke: #21262d;
+}
+
+.recharts-text {
+  fill: #6e7681;
+  font-size: 11px;
+  font-family: inherit;
+}
+
+.recharts-legend-item-text {
+  color: #8b949e !important;
+  font-size: 11px;
+}
+
+.recharts-tooltip-wrapper {
+  outline: none;
+}
+
+.recharts-active-dot {
+  outline: none;
+}
+
+/* ---------------------------------------------------------------------------
+   Print styles — minimal
+   --------------------------------------------------------------------------- */
+
+@media print {
+  body {
+    background: white;
+    color: black;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  nav,
+  header,
+  footer,
+  .control-bar {
+    display: none !important;
+  }
+}

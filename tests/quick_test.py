@@ -19,7 +19,7 @@ TEST_DOMAINS = {
     "tools": "test_tools_registry.py",
     "passthrough": "test_tool_output_graph_passthrough.py",
     "chains": "test_pipeline_chains.py",
-    "pipeline": "test_pipeline_runner.py",
+    "pipeline": "test_pipeline_runner.py test_pipeline_fanout_and_extras.py test_pipeline_result_and_renderer.py test_condition_evaluator.py test_response_parser.py test_retry_manager.py",
     "routing": "test_routing.py",
     "all": "./",
 }

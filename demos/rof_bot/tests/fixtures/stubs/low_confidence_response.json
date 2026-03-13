@@ -1,0 +1,41 @@
+{
+  "_comment": "Stub LLM response fixture — simulates a low-confidence decision from 04_decide.rl.",
+  "_usage": "Used by test_full_pipeline_defer_decision to assert that the pipeline defers when confidence is low.",
+
+  "stage": "decide",
+  "model": "stub",
+  "response": {
+    "entities": {
+      "Decision": {
+        "attributes": {
+          "action": "defer",
+          "confidence_score": "0.32",
+          "reasoning_summary": "Confidence below threshold — defaulting to defer for safety",
+          "dry_run_active": "true"
+        },
+        "predicates": []
+      }
+    },
+    "goals_resolved": [
+      "evaluate DeferAction for Decision",
+      "determine final Decision as one of: proceed, defer, escalate, skip",
+      "assign confidence_score to Decision between 0.0 and 1.0",
+      "assign reasoning_summary to Decision in plain text",
+      "annotate Decision with dry_run_active from BotState configuration"
+    ],
+    "goals_deferred": [
+      "evaluate PrimaryAction for Decision with confidence threshold 0.65"
+    ],
+    "goals_skipped": []
+  },
+
+  "raw_llm_text": "After reviewing the available evidence, I cannot reach sufficient confidence to recommend a primary action. The subject data is ambiguous and the analysis signals are inconsistent. I am deferring this subject to the next review cycle.\n\nDecision has action of \"defer\".\nDecision has confidence_score of 0.32.\nDecision has reasoning_summary of \"Confidence below threshold — defaulting to defer for safety\".\nDecision has dry_run_active of \"true\".",
+
+  "metadata": {
+    "fixture_version": "1.0",
+    "expected_decision_action": "defer",
+    "expected_confidence_score_max": 0.50,
+    "triggers_defer_path": true,
+    "triggers_primary_action": false
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "_comment": "Stub LLM response fixture — simulates a high-confidence proceed decision from 04_decide.rl.",
+  "_usage": "Used by tests that assert the pipeline proceeds when confidence is high and all constraints are clear.",
+
+  "stage": "decide",
+  "model": "stub",
+  "response": {
+    "entities": {
+      "Decision": {
+        "attributes": {
+          "action": "proceed",
+          "confidence_score": "0.91",
+          "reasoning_summary": "High confidence in primary action. Subject is priority category with complete data and all operational limits clear.",
+          "dry_run_active": "true"
+        },
+        "predicates": []
+      }
+    },
+    "goals_resolved": [
+      "evaluate PrimaryAction for Decision with confidence threshold 0.65",
+      "determine final Decision as one of: proceed, defer, escalate, skip",
+      "assign confidence_score to Decision between 0.0 and 1.0",
+      "assign reasoning_summary to Decision in plain text",
+      "annotate Decision with dry_run_active from BotState configuration"
+    ],
+    "goals_deferred": [],
+    "goals_skipped": [
+      "evaluate DeferAction for Decision",
+      "evaluate EscalateAction for Decision"
+    ]
+  },
+
+  "raw_llm_text": "The subject has been analysed with high confidence. All signals are consistent, operational limits are clear, and the subject falls into the priority category with a score above threshold. Proceeding with the primary action.\n\nDecision has action of \"proceed\".\nDecision has confidence_score of 0.91.\nDecision has reasoning_summary of \"High confidence in primary action. Subject is priority category with complete data and all operational limits clear.\".\nDecision has dry_run_active of \"true\".",
+
+  "metadata": {
+    "fixture_version": "1.0",
+    "expected_decision_action": "proceed",
+    "expected_confidence_score_min": 0.65,
+    "triggers_defer_path": false,
+    "triggers_primary_action": true
+  }
+}

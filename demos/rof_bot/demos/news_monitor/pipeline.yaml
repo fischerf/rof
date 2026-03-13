@@ -1,0 +1,82 @@
+# demos/rof_bot/demos/news_monitor/pipeline.yaml
+# ────────────────────────────────────────────────────────────────────────────
+# News Monitor — ROF Pipeline
+#
+# Searches the web for recent news on a configurable topic,
+# analyses credibility signals, and produces a markdown report.
+#
+# Usage:
+#   rof pipeline run demos/rof_bot/demos/news_monitor/pipeline.yaml \
+#     --provider anthropic
+#
+# To target a different topic, edit NewsQuery.topic in 01_search.rl
+# or pass a seed snapshot with the desired topic pre-set.
+# ────────────────────────────────────────────────────────────────────────────
+
+name: news-monitor
+description: "Search, analyse, and report on recent news for a configurable topic"
+
+# ── LLM provider (all optional — CLI flags and env vars take precedence) ──
+# provider: anthropic       # openai | anthropic | gemini | ollama
+# model:    claude-sonnet-4-6
+# api_key:  ...             # prefer ROF_API_KEY / ANTHROPIC_API_KEY env vars
+
+# ── Pipeline stages ───────────────────────────────────────────────────────
+stages:
+
+  # ── Stage 1: Web Search ──────────────────────────────────────────────────
+  # Always fresh — topic comes from NewsQuery seed values in 01_search.rl.
+  # Routes retrieve goal to WebSearchTool.
+  # Produces: NewsQuery, SearchResults
+  - name: search
+    rl_file: 01_search.rl
+    description: "Search the web for recent news on the configured topic"
+    inject_context: false        # always fresh — topic comes from NewsQuery seed values
+
+  # ── Stage 2: News Analysis ───────────────────────────────────────────────
+  # Scores credibility signals, source diversity, and topic relevance.
+  # Produces: NewsAnalysis
+  - name: analyse
+    rl_file: 02_analyse.rl
+    description: "Score credibility signals, source diversity, and topic relevance"
+    context_filter:
+      entities: [NewsQuery, SearchResults]
+
+  # ── Stage 3: Guardrails ──────────────────────────────────────────────────
+  # Enforces operational constraints before the decision stage.
+  # Produces: MonitorConstraints
+  - name: validate
+    rl_file: 03_validate.rl
+    description: "Validate completeness and enforce operational guardrails"
+    context_filter:
+      entities: [SearchResults, NewsAnalysis]
+
+  # ── Stage 4: Decision ─────────────────────────────────────────────────────
+  # LLM-heavy stage. Determines whether to generate a report, skip, or defer.
+  # Uses a more capable model via llm_override.
+  # Produces: ReportDecision
+  - name: decide
+    rl_file: 04_decide.rl
+    description: "Decide whether the news warrants a report, a skip, or a deferral"
+    context_filter:
+      entities: [NewsAnalysis, MonitorConstraints]
+    llm_override:
+      model: claude-opus-4-6     # overrides ROF_MODEL for this stage only
+
+  # ── Stage 5: Report Generation ────────────────────────────────────────────
+  # Composes and writes a markdown report via FileSaveTool.
+  # No external side-effects — writes news_report.md locally only.
+  # Produces: NewsReport
+  - name: report
+    rl_file: 05_report.rl
+    description: "Compose and write the markdown news report via FileSaveTool"
+    context_filter:
+      entities: [ReportDecision, NewsAnalysis, SearchResults, NewsQuery]
+    on_failure: continue         # a report-write failure never aborts the run
+
+# ── Pipeline-level configuration ─────────────────────────────────────────
+config:
+  on_failure:             continue  # log and continue on any stage failure
+  retry_count:            1         # one retry before marking a stage failed
+  inject_prior_context:   true      # accumulated snapshot flows into each stage
+  max_snapshot_entities:  40        # lean budget — news results can be verbose

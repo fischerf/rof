@@ -1,0 +1,221 @@
+# infra/docker-compose.yml
+# ROF Bot — Local Development Docker Compose
+#
+# Services:
+#   bot-service   — FastAPI bot service (built from project root)
+#   postgres      — PostgreSQL 16 (production-grade DB)
+#   redis         — Redis 7 (signal cache, future task queue)
+#   chromadb      — ChromaDB (RAGTool vector store)
+#   prometheus    — Prometheus (metrics scraping)
+#   grafana       — Grafana (metrics dashboards)
+#
+# Quick start:
+#   cd demos/rof_bot
+#   cp .env.example .env          # fill in ROF_API_KEY etc.
+#   docker compose -f infra/docker-compose.yml up
+#
+# Selective start (without bot-service — useful for local Python dev):
+#   docker compose -f infra/docker-compose.yml up postgres redis chromadb
+#
+# All data is persisted in named Docker volumes so it survives container
+# restarts.  Run `docker compose down -v` to wipe all volumes and start fresh.
+
+name: rof-bot
+
+services:
+
+  # ── Bot Service ─────────────────────────────────────────────────────────────
+  # Builds from the project root (../../) so rof_framework is available.
+  # In development, the source tree is mounted so code changes take effect on
+  # container restart (uvicorn --reload is NOT used because it conflicts with
+  # the APScheduler lifespan in some setups).
+  bot-service:
+    build:
+      context: ../..           # D:/Github/rof/ (project root)
+      dockerfile: demos/rof_bot/infra/Dockerfile
+    container_name: rof-bot-service
+    env_file:
+      - ../.env                # demos/rof_bot/.env (copy from .env.example)
+    environment:
+      # Override storage URLs to point at the compose-managed services
+      DATABASE_URL: postgresql://bot:bot@postgres:5432/rof_bot
+      ASYNC_DATABASE_URL: postgresql+asyncpg://bot:bot@postgres:5432/rof_bot
+      REDIS_URL: redis://redis:6379/0
+      CHROMADB_PATH: /data/chromadb
+      # Prometheus scrape target
+      PROMETHEUS_PORT: "9090"
+    ports:
+      - "8080:8080"            # FastAPI REST + WebSocket
+    volumes:
+      # Mount source for live code editing (remove in production)
+      - ../../src:/app/src:ro
+      - ../../demos/rof_bot:/app/demos/rof_bot:ro
+      - chromadb_data:/data/chromadb
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  # Primary data store for:
+  #   pipeline_runs   — audit trail of every bot cycle
+  #   action_log      — record of every action taken (dry-run or live)
+  #   routing_memory  — RoutingMemory EMA blob (SQLAlchemyStateAdapter path)
+  #   bot_state       — operational metrics (resource_utilisation, error_rate, etc.)
+  postgres:
+    image: postgres:16-alpine
+    container_name: rof-bot-postgres
+    environment:
+      POSTGRES_USER: bot
+      POSTGRES_PASSWORD: bot
+      POSTGRES_DB: rof_bot
+      # Performance tuning for development (not for production)
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "5432:5432"            # expose for local psql / GUI clients
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bot -d rof_bot"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── Redis ────────────────────────────────────────────────────────────────────
+  # Used for:
+  #   ExternalSignalTool — TTL-based signal response cache (SIGNAL_CACHE_TTL_SECONDS)
+  #   Future: APScheduler job store, deferred-work queue
+  #
+  # The volatile-lru eviction policy keeps memory bounded while preserving
+  # recently-accessed cache entries.
+  redis:
+    image: redis:7-alpine
+    container_name: rof-bot-redis
+    command: >
+      redis-server
+      --maxmemory 128mb
+      --maxmemory-policy volatile-lru
+      --appendonly no
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ── ChromaDB ─────────────────────────────────────────────────────────────────
+  # Vector store for RAGTool — stores domain reference documents and historical
+  # outcome patterns for retrieval by 02_analyse.rl.
+  #
+  # Seed the knowledge base after first startup:
+  #   docker exec rof-bot-service python knowledge/ingest_knowledge.py
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: rof-bot-chromadb
+    environment:
+      IS_PERSISTENT: "TRUE"
+      PERSIST_DIRECTORY: /chroma/chroma
+      ANONYMIZED_TELEMETRY: "FALSE"
+    ports:
+      - "8000:8000"
+    volumes:
+      - chromadb_data:/chroma/chroma
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ── Prometheus ───────────────────────────────────────────────────────────────
+  # Scrapes metrics from bot-service:9090/metrics (Prometheus client endpoint)
+  # and from its own internal metrics.
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: rof-bot-prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"          # allow POST /-/reload for config reload
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      - bot-service
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ── Grafana ──────────────────────────────────────────────────────────────────
+  # Visualises Prometheus metrics.  The bot_overview.json dashboard is
+  # auto-provisioned from the grafana/dashboards directory.
+  grafana:
+    image: grafana/grafana:latest
+    container_name: rof-bot-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL: "http://localhost:3000"
+      # Disable telemetry
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+# ── Named Volumes ─────────────────────────────────────────────────────────────
+# All data persists across container restarts.
+# Run `docker compose down -v` to wipe all data and start fresh.
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  chromadb_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+# ── Networks ──────────────────────────────────────────────────────────────────
+# All services share the default bridge network.
+# Uncomment for explicit network isolation in staging:
+#
+# networks:
+#   rof-bot:
+#     driver: bridge

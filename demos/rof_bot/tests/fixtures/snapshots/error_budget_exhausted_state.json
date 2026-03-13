@@ -1,0 +1,114 @@
+{
+  "_comment": "Snapshot fixture — a state where the daily error budget has been exhausted. Used by test_error_budget_guardrail_blocks_action.",
+  "_usage": "Pass as seed_snapshot to build_pipeline_for_test(). Expect Constraints is error_budget_exhausted and Decision.action == 'defer'.",
+
+  "run_id": "fixture-error-budget-exhausted-001",
+  "target": "target_a",
+  "cycle": 1,
+  "workflow_version": "1.0",
+  "created_at": "2025-01-01T00:00:00+00:00",
+
+  "entities": {
+    "Subject": {
+      "id": "Subject",
+      "attributes": {
+        "id": "SUBJECT-ERR-001",
+        "source": "primary_system",
+        "status": "open",
+        "priority": "normal",
+        "data_complete": "true",
+        "raw_content": "Standard subject awaiting processing. Analysis is positive but the daily error budget is exhausted from earlier cycle failures today.",
+        "created_at": "2025-01-01T00:00:00+00:00"
+      },
+      "predicates": [
+        "immediate_action_candidate"
+      ]
+    },
+
+    "Context": {
+      "id": "Context",
+      "attributes": {
+        "history_available": "true",
+        "enrichment_type": "full",
+        "enrichment_data": "Multiple cycle failures recorded today. Error rate has exceeded the configured daily budget of 0.05."
+      },
+      "predicates": []
+    },
+
+    "Analysis": {
+      "id": "Analysis",
+      "attributes": {
+        "primary_score": "0.80",
+        "confidence_level": "high",
+        "subject_category": "priority",
+        "signal_available": "true",
+        "degraded": "false",
+        "recency_score": "0.75",
+        "priority_boost": "0.05",
+        "score_breakdown": "primary=0.80 recency=0.75 priority_boost=0.05"
+      },
+      "predicates": [
+        "is_analysed"
+      ]
+    },
+
+    "ExternalSignal": {
+      "id": "ExternalSignal",
+      "attributes": {
+        "signal_available": "true",
+        "signal_type": "market_context",
+        "signal_value": "0.70",
+        "signal_direction": "positive",
+        "retrieved_at": "2025-01-01T00:00:00+00:00"
+      },
+      "predicates": []
+    },
+
+    "Constraints": {
+      "id": "Constraints",
+      "attributes": {
+        "resource_utilisation": "0.45",
+        "concurrent_action_count": "1",
+        "daily_error_rate": "0.12"
+      },
+      "predicates": [
+        "error_budget_exhausted",
+        "within_resource_limits"
+      ]
+    },
+
+    "ResourceBudget": {
+      "id": "ResourceBudget",
+      "attributes": {
+        "available": "true",
+        "resource_utilisation": "0.45",
+        "headroom": "0.55"
+      },
+      "predicates": []
+    },
+
+    "BotState": {
+      "id": "BotState",
+      "attributes": {
+        "resource_utilisation": "0.45",
+        "concurrent_action_count": "1",
+        "daily_error_rate": "0.12",
+        "last_action_at": "2025-01-01T06:30:00+00:00",
+        "last_action_type": "proceed",
+        "cycle_count_today": "58",
+        "dry_run": "true",
+        "dry_run_mode": "log_only"
+      },
+      "predicates": []
+    }
+  },
+
+  "metadata": {
+    "fixture_version": "1.0",
+    "expected_decision_action": "defer",
+    "expected_predicate_constraints": "error_budget_exhausted",
+    "configured_daily_error_budget": 0.05,
+    "actual_daily_error_rate": 0.12,
+    "note": "daily_error_rate=0.12 exceeds the configured budget of 0.05. 03_validate.rl must set Constraints is error_budget_exhausted. 04_decide.rl must block PrimaryAction evaluation (the 'not Constraints is error_budget_exhausted' condition fails) and fall through to DeferAction even though analysis confidence is high."
+  }
+}

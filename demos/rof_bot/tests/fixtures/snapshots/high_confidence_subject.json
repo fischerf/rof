@@ -1,0 +1,114 @@
+{
+  "_comment": "Snapshot fixture — a subject with high-confidence analysis signals. Used by tests that assert the pipeline proceeds when all conditions are met.",
+  "_usage": "Pass as seed_snapshot to build_pipeline_for_test(). Expect Decision.action == 'proceed' and confidence_score >= 0.65.",
+
+  "run_id": "fixture-high-confidence-001",
+  "target": "target_a",
+  "cycle": 1,
+  "workflow_version": "1.0",
+  "created_at": "2025-01-01T00:00:00+00:00",
+
+  "entities": {
+    "Subject": {
+      "id": "Subject",
+      "attributes": {
+        "id": "SUBJECT-HIGH-001",
+        "source": "primary_system",
+        "status": "open",
+        "priority": "high",
+        "data_complete": "true",
+        "raw_content": "This is a high-priority subject with clear, unambiguous signals. All data fields are populated and the content strongly indicates that immediate action is warranted.",
+        "created_at": "2025-01-01T00:00:00+00:00"
+      },
+      "predicates": [
+        "immediate_action_candidate"
+      ]
+    },
+
+    "Context": {
+      "id": "Context",
+      "attributes": {
+        "history_available": "true",
+        "enrichment_type": "full",
+        "enrichment_data": "Full historical context available. Previous cycles for this subject completed successfully with proceed actions."
+      },
+      "predicates": []
+    },
+
+    "Analysis": {
+      "id": "Analysis",
+      "attributes": {
+        "primary_score": "0.88",
+        "confidence_level": "high",
+        "subject_category": "priority",
+        "signal_available": "true",
+        "degraded": "false",
+        "recency_score": "0.92",
+        "priority_boost": "0.15",
+        "score_breakdown": "primary=0.88 recency=0.92 priority_boost=0.15"
+      },
+      "predicates": [
+        "is_analysed"
+      ]
+    },
+
+    "ExternalSignal": {
+      "id": "ExternalSignal",
+      "attributes": {
+        "signal_available": "true",
+        "signal_type": "market_context",
+        "signal_value": "0.85",
+        "signal_direction": "positive",
+        "retrieved_at": "2025-01-01T00:00:00+00:00"
+      },
+      "predicates": []
+    },
+
+    "Constraints": {
+      "id": "Constraints",
+      "attributes": {
+        "resource_utilisation": "0.42",
+        "concurrent_action_count": "2",
+        "daily_error_rate": "0.01"
+      },
+      "predicates": [
+        "within_limits",
+        "operational_limits_clear"
+      ]
+    },
+
+    "ResourceBudget": {
+      "id": "ResourceBudget",
+      "attributes": {
+        "available": "true",
+        "resource_utilisation": "0.42",
+        "headroom": "0.58"
+      },
+      "predicates": []
+    },
+
+    "BotState": {
+      "id": "BotState",
+      "attributes": {
+        "resource_utilisation": "0.42",
+        "concurrent_action_count": "2",
+        "daily_error_rate": "0.01",
+        "last_action_at": "2025-01-01T00:00:00+00:00",
+        "last_action_type": "proceed",
+        "cycle_count_today": "12",
+        "dry_run": "true",
+        "dry_run_mode": "log_only"
+      },
+      "predicates": []
+    }
+  },
+
+  "metadata": {
+    "fixture_version": "1.0",
+    "expected_decision_action": "proceed",
+    "expected_confidence_score_min": 0.65,
+    "expected_confidence_level": "high",
+    "expected_subject_category": "priority",
+    "note": "High primary_score (0.88), confidence_level=high, subject_category=priority, and all operational limits clear. Should take the PrimaryAction evaluation path in 04_decide.rl."
+  }
+}
