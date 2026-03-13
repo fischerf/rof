@@ -637,11 +637,13 @@ class TestDatabaseTool:
         assert t.name == "DatabaseTool"
         assert any("database" in kw or "sql" in kw for kw in t.trigger_keywords)
 
-    def test_empty_query_returns_failure(self):
+    def test_empty_query_returns_noop_success(self):
         t = DatabaseTool()
         resp = t.execute(ToolRequest(name="DatabaseTool", input={"query": "  "}))
-        assert not resp.success
-        assert resp.error
+        assert resp.success
+        assert resp.output["skipped"] is True
+        assert resp.output["reason"] == "No SQL query provided — no-op."
+        assert resp.error == ""
 
     # ── helper ────────────────────────────────────────────────────────
     @staticmethod

@@ -890,9 +890,14 @@ class TestSQLiteDatabase:
 
         db_path = str(tmp_path / "test_rof.db")
         db = SQLiteDatabase(path=db_path)
-        asyncio.get_event_loop().run_until_complete(db.connect())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(db.connect())
+        db._test_loop = loop
         yield db
-        asyncio.get_event_loop().run_until_complete(db.disconnect())
+        loop.run_until_complete(db.disconnect())
+        loop.close()
+        asyncio.set_event_loop(None)
 
     # ── Pipeline runs ─────────────────────────────────────────────────────────
 
@@ -904,10 +909,10 @@ class TestSQLiteDatabase:
             "final_snapshot": {"entities": {"Subject": {"attributes": {"id": "T-1"}}}},
             "target": "target_a",
         }
-        run_id = asyncio.get_event_loop().run_until_complete(db.save_pipeline_run(result))
+        run_id = db._test_loop.run_until_complete(db.save_pipeline_run(result))
         assert run_id is not None
 
-        runs = asyncio.get_event_loop().run_until_complete(db.list_pipeline_runs(limit=10))
+        runs = db._test_loop.run_until_complete(db.list_pipeline_runs(limit=10))
         assert len(runs) == 1
         assert runs[0]["run_id"] == run_id
 
@@ -919,8 +924,8 @@ class TestSQLiteDatabase:
             "elapsed_s": 2.5,
             "final_snapshot": snapshot,
         }
-        run_id = asyncio.get_event_loop().run_until_complete(db.save_pipeline_run(result))
-        record = asyncio.get_event_loop().run_until_complete(db.get_pipeline_run(run_id))
+        run_id = db._test_loop.run_until_complete(db.save_pipeline_run(result))
+        record = db._test_loop.run_until_complete(db.get_pipeline_run(run_id))
 
         assert record is not None
         assert record["run_id"] == run_id
@@ -931,13 +936,11 @@ class TestSQLiteDatabase:
         assert "entities" in snap
 
     def test_get_pipeline_run_not_found_returns_none(self, db):
-        record = asyncio.get_event_loop().run_until_complete(
-            db.get_pipeline_run("nonexistent-run-id")
-        )
+        record = db._test_loop.run_until_complete(db.get_pipeline_run("nonexistent-run-id"))
         assert record is None
 
     def test_list_runs_filter_by_success(self, db):
-        loop = asyncio.get_event_loop()
+        loop = db._test_loop
         for success in (True, False, True):
             loop.run_until_complete(
                 db.save_pipeline_run(
@@ -957,7 +960,7 @@ class TestSQLiteDatabase:
         assert len(failed_runs) == 1
 
     def test_list_runs_filter_by_target(self, db):
-        loop = asyncio.get_event_loop()
+        loop = db._test_loop
         for target in ("alpha", "beta", "alpha"):
             loop.run_until_complete(
                 db.save_pipeline_run(
@@ -977,7 +980,7 @@ class TestSQLiteDatabase:
     # ── Action log ────────────────────────────────────────────────────────────
 
     def test_log_action(self, db):
-        loop = asyncio.get_event_loop()
+        loop = db._test_loop
         run_id = loop.run_until_complete(
             db.save_pipeline_run(
                 {
@@ -1004,24 +1007,24 @@ class TestSQLiteDatabase:
     # ── Bot state KV store ─────────────────────────────────────────────────────
 
     def test_set_and_get_state(self, db):
-        loop = asyncio.get_event_loop()
+        loop = db._test_loop
         loop.run_until_complete(db.set_state("resource_utilisation", 0.45))
         val = loop.run_until_complete(db.get_state("resource_utilisation"))
         assert val == pytest.approx(0.45)
 
     def test_set_state_upsert(self, db):
-        loop = asyncio.get_event_loop()
+        loop = db._test_loop
         loop.run_until_complete(db.set_state("counter", 1))
         loop.run_until_complete(db.set_state("counter", 2))
         val = loop.run_until_complete(db.get_state("counter"))
         assert val == 2
 
     def test_get_state_missing_key_returns_none(self, db):
-        val = asyncio.get_event_loop().run_until_complete(db.get_state("nonexistent_key"))
+        val = db._test_loop.run_until_complete(db.get_state("nonexistent_key"))
         assert val is None
 
     def test_set_state_complex_value(self, db):
-        loop = asyncio.get_event_loop()
+        loop = db._test_loop
         value = {"nested": {"list": [1, 2, 3], "flag": True}}
         loop.run_until_complete(db.set_state("complex", value))
         result = loop.run_until_complete(db.get_state("complex"))
@@ -1030,7 +1033,7 @@ class TestSQLiteDatabase:
     # ── Routing memory ─────────────────────────────────────────────────────────
 
     def test_save_and_load_routing_memory(self, db):
-        loop = asyncio.get_event_loop()
+        loop = db._test_loop
         memory_data = {"__routing_memory__": {"goals": {"retrieve Subject data": {"ema": 0.75}}}}
         loop.run_until_complete(db.save_routing_memory("__routing_memory__", memory_data))
         loaded = loop.run_until_complete(db.load_routing_memory("__routing_memory__"))
@@ -1038,11 +1041,11 @@ class TestSQLiteDatabase:
         assert "__routing_memory__" in loaded
 
     def test_load_routing_memory_missing_returns_none(self, db):
-        result = asyncio.get_event_loop().run_until_complete(db.load_routing_memory("__missing__"))
+        result = db._test_loop.run_until_complete(db.load_routing_memory("__missing__"))
         assert result is None
 
     def test_routing_memory_upsert(self, db):
-        loop = asyncio.get_event_loop()
+        loop = db._test_loop
         loop.run_until_complete(db.save_routing_memory("key1", {"v": 1}))
         loop.run_until_complete(db.save_routing_memory("key1", {"v": 2}))
         loaded = loop.run_until_complete(db.load_routing_memory("key1"))
@@ -1051,11 +1054,11 @@ class TestSQLiteDatabase:
     # ── Daily error rate ───────────────────────────────────────────────────────
 
     def test_daily_error_rate_no_runs_returns_zero(self, db):
-        rate = asyncio.get_event_loop().run_until_complete(db.get_daily_error_rate())
+        rate = db._test_loop.run_until_complete(db.get_daily_error_rate())
         assert rate == 0.0
 
     def test_daily_error_rate_computation(self, db):
-        loop = asyncio.get_event_loop()
+        loop = db._test_loop
         # Save 2 success, 1 failure → error rate = 1/3
         for success in (True, True, False):
             loop.run_until_complete(
@@ -1146,7 +1149,7 @@ class TestSQLAlchemyStateAdapter:
             await adapter.async_save("async_key", data)
             return await adapter.async_load("async_key")
 
-        result = asyncio.get_event_loop().run_until_complete(_run())
+        result = asyncio.run(_run())
         assert result is not None
         assert result["async_test"] is True
         assert result["count"] == 42
@@ -1155,7 +1158,7 @@ class TestSQLAlchemyStateAdapter:
         async def _run():
             return await adapter.async_load("__missing__")
 
-        result = asyncio.get_event_loop().run_until_complete(_run())
+        result = asyncio.run(_run())
         assert result is None
 
     # ── Thread safety ─────────────────────────────────────────────────────────

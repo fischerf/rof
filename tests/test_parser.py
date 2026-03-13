@@ -257,7 +257,7 @@ class TestTokenizer:
         assert len(ast.conditions) == 1
 
     def test_trailing_incomplete_raises(self):
-        with pytest.raises(ParseError, match="Unvollständiger"):
+        with pytest.raises(ParseError, match="Incomplete statement"):
             parse('define Foo as "bar"')  # no trailing period
 
 

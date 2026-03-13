@@ -1067,7 +1067,7 @@ class TestStateAdapterRoundTrip:
             await adapter.async_save("__async_key__", payload)
             return await adapter.async_load("__async_key__")
 
-        loaded = asyncio.get_event_loop().run_until_complete(_run())
+        loaded = asyncio.run(_run())
         assert loaded == payload
 
     def test_postgres_alias_is_same_class(self):
