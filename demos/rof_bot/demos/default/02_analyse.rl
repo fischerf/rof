@@ -24,10 +24,16 @@ if Subject has data_complete of true,
     then ensure compute secondary_signals for Analysis.
 
 // ── External signal retrieval — advisory input, not hard dependency ───────────
-// ExternalSignalTool returns signal_available = false on any connectivity
-// failure. Downstream rules branch on availability, never hard-fail here.
+// Uses APICallTool with the endpoint declared here.  No API key is required
+// for public endpoints; add an Authorization header in the goal expression
+// or via APICallTool config if the endpoint is protected.
+// On any connectivity failure the pipeline continues — downstream rules
+// branch on signal_available, never hard-fail here.
+//
+// Replace the URL below with your actual signal endpoint, or remove this
+// goal entirely if no external signal source is needed.
 
-ensure retrieve ExternalSignal data for Subject.
+ensure retrieve ExternalSignal from "https://your-signal-source.example.com/v1/signals".
 
 // ── Historical pattern matching via RAG ──────────────────────────────────────
 // Retrieves similar past cases from the ChromaDB knowledge base.
@@ -65,9 +71,9 @@ if Subject has data_complete of false,
     then ensure Analysis has subject_category of "unknown".
 
 // ── Declarative routing hints ─────────────────────────────────────────────────
-route goal "compute primary_score"             via AnalysisTool      with min_confidence 0.90.
-route goal "compute secondary_signals"         via AnalysisTool      with min_confidence 0.90.
-route goal "retrieve ExternalSignal"           via ExternalSignalTool with min_confidence 0.75.
-route goal "retrieve similar_historical_cases" via RAGTool           with min_confidence 0.65.
-route goal "classify subject_category"         via any               with min_confidence 0.60.
-route goal "summarise confidence_level"        via any               with min_confidence 0.60.
+route goal "compute primary_score"             via AnalysisTool  with min_confidence 0.90.
+route goal "compute secondary_signals"         via AnalysisTool  with min_confidence 0.90.
+route goal "retrieve ExternalSignal"           via APICallTool   with min_confidence 0.75.
+route goal "retrieve similar_historical_cases" via RAGTool       with min_confidence 0.65.
+route goal "classify subject_category"         via any           with min_confidence 0.60.
+route goal "summarise confidence_level"        via any           with min_confidence 0.60.

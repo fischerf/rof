@@ -91,13 +91,21 @@ if _PYDANTIC_AVAILABLE:
         # ── External system credentials ─────────────────────────────────
         external_api_key: str = Field(default="", description="Primary external system API key")
         external_api_base_url: str = Field(
-            default="https://api.example.com",
-            description="Primary external system base URL",
+            default="",
+            description=(
+                "Primary external system base URL. "
+                "Set only when using DataSourceTool / ContextEnrichmentTool / ActionExecutorTool directly. "
+                "Workflows that use APICallTool declare endpoints inline in the .rl files."
+            ),
         )
         external_signal_api_key: str = Field(default="", description="Signal source API key")
         external_signal_base_url: str = Field(
-            default="https://signals.example.com",
-            description="Signal source base URL",
+            default="",
+            description=(
+                "Signal source base URL (optional). "
+                "Leave empty if your workflow does not use ExternalSignalTool. "
+                "When empty the tool silently returns signal_available=false — no warning is emitted."
+            ),
         )
         signal_cache_ttl_seconds: int = Field(
             default=300,
@@ -299,11 +307,9 @@ else:
             self.rof_decide_model = e.get("ROF_DECIDE_MODEL", "claude-opus-4-6")
 
             self.external_api_key = e.get("EXTERNAL_API_KEY", "")
-            self.external_api_base_url = e.get("EXTERNAL_API_BASE_URL", "https://api.example.com")
+            self.external_api_base_url = e.get("EXTERNAL_API_BASE_URL", "")
             self.external_signal_api_key = e.get("EXTERNAL_SIGNAL_API_KEY", "")
-            self.external_signal_base_url = e.get(
-                "EXTERNAL_SIGNAL_BASE_URL", "https://signals.example.com"
-            )
+            self.external_signal_base_url = e.get("EXTERNAL_SIGNAL_BASE_URL", "")
             self.signal_cache_ttl_seconds = int(e.get("SIGNAL_CACHE_TTL_SECONDS", "300"))
 
             self.web_search_backend = e.get("WEB_SEARCH_BACKEND", "auto")
