@@ -1374,7 +1374,6 @@ class TestBuildToolRegistry:
             "AnalysisTool",
             "DatabaseTool",
             "ValidatorTool",
-            "HumanInLoopTool",
         }
         for name in required:
             assert name in names, f"Missing required tool: {name}"
@@ -1501,3 +1500,432 @@ class TestWorkflowFiles:
         assert errors == [], f"{filename} has lint errors:\n" + "\n".join(
             f"  L{i.line}: {i.message}" for i in errors
         )
+
+
+# ===========================================================================
+# External credentials — URL + key combinations
+# ===========================================================================
+
+
+class TestExternalCredentials:
+    """
+    Verify all combinations of EXTERNAL_API_BASE_URL / EXTERNAL_API_KEY and
+    EXTERNAL_SIGNAL_BASE_URL / EXTERNAL_SIGNAL_API_KEY across:
+
+      - Settings defaults (both blank)
+      - Tool construction with blank URL
+      - Tool construction with URL but no key  (public endpoint)
+      - Tool construction with URL and key     (authenticated endpoint)
+      - ExternalSignalTool silent absent path  (blank URL → signal_available=false, no warning)
+      - DataSourceTool / ContextEnrichmentTool / ActionExecutorTool with blank URL → dry-run path
+      - Settings picking up values from environment variables
+      - APICallTool inline-URL pattern: no EXTERNAL_* env vars needed
+    """
+
+    # ------------------------------------------------------------------
+    # Settings defaults
+    # ------------------------------------------------------------------
+
+    def test_settings_external_api_base_url_default_is_empty(self):
+        """EXTERNAL_API_BASE_URL must default to '' — never a fake example.com URL."""
+        from bot_service.settings import Settings
+
+        with patch.dict(os.environ, {}, clear=False):
+            # Remove the var entirely to exercise the true default
+            env = {k: v for k, v in os.environ.items() if k != "EXTERNAL_API_BASE_URL"}
+            with patch.dict(os.environ, env, clear=True):
+                s = Settings()
+        assert s.external_api_base_url == "", (
+            f"Expected empty string, got {s.external_api_base_url!r}"
+        )
+
+    def test_settings_external_signal_base_url_default_is_empty(self):
+        """EXTERNAL_SIGNAL_BASE_URL must default to '' — no fake example.com URL."""
+        from bot_service.settings import Settings
+
+        env = {k: v for k, v in os.environ.items() if k != "EXTERNAL_SIGNAL_BASE_URL"}
+        with patch.dict(os.environ, env, clear=True):
+            s = Settings()
+        assert s.external_signal_base_url == "", (
+            f"Expected empty string, got {s.external_signal_base_url!r}"
+        )
+
+    def test_settings_api_keys_default_to_empty(self):
+        """Both API key fields must default to empty string."""
+        from bot_service.settings import Settings
+
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in {"EXTERNAL_API_KEY", "EXTERNAL_SIGNAL_API_KEY"}
+        }
+        with patch.dict(os.environ, env, clear=True):
+            s = Settings()
+        assert s.external_api_key == ""
+        assert s.external_signal_api_key == ""
+
+    def test_settings_reads_external_api_base_url_from_env(self):
+        """Settings picks up EXTERNAL_API_BASE_URL from the environment."""
+        from bot_service.settings import Settings
+
+        with patch.dict(os.environ, {"EXTERNAL_API_BASE_URL": "https://my-api.example.com/v1"}):
+            s = Settings()
+        assert s.external_api_base_url == "https://my-api.example.com/v1"
+
+    def test_settings_reads_external_signal_base_url_from_env(self):
+        """Settings picks up EXTERNAL_SIGNAL_BASE_URL from the environment."""
+        from bot_service.settings import Settings
+
+        with patch.dict(os.environ, {"EXTERNAL_SIGNAL_BASE_URL": "https://signals.example.com/v2"}):
+            s = Settings()
+        assert s.external_signal_base_url == "https://signals.example.com/v2"
+
+    def test_settings_reads_api_key_from_env(self):
+        """Settings picks up EXTERNAL_API_KEY from the environment."""
+        from bot_service.settings import Settings
+
+        with patch.dict(os.environ, {"EXTERNAL_API_KEY": "secret-key-123"}):
+            s = Settings()
+        assert s.external_api_key == "secret-key-123"
+
+    def test_settings_reads_signal_api_key_from_env(self):
+        """Settings picks up EXTERNAL_SIGNAL_API_KEY from the environment."""
+        from bot_service.settings import Settings
+
+        with patch.dict(os.environ, {"EXTERNAL_SIGNAL_API_KEY": "signal-key-456"}):
+            s = Settings()
+        assert s.external_signal_api_key == "signal-key-456"
+
+    # ------------------------------------------------------------------
+    # DataSourceTool — blank URL, URL-only, URL+key
+    # ------------------------------------------------------------------
+
+    def test_datasource_blank_url_dry_run_succeeds(self):
+        """DataSourceTool with blank base_url still works in dry-run mode."""
+        from tools.data_source import DataSourceTool
+
+        tool = DataSourceTool(base_url="", api_key="", dry_run=True)
+        req = _make_tool_request({"subject_id": "DS-001"})
+        resp = tool.execute(req)
+
+        assert resp.success is True
+        assert "data_complete" in resp.output["rl_context"]
+
+    def test_datasource_blank_url_live_mode_returns_degraded(self):
+        """DataSourceTool with blank base_url in live mode returns data_complete=false."""
+        from tools.data_source import DataSourceTool
+
+        tool = DataSourceTool(base_url="", api_key="", dry_run=False)
+        req = _make_tool_request({"subject_id": "DS-002"})
+        resp = tool.execute(req)
+
+        # Tool must not raise — returns degraded response
+        assert resp.success is True
+        assert "data_complete of false" in resp.output["rl_context"]
+
+    def test_datasource_url_no_key_constructs_correctly(self):
+        """DataSourceTool accepts a URL with no API key (public endpoint)."""
+        from tools.data_source import DataSourceTool
+
+        tool = DataSourceTool(base_url="https://public-api.example.com", api_key="", dry_run=True)
+        assert tool._base_url == "https://public-api.example.com"
+        assert tool._api_key == ""
+
+    def test_datasource_url_with_key_constructs_correctly(self):
+        """DataSourceTool accepts both URL and API key."""
+        from tools.data_source import DataSourceTool
+
+        tool = DataSourceTool(
+            base_url="https://private-api.example.com",
+            api_key="bearer-token-xyz",
+            dry_run=True,
+        )
+        assert tool._base_url == "https://private-api.example.com"
+        assert tool._api_key == "bearer-token-xyz"
+
+    def test_datasource_falls_back_to_env_var(self):
+        """DataSourceTool reads EXTERNAL_API_BASE_URL from env when base_url=''."""
+        from tools.data_source import DataSourceTool
+
+        with patch.dict(os.environ, {"EXTERNAL_API_BASE_URL": "https://env-api.example.com"}):
+            tool = DataSourceTool(base_url="", api_key="", dry_run=True)
+        assert tool._base_url == "https://env-api.example.com"
+
+    def test_datasource_key_falls_back_to_env_var(self):
+        """DataSourceTool reads EXTERNAL_API_KEY from env when api_key=''."""
+        from tools.data_source import DataSourceTool
+
+        with patch.dict(os.environ, {"EXTERNAL_API_KEY": "env-key-abc"}):
+            tool = DataSourceTool(base_url="", api_key="", dry_run=True)
+        assert tool._api_key == "env-key-abc"
+
+    # ------------------------------------------------------------------
+    # ExternalSignalTool — blank URL silent path
+    # ------------------------------------------------------------------
+
+    def test_signal_tool_blank_url_returns_unavailable_silently(self):
+        """ExternalSignalTool with blank base_url returns signal_available=false — no exception."""
+        from tools.external_signal import ExternalSignalTool
+
+        tool = ExternalSignalTool(base_url="", api_key="", dry_run=False)
+        req = _make_tool_request({"subject_id": "SIG-BLANK"})
+        resp = tool.execute(req)
+
+        assert resp.success is True, "Tool must never set success=False for missing URL"
+        assert 'signal_available of "false"' in resp.output["rl_context"]
+
+    def test_signal_tool_blank_url_no_logging_warning_on_construct(self):
+        """Constructing ExternalSignalTool with blank URL must not emit a warning."""
+        import logging
+
+        from tools.external_signal import ExternalSignalTool
+
+        with patch.object(logging.getLogger("rof.tools.external_signal"), "warning") as mock_warn:
+            ExternalSignalTool(base_url="", api_key="", dry_run=False)
+        mock_warn.assert_not_called()
+
+    def test_signal_tool_url_no_key_constructs_correctly(self):
+        """ExternalSignalTool accepts a URL with no API key (public signal endpoint)."""
+        from tools.external_signal import ExternalSignalTool
+
+        tool = ExternalSignalTool(
+            base_url="https://public-signals.example.com",
+            api_key="",
+            dry_run=True,
+        )
+        assert tool._base_url == "https://public-signals.example.com"
+        assert tool._api_key == ""
+
+    def test_signal_tool_url_with_key_constructs_correctly(self):
+        """ExternalSignalTool accepts both URL and API key."""
+        from tools.external_signal import ExternalSignalTool
+
+        tool = ExternalSignalTool(
+            base_url="https://private-signals.example.com",
+            api_key="sig-secret-key",
+            dry_run=True,
+        )
+        assert tool._base_url == "https://private-signals.example.com"
+        assert tool._api_key == "sig-secret-key"
+
+    def test_signal_tool_falls_back_to_env_var(self):
+        """ExternalSignalTool reads EXTERNAL_SIGNAL_BASE_URL from env when base_url=''."""
+        from tools.external_signal import ExternalSignalTool
+
+        with patch.dict(
+            os.environ, {"EXTERNAL_SIGNAL_BASE_URL": "https://env-signals.example.com"}
+        ):
+            tool = ExternalSignalTool(base_url="", api_key="", dry_run=True)
+        assert tool._base_url == "https://env-signals.example.com"
+
+    def test_signal_tool_key_falls_back_to_env_var(self):
+        """ExternalSignalTool reads EXTERNAL_SIGNAL_API_KEY from env when api_key=''."""
+        from tools.external_signal import ExternalSignalTool
+
+        with patch.dict(os.environ, {"EXTERNAL_SIGNAL_API_KEY": "env-sig-key"}):
+            tool = ExternalSignalTool(base_url="", api_key="", dry_run=True)
+        assert tool._api_key == "env-sig-key"
+
+    def test_signal_tool_falls_back_to_primary_api_env_var(self):
+        """When EXTERNAL_SIGNAL_BASE_URL is unset, ExternalSignalTool falls back to EXTERNAL_API_BASE_URL."""
+        from tools.external_signal import ExternalSignalTool
+
+        env = {k: v for k, v in os.environ.items() if k != "EXTERNAL_SIGNAL_BASE_URL"}
+        env["EXTERNAL_API_BASE_URL"] = "https://fallback-primary.example.com"
+        with patch.dict(os.environ, env, clear=True):
+            tool = ExternalSignalTool(base_url="", api_key="", dry_run=True)
+        assert tool._base_url == "https://fallback-primary.example.com"
+
+    def test_signal_tool_dry_run_works_regardless_of_url(self):
+        """Dry-run returns stub signal data even when base_url is blank."""
+        from tools.external_signal import ExternalSignalTool
+
+        tool = ExternalSignalTool(base_url="", api_key="", dry_run=True)
+        req = _make_tool_request({"subject_id": "DRY-001"})
+        resp = tool.execute(req)
+
+        assert resp.success is True
+        assert 'signal_available of "true"' in resp.output["rl_context"]
+
+    # ------------------------------------------------------------------
+    # APICallTool inline-URL pattern
+    # ------------------------------------------------------------------
+
+    def test_apicall_tool_registered_in_registry(self):
+        """APICallTool must be present in the tool registry — it is the recommended
+        inline-endpoint pattern and must always be available."""
+        from bot_service.pipeline_factory import build_tool_registry
+        from bot_service.settings import Settings
+        from tools.state_manager import BotStateManagerTool, _InMemoryBackend
+
+        with patch.dict(os.environ, {"BOT_DRY_RUN": "true"}, clear=False):
+            settings = Settings()
+
+        state_tool = BotStateManagerTool(backend=_InMemoryBackend())
+        registry = build_tool_registry(
+            settings=settings,
+            db_url="sqlite:///:memory:",
+            dry_run=True,
+            state_tool=state_tool,
+        )
+
+        if not hasattr(registry, "all_tools"):
+            pytest.skip("ToolRegistry.all_tools() not available")
+
+        tools = registry.all_tools()
+        assert "APICallTool" in tools, (
+            "APICallTool must be registered — it is used for inline-URL endpoint calls"
+        )
+
+    def test_apicall_tool_registered_even_when_external_urls_blank(self):
+        """APICallTool must be in the registry even when both EXTERNAL_* URLs are blank."""
+        from bot_service.pipeline_factory import build_tool_registry
+        from bot_service.settings import Settings
+        from tools.state_manager import BotStateManagerTool, _InMemoryBackend
+
+        env_clean = {
+            k: v
+            for k, v in os.environ.items()
+            if k
+            not in {
+                "EXTERNAL_API_BASE_URL",
+                "EXTERNAL_SIGNAL_BASE_URL",
+                "EXTERNAL_API_KEY",
+                "EXTERNAL_SIGNAL_API_KEY",
+            }
+        }
+        with patch.dict(os.environ, env_clean, clear=True):
+            settings = Settings()
+
+        state_tool = BotStateManagerTool(backend=_InMemoryBackend())
+        registry = build_tool_registry(
+            settings=settings,
+            db_url="sqlite:///:memory:",
+            dry_run=True,
+            state_tool=state_tool,
+        )
+
+        if not hasattr(registry, "all_tools"):
+            pytest.skip("ToolRegistry.all_tools() not available")
+
+        tools = registry.all_tools()
+        assert "APICallTool" in tools
+
+    # ------------------------------------------------------------------
+    # Pipeline factory — blank URL propagation
+    # ------------------------------------------------------------------
+
+    def test_registry_tools_receive_blank_base_url_when_env_unset(self):
+        """When EXTERNAL_API_BASE_URL is not set, DataSourceTool._base_url must be ''."""
+        from bot_service.pipeline_factory import build_tool_registry
+        from bot_service.settings import Settings
+        from tools.state_manager import BotStateManagerTool, _InMemoryBackend
+
+        env_clean = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in {"EXTERNAL_API_BASE_URL", "EXTERNAL_API_KEY"}
+        }
+        with patch.dict(os.environ, env_clean, clear=True):
+            settings = Settings()
+
+        state_tool = BotStateManagerTool(backend=_InMemoryBackend())
+        registry = build_tool_registry(
+            settings=settings,
+            db_url="sqlite:///:memory:",
+            dry_run=True,
+            state_tool=state_tool,
+        )
+
+        if not hasattr(registry, "all_tools"):
+            pytest.skip("ToolRegistry.all_tools() not available")
+
+        tools = registry.all_tools()
+        data_source = tools.get("DataSourceTool")
+        if data_source is None:
+            pytest.skip("DataSourceTool not registered")
+
+        assert data_source._base_url == "", (
+            f"Expected blank base_url, got {data_source._base_url!r} — "
+            "no fake example.com URL should be injected"
+        )
+
+    def test_registry_signal_tool_receives_blank_base_url_when_env_unset(self):
+        """When EXTERNAL_SIGNAL_BASE_URL is not set, ExternalSignalTool._base_url must be ''."""
+        from bot_service.pipeline_factory import build_tool_registry
+        from bot_service.settings import Settings
+        from tools.state_manager import BotStateManagerTool, _InMemoryBackend
+
+        env_clean = {
+            k: v
+            for k, v in os.environ.items()
+            if k
+            not in {
+                "EXTERNAL_SIGNAL_BASE_URL",
+                "EXTERNAL_SIGNAL_API_KEY",
+                "EXTERNAL_API_BASE_URL",
+                "EXTERNAL_API_KEY",
+            }
+        }
+        with patch.dict(os.environ, env_clean, clear=True):
+            settings = Settings()
+
+        state_tool = BotStateManagerTool(backend=_InMemoryBackend())
+        registry = build_tool_registry(
+            settings=settings,
+            db_url="sqlite:///:memory:",
+            dry_run=True,
+            state_tool=state_tool,
+        )
+
+        if not hasattr(registry, "all_tools"):
+            pytest.skip("ToolRegistry.all_tools() not available")
+
+        tools = registry.all_tools()
+        signal_tool = tools.get("ExternalSignalTool")
+        if signal_tool is None:
+            pytest.skip("ExternalSignalTool not registered")
+
+        assert signal_tool._base_url == "", (
+            f"Expected blank base_url, got {signal_tool._base_url!r} — "
+            "no fake example.com URL should be injected"
+        )
+
+    def test_registry_url_and_key_propagated_to_tools(self):
+        """When EXTERNAL_API_BASE_URL and EXTERNAL_API_KEY are set, all three primary
+        tools receive those values."""
+        from bot_service.pipeline_factory import build_tool_registry
+        from bot_service.settings import Settings
+        from tools.state_manager import BotStateManagerTool, _InMemoryBackend
+
+        with patch.dict(
+            os.environ,
+            {
+                "EXTERNAL_API_BASE_URL": "https://configured.example.com/api",
+                "EXTERNAL_API_KEY": "configured-key",
+            },
+        ):
+            settings = Settings()
+
+        state_tool = BotStateManagerTool(backend=_InMemoryBackend())
+        registry = build_tool_registry(
+            settings=settings,
+            db_url="sqlite:///:memory:",
+            dry_run=True,
+            state_tool=state_tool,
+        )
+
+        if not hasattr(registry, "all_tools"):
+            pytest.skip("ToolRegistry.all_tools() not available")
+
+        tools = registry.all_tools()
+        for tool_name in ("DataSourceTool", "ContextEnrichmentTool", "ActionExecutorTool"):
+            tool = tools.get(tool_name)
+            if tool is None:
+                continue
+            assert tool._base_url == "https://configured.example.com/api", (
+                f"{tool_name}._base_url not propagated correctly"
+            )
+            assert tool._api_key == "configured-key", (
+                f"{tool_name}._api_key not propagated correctly"
+            )

@@ -534,6 +534,7 @@ def build_pipeline(
     state_tool: Optional[Any] = None,
     bus: Optional[EventBus] = None,
     pipeline_yaml: Optional[Path] = None,
+    tools: Optional[list] = None,
 ) -> ConfidentPipeline:
     """
     Build and return the ConfidentPipeline for the ROF Bot.
@@ -566,6 +567,10 @@ def build_pipeline(
     pipeline_yaml:
         Explicit path to ``pipeline.yaml``.  When None the file is
         resolved automatically from the rof_bot root.
+    tools:
+        Optional pre-built tool list.  When provided, ``build_tool_registry()``
+        is skipped entirely and these tools are used directly.  Intended for
+        tests that inject mock tools so no real external calls are made.
 
     Returns
     -------
@@ -617,18 +622,28 @@ def build_pipeline(
     )
 
     # ── Tool registry ──────────────────────────────────────────────────────────
-    registry = build_tool_registry(
-        settings=settings,
-        db_url=resolved_db_url,
-        chromadb_path=resolved_chroma,
-        state_tool=state_tool,
-    )
-
-    if hasattr(registry, "all_tools"):
-        tools = list(registry.all_tools().values())
+    if tools is not None:
+        # Caller supplied a pre-built tool list (e.g. test mock tools) —
+        # skip registry construction entirely.
+        logger.debug(
+            "build_pipeline: using %d caller-supplied tools — skipping build_tool_registry()",
+            len(tools),
+        )
     else:
-        tools = []
-        logger.warning("build_pipeline: ToolRegistry.all_tools() not available — empty tool list")
+        registry = build_tool_registry(
+            settings=settings,
+            db_url=resolved_db_url,
+            chromadb_path=resolved_chroma,
+            state_tool=state_tool,
+        )
+
+        if hasattr(registry, "all_tools"):
+            tools = list(registry.all_tools().values())
+        else:
+            tools = []
+            logger.warning(
+                "build_pipeline: ToolRegistry.all_tools() not available — empty tool list"
+            )
 
     # Read-write DatabaseTool for the execute stage — not in the shared registry
     # because all other stages must never write to the DB directly.

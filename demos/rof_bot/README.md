@@ -265,10 +265,10 @@ All settings are read from environment variables. A `.env` file in the `demos/ro
 | `DATABASE_URL` | `sqlite:///./rof_bot.db` | SQLAlchemy DSN — switch to `postgresql://...` for production |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL (signal cache) |
 | `CHROMADB_PATH` | `./data/chromadb` | ChromaDB persistence directory |
-| `EXTERNAL_API_BASE_URL` | `https://api.example.com` | Primary external system base URL |
-| `EXTERNAL_API_KEY` | _(empty)_ | Primary external system API key |
-| `EXTERNAL_SIGNAL_BASE_URL` | `https://signals.example.com` | Signal source base URL |
-| `EXTERNAL_SIGNAL_API_KEY` | _(empty)_ | Signal source API key |
+| `EXTERNAL_API_BASE_URL` | _(empty)_ | Primary external system base URL — set only when using `DataSourceTool` / `ContextEnrichmentTool` / `ActionExecutorTool` directly; leave blank when endpoints are declared inline in `.rl` files via `APICallTool` |
+| `EXTERNAL_API_KEY` | _(empty)_ | API key for the primary external system — **optional**, only set when the endpoint requires authentication |
+| `EXTERNAL_SIGNAL_BASE_URL` | _(empty)_ | Signal source base URL — leave blank when not using `ExternalSignalTool`; no warning is emitted when unset |
+| `EXTERNAL_SIGNAL_API_KEY` | _(empty)_ | API key for the signal source — **optional**, only set when the endpoint requires authentication |
 | `WEB_SEARCH_BACKEND` | `auto` | WebSearchTool backend: `auto` \| `duckduckgo` \| `serpapi` \| `brave` |
 | `WEB_SEARCH_API_KEY` | _(empty)_ | SerpAPI or Brave Search key (leave empty for free DuckDuckGo) |
 | `WEB_SEARCH_MAX_RESULTS` | `8` | Maximum web search results returned per query (1–50) |
@@ -279,6 +279,52 @@ All settings are read from environment variables. A `.env` file in the `demos/ro
 | `API_KEY` | _(empty)_ | Bearer token for write endpoints (empty = disabled) |
 | `LOG_LEVEL` | `INFO` | Root log level |
 | `PORT` | `8080` | FastAPI bind port |
+
+### External credentials
+
+There are two optional external integrations. Both URLs default to empty — no placeholder URLs are shipped.
+
+**API keys are never required by the framework.** Only set `EXTERNAL_API_KEY` or `EXTERNAL_SIGNAL_API_KEY` when the specific endpoint you are calling actually enforces authentication. Public APIs, internal services on a trusted network, and endpoints that use other mechanisms (mTLS, IP allowlist, etc.) work fine with the key left blank.
+
+#### Option A — shared base URL via environment variable
+
+Set `EXTERNAL_API_BASE_URL` when `DataSourceTool`, `ContextEnrichmentTool`, and `ActionExecutorTool` all talk to the same system. The URL is injected at startup and reused across all three tools:
+
+```
+EXTERNAL_API_BASE_URL=https://your-system.example.com/api/v1
+EXTERNAL_API_KEY=                    # leave blank if no auth needed
+```
+
+Set `EXTERNAL_SIGNAL_BASE_URL` when `ExternalSignalTool` calls a separate advisory source:
+
+```
+EXTERNAL_SIGNAL_BASE_URL=https://your-signals.example.com/v1
+EXTERNAL_SIGNAL_API_KEY=             # leave blank if no auth needed
+```
+
+When `EXTERNAL_SIGNAL_BASE_URL` is empty, `ExternalSignalTool` silently returns `signal_available=false` and the pipeline continues on the advisory-absent path — no warning, no error.
+
+#### Option B — endpoint inline in `.rl` file via `APICallTool`
+
+For workflows that call different endpoints per stage, or that do not need a globally shared base URL, declare the full endpoint directly in the `.rl` file and route to `APICallTool`:
+
+```
+// In 02_analyse.rl — no EXTERNAL_* env vars needed
+ensure retrieve ExternalSignal from "https://your-signal-source.example.com/v1/signals".
+route goal "retrieve ExternalSignal" via APICallTool with min_confidence 0.75.
+```
+
+This keeps the URL co-located with the logic that uses it. The `EXTERNAL_API_BASE_URL` and `EXTERNAL_SIGNAL_BASE_URL` variables can remain blank. Only secrets (API keys) should stay in `.env`.
+
+#### Summary
+
+| Integration | URL location | Key required? |
+|-------------|-------------|---------------|
+| `DataSourceTool` / `ContextEnrichmentTool` / `ActionExecutorTool` | `EXTERNAL_API_BASE_URL` _or_ hardcode in `_call_external_api()` | Only if the endpoint enforces auth |
+| `ExternalSignalTool` | `EXTERNAL_SIGNAL_BASE_URL` | Only if the endpoint enforces auth |
+| `APICallTool` (inline) | Goal expression in `.rl` file | Pass via goal expression or leave blank |
+
+---
 
 ### `domain.yaml`
 
