@@ -1122,8 +1122,8 @@ class ROFSession:
         self._generated_tools: dict[str, ToolProvider] = {}
 
         # Resolve output_mode: "auto" defers to the provider at runtime.
-        # "json" enforces the rof_graph_update JSON schema (cloud models).
-        # "rl"   requests plain RelateLang text (any model, Ollama-friendly).
+        # "json" enforces the rof_graph_update JSON schema (all providers including Ollama).
+        # "rl"   requests plain RelateLang text (legacy fallback, any model).
         #
         # pause_on_error=False — we handle failure recovery ourselves in
         # _execute_with_retry(); we need the orchestrator to continue past
@@ -2385,8 +2385,8 @@ def _parse_args() -> argparse.Namespace:
 
             Output modes (--output-mode):
               auto  (default) – json if provider.supports_structured_output(), else rl
-              json            – enforce JSON schema (OpenAI / Anthropic / Gemini)
-              rl              – plain RelateLang text (any model, Ollama-safe)
+              json            – enforce JSON schema (OpenAI / Anthropic / Gemini / Ollama)
+              rl              – plain RelateLang text (legacy fallback, any model)
 
             GitHub Copilot tips:
             First run   : python rof_ai_demo.py --provider github_copilot
@@ -2608,8 +2608,8 @@ def _parse_args() -> argparse.Namespace:
             "How the execution-stage LLM is asked to respond. "
             "'auto' uses 'json' when the provider supports structured output, "
             "otherwise 'rl'. "
-            "'json' enforces the rof_graph_update JSON schema (cloud models). "
-            "'rl' requests plain RelateLang text (works with any model including Ollama). "
+            "'json' enforces the rof_graph_update JSON schema (all providers including Ollama). "
+            "'rl' requests plain RelateLang text (legacy fallback, works with any model). "
             "Default: auto"
         ),
     )

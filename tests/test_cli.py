@@ -513,6 +513,121 @@ class TestPipelineDebugWithMocks:
             # Should complete or be interrupted
             assert code in (0, 1, 130)
 
+    @patch("rof_framework.cli.main._make_provider")
+    def test_pipeline_debug_respects_stage_output_mode(self, mock_make_provider):
+        """
+        Regression test for: output_mode per stage in pipeline YAML is silently
+        ignored by 'pipeline debug', causing every stage to fall back to "auto".
+        For providers where supports_structured_output() returns False, "auto"
+        resolves to "rl", overriding any explicit output_mode: json set in the
+        YAML.  The LLMRequest received by the provider must carry the output_mode
+        declared in the YAML, not whatever "auto" would have resolved to.
+
+        The pipeline_output_mode fixture has:
+          stage 1 (extract)  — output_mode: rl
+          stage 2 (classify) — output_mode: json
+
+        We record the output_mode on every LLMRequest the debug command issues
+        and assert that stage-1 calls use "rl" and stage-2 calls use "json",
+        regardless of what supports_structured_output() returns.
+        """
+        import json as _json
+
+        from rof_framework.rof_core import LLMProvider, LLMRequest, LLMResponse
+
+        # Scripted responses: stage-1 goals get RL text, stage-2 goals get JSON.
+        _RL_RESPONSE = (
+            'Customer has name of "Alice".\n'
+            'Customer has purchase_eligible of "yes".\n'
+            'Product has availability of "in_stock".\n'
+        )
+        _JSON_RESPONSE = _json.dumps(
+            {
+                "attributes": [
+                    {"entity": "Customer", "name": "segment", "value": "HighValue"},
+                    {"entity": "RiskTier", "name": "level", "value": "Low"},
+                    {"entity": "RiskTier", "name": "score", "value": 0.08},
+                ],
+                "predicates": [
+                    {"entity": "Customer", "value": "eligible"},
+                    {"entity": "RiskTier", "value": "approved"},
+                ],
+                "reasoning": "Test reasoning.",
+            }
+        )
+
+        # Track every (output_mode, response_content) pair in call order.
+        recorded_requests: list[LLMRequest] = []
+
+        class _RecordingProvider(LLMProvider):
+            def complete(self, req: LLMRequest) -> LLMResponse:
+                recorded_requests.append(req)
+                # Return the appropriate scripted response for the requested mode.
+                content = _JSON_RESPONSE if req.output_mode == "json" else _RL_RESPONSE
+                return LLMResponse(content=content, raw={}, tool_calls=[])
+
+            def supports_tool_calling(self) -> bool:
+                return False
+
+            def supports_structured_output(self) -> bool:
+                # Return False to simulate the worst-case "auto" resolution:
+                # without the fix, "auto" silently collapsed to "rl" here,
+                # overriding the explicit output_mode: json set in the YAML.
+                # The fix ensures the explicit YAML value wins regardless of
+                # what this method returns.
+                return False
+
+            @property
+            def context_limit(self) -> int:
+                return 8192
+
+        mock_make_provider.return_value = _RecordingProvider()
+
+        pipeline_config = EXAMPLES / "pipeline_output_mode" / "pipeline.yaml"
+        if not pipeline_config.exists():
+            pytest.skip("pipeline_output_mode fixture not present")
+
+        code, _ = run_cli(
+            "pipeline",
+            "debug",
+            str(pipeline_config),
+            "--provider",
+            "ollama",
+            "--model",
+            "test-model",
+            "--json",
+        )
+
+        # The pipeline should complete (success or graceful failure — we care
+        # about the output_mode values seen by the provider, not the exit code).
+        assert code in (0, 1), f"Unexpected exit code {code}"
+
+        assert recorded_requests, "Provider was never called — no LLM requests recorded"
+
+        # Stage 1 (extract) declares output_mode: rl  → first N requests must be "rl"
+        # Stage 2 (classify) declares output_mode: json → remaining requests must be "json"
+        # We identify the boundary by the first request whose output_mode changes.
+        modes = [req.output_mode for req in recorded_requests]
+
+        # There must be at least one call from each stage.
+        assert "rl" in modes, (
+            "No request with output_mode='rl' was issued — stage 1 (output_mode: rl) "
+            "in the YAML was not respected by 'pipeline debug'."
+        )
+        assert "json" in modes, (
+            "No request with output_mode='json' was issued — stage 2 (output_mode: json) "
+            "in the YAML was not respected by 'pipeline debug'. "
+            "Regression: without the fix, supports_structured_output()=False causes "
+            "'auto' to silently override the explicit output_mode: json in the YAML."
+        )
+
+        # All "rl" calls must come before all "json" calls (stage ordering).
+        first_json = next(i for i, m in enumerate(modes) if m == "json")
+        all_before_json_are_rl = all(m == "rl" for m in modes[:first_json])
+        assert all_before_json_are_rl, (
+            f"Expected all requests before the first json call to be 'rl', but got: {modes}"
+        )
+
 
 # ─── Parser (argument parser structure) ──────────────────────────────────────
 
@@ -567,6 +682,16 @@ class TestArgParser:
         p = build_parser()
         args = p.parse_args(["debug", "foo.rl", "--step"])
         assert args.step is True
+
+    def test_debug_max_iter_default(self):
+        p = build_parser()
+        args = p.parse_args(["debug", "foo.rl"])
+        assert args.max_iter == 25
+
+    def test_debug_max_iter_custom(self):
+        p = build_parser()
+        args = p.parse_args(["debug", "foo.rl", "--max-iter", "3"])
+        assert args.max_iter == 3
 
     def test_pipeline_run_subcommand(self):
         p = build_parser()

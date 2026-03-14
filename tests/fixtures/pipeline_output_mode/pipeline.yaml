@@ -32,13 +32,12 @@
 #       --json > tests/fixtures/pipeline_output_mode/output/result.json
 #
 # ── Ollama (local, no API key) ────────────────────────────────────────────
-#   Ollama returns False for supports_structured_output(), so "auto" on
-#   stage 2 would silently downgrade to "rl". For an explicit local run,
-#   override both stages to rl:
+#   Ollama supports schema-constrained structured output via the `format`
+#   field (since Dec 2024), so output_mode="auto" correctly resolves to
+#   "json" for Ollama — no manual override needed.
 #
-#   Edit stage 2 below: output_mode: rl
 #   rof pipeline run tests/fixtures/pipeline_output_mode/pipeline.yaml \
-#       --provider ollama --model gemma3:12b \
+#       --provider ollama --model qwen3.5:9b \
 #       --json > tests/fixtures/pipeline_output_mode/output/result.json
 
 # ── LLM provider (all optional — CLI flags and env vars take precedence) ──
@@ -48,10 +47,9 @@
 
 # ── Pipeline stages ───────────────────────────────────────────────────────
 stages:
-
   - name: extract
     rl_file: 01_extract.rl
-    output_mode: rl                  # plain RelateLang text — works with any model
+    output_mode: rl # plain RelateLang text — works with any model
     description: >
       Extract and validate product and customer data from the seed facts.
       The LLM is asked to respond in RelateLang text (rl mode).
@@ -60,7 +58,7 @@ stages:
 
   - name: classify
     rl_file: 02_classify.rl
-    output_mode: json                # structured JSON schema — best with cloud models
+    output_mode: json # structured JSON schema — best with cloud models
     description: >
       Classify the customer segment and assign a risk tier.
       The LLM is asked for a JSON object matching the rof_graph_update
@@ -70,10 +68,11 @@ stages:
 
 # ── Pipeline-level configuration ─────────────────────────────────────────
 config:
-  on_failure:             halt      # halt | continue | retry
-  retry_count:            2         # retries per stage before giving up
-  inject_prior_context:   true      # stage 2 receives stage 1's RL snapshot
-  max_snapshot_entities:  50        # cap to avoid context window overflow
+  on_failure: halt # halt | continue | retry
+  retry_count: 2 # retries per stage before giving up
+  inject_prior_context: true # stage 2 receives stage 1's RL snapshot
+  max_snapshot_entities: 50 # cap to avoid context window overflow
+
 
 # ── Output ────────────────────────────────────────────────────────────────
 # Pass --json to write the final PipelineResult to stdout as JSON, then

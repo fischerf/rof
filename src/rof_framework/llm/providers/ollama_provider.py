@@ -91,9 +91,19 @@ class OllamaProvider(LLMProvider):
             if request.temperature is not None
             else self._default_temperature,
         }
-        # Ollama OpenAI-compat supports response_format json_object
+        # Ollama OpenAI-compat: send the full JSON schema via json_schema response_format.
+        # This enforces the schema at the sampler level, matching what the native httpx
+        # path does with the `format` field.  Plain `json_object` only guarantees valid
+        # JSON — it does not constrain the shape to the rof_graph_update schema.
         if getattr(request, "output_mode", "json") == "json":
-            params["response_format"] = {"type": "json_object"}
+            params["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "rof_graph_update",
+                    "strict": True,
+                    "schema": ROF_GRAPH_UPDATE_SCHEMA,
+                },
+            }
 
         try:
             resp = self._openai_client.chat.completions.create(**params)  # type: ignore[union-attr]
@@ -148,12 +158,20 @@ class OllamaProvider(LLMProvider):
         return self._use_openai_compat
 
     def supports_structured_output(self) -> bool:
-        # The native httpx path sends Ollama's `format` field, which is
-        # best-effort and model-dependent — not reliable enough to treat as
-        # structured output for output_mode="auto" resolution.
-        # Only the OpenAI-compat path (use_openai_compat=True) sends
-        # response_format={"type": "json_object"} which is actually enforced.
-        return self._use_openai_compat
+        # Both paths enforce the rof_graph_update JSON schema:
+        #
+        #   Native httpx (/api/generate):
+        #     Sends `format: <JSON schema>` — Ollama uses grammar-based sampling
+        #     to constrain the output to the exact schema shape (since Dec 2024).
+        #
+        #   OpenAI-compat (/v1/chat/completions):
+        #     Sends `response_format: {type: json_schema, json_schema: {...}}`
+        #     which also enforces the schema at the sampler level.
+        #
+        # Returning True here means output_mode="auto" will correctly resolve to
+        # "json" for Ollama, so explicit `output_mode: json` in a pipeline YAML
+        # is honoured without needing to set use_openai_compat=True.
+        return True
 
     @property
     def context_limit(self) -> int:

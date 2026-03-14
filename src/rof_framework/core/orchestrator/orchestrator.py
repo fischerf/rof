@@ -185,8 +185,15 @@ class Orchestrator:
             )
 
         self.bus.publish(Event("run.completed", {"run_id": run_id}))
-        success = all(g.status == GoalStatus.ACHIEVED for g in graph.all_goals())
-        return RunResult(run_id=run_id, success=success, steps=steps, snapshot=graph.snapshot())
+        all_goals = graph.all_goals()
+        success = all(g.status == GoalStatus.ACHIEVED for g in all_goals)
+        error: str | None = None
+        if not success:
+            failed = [g.goal.goal_expr for g in all_goals if g.status != GoalStatus.ACHIEVED]
+            error = f"Unachieved goal(s): {', '.join(failed)}"
+        return RunResult(
+            run_id=run_id, success=success, steps=steps, snapshot=graph.snapshot(), error=error
+        )
 
     # ------------------------------------------------------------------
     # Intern: Step-Ausführung
@@ -224,7 +231,25 @@ class Orchestrator:
 
         try:
             response = self.llm_provider.complete(request)
-            self._integrate_response(graph, response, mode)
+            updates = self._integrate_response(graph, response, mode)
+
+            # In RL mode the only signal of a useful response is whether the
+            # parser could extract at least one graph update.  A prose-only
+            # reply (tables, markdown, natural language) yields 0 updates and
+            # should not be silently accepted as ACHIEVED — doing so leaves
+            # goals permanently satisfied with no state written, which causes
+            # downstream goals to fail or the run to succeed vacuously.
+            if updates == 0 and mode == "rl":
+                logger.warning(
+                    "_execute_llm_step: RL response for goal %r produced zero graph "
+                    "updates (prose-only reply) — marking FAILED so the goal can be retried",
+                    goal.goal.goal_expr,
+                )
+                raise ValueError(
+                    f"RL response for goal '{goal.goal.goal_expr}' produced no graph updates "
+                    "(prose-only reply — no RelateLang statements extracted)"
+                )
+
             graph.mark_goal(goal, GoalStatus.ACHIEVED, response.content)
 
             self.bus.publish(
@@ -331,11 +356,37 @@ class Orchestrator:
 
         return best_tool
 
+    # Maximum character length for a predicate value before it is considered
+    # LLM reasoning prose rather than a real state flag.
+    _PREDICATE_MAX_LEN: int = 64
+    # Characters that only appear in prose / decorated output, never in real predicates.
+    _PREDICATE_JUNK_CHARS: str = "→⟶⇒►▶:;|─━\\"
+
+    @staticmethod
+    def _is_valid_predicate(value: str) -> bool:
+        """
+        Return False for values that are clearly LLM reasoning prose written as
+        predicates, e.g.:
+          • "score 740 indicates: Very Good credit tier (720–779 range)"
+          • "has profile → CreditProfile"
+          • "overall risk classification: LOW RISK — applicant …"
+
+        A real predicate is short, contains no sentence-punctuation, and has no
+        special box-drawing / arrow characters.
+        """
+        if len(value) > Orchestrator._PREDICATE_MAX_LEN:
+            return False
+        if any(ch in value for ch in Orchestrator._PREDICATE_JUNK_CHARS):
+            return False
+        return True
+
     def _integrate_response(
         self, graph: WorkflowGraph, response: LLMResponse, output_mode: str = "json"
-    ) -> None:
+    ) -> int:
         """
         Parse the LLM response and apply any state updates to the graph.
+
+        Returns the number of graph updates applied (0 = nothing written).
 
         Dual-mode strategy
         ------------------
@@ -352,9 +403,10 @@ class Orchestrator:
         of which path succeeded — JSON deltas are re-emitted as RL for the trail.
         """
         if output_mode == "json":
-            if self._integrate_json_response(graph, response):
-                return
-            # JSON parse failed (model misbehaved) → fall through to RL fallback
+            json_result = self._integrate_json_response(graph, response)
+            if json_result is not None:
+                return json_result  # parsed OK (may be 0 if model wrote nothing)
+            # JSON parse failed entirely (model misbehaved) → fall through to RL fallback
             logger.warning(
                 "_integrate_response: JSON mode parse failed; falling back to RL extraction"
             )
@@ -362,7 +414,7 @@ class Orchestrator:
         # ── RL parse path (legacy + fallback) ────────────────────────────────
         content = response.content
         if not content or not content.strip():
-            return
+            return 0
 
         candidates = [
             re.sub(r"```[a-zA-Z]*\n?", "", content).strip(),  # fences stripped
@@ -378,14 +430,21 @@ class Orchestrator:
                     graph.set_attribute(a.entity, a.name, a.value)
                     updates += 1
                 for p in sub_ast.predicates:
-                    graph.add_predicate(p.entity, p.value)
-                    updates += 1
+                    if self._is_valid_predicate(p.value):
+                        graph.add_predicate(p.entity, p.value)
+                        updates += 1
+                    else:
+                        logger.debug(
+                            "_integrate_response: skipped junk predicate %r on %s",
+                            p.value,
+                            p.entity,
+                        )
                 if updates:
                     logger.debug(
                         "_integrate_response: applied %d RL update(s) via full parse",
                         updates,
                     )
-                return
+                return updates
             except ParseError:
                 continue
 
@@ -419,8 +478,15 @@ class Orchestrator:
             if any(line_lower.startswith(s) for s in _skip_prefixes):
                 continue
             entity, pred = m.group(1), m.group(2).strip().strip('"')
-            graph.add_predicate(entity, pred)
-            pred_updates += 1
+            if self._is_valid_predicate(pred):
+                graph.add_predicate(entity, pred)
+                pred_updates += 1
+            else:
+                logger.debug(
+                    "_integrate_response: skipped junk predicate %r on %s (regex path)",
+                    pred,
+                    entity,
+                )
 
         if attr_updates or pred_updates:
             logger.debug(
@@ -433,8 +499,9 @@ class Orchestrator:
                 "_integrate_response: response contains no RL statements "
                 "(prose-only response — no graph updates)"
             )
+        return attr_updates + pred_updates
 
-    def _integrate_json_response(self, graph: WorkflowGraph, response: LLMResponse) -> bool:
+    def _integrate_json_response(self, graph: WorkflowGraph, response: LLMResponse) -> int | None:
         """
         Parse a structured JSON response and apply attribute/predicate deltas to the graph.
 
@@ -442,8 +509,8 @@ class Orchestrator:
         - response.tool_calls  → Anthropic tool_use (rof_graph_update tool)
         - response.content     → OpenAI json_schema / Gemini / Ollama format field
 
-        Returns True if at least one valid JSON object was found and applied,
-        False if parsing failed entirely (caller should fall back to RL mode).
+        Returns the number of graph updates applied (>= 0) on success, or None if
+        parsing failed entirely (caller should fall back to RL mode).
         """
         import json as _json
 
@@ -469,10 +536,10 @@ class Orchestrator:
                 data = _json.loads(raw)
             except (_json.JSONDecodeError, ValueError) as exc:
                 logger.debug("_integrate_json_response: JSON parse failed: %s", exc)
-                return False
+                return None
 
         if not data:
-            return False
+            return None
 
         updates = 0
         for attr in data.get("attributes", []):
@@ -487,8 +554,15 @@ class Orchestrator:
             entity = pred.get("entity", "").strip()
             value = pred.get("value", "").strip()
             if entity and value:
-                graph.add_predicate(entity, value)
-                updates += 1
+                if self._is_valid_predicate(value):
+                    graph.add_predicate(entity, value)
+                    updates += 1
+                else:
+                    logger.debug(
+                        "_integrate_json_response: skipped junk predicate %r on %s",
+                        value,
+                        entity,
+                    )
 
         reasoning = data.get("reasoning", "")
         logger.debug(
@@ -496,4 +570,4 @@ class Orchestrator:
             updates,
             reasoning[:120] if reasoning else "",
         )
-        return True  # success even if updates==0 (valid empty response is allowed)
+        return updates  # caller uses this as update count; 0 is still "parsed OK"
