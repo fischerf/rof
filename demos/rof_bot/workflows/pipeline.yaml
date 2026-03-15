@@ -1,35 +1,48 @@
-# pipeline.yaml
+# pipeline.yaml  (lives in workflows/ alongside the .rl files)
 # ROF Bot — 5-stage agentic pipeline topology
 #
-# This file defines stage ordering, context filtering, and per-stage overrides.
-# Domain logic lives in the .rl workflow files, not here.
-# Hot-reload: POST /control/reload swaps .rl files without restarting the service.
+# This file IS loaded at runtime by bot_service/pipeline_factory.py (_load_pipeline_yaml()).
+# It controls:
+#   - Stage names, order, and rl_file paths
+#   - Per-stage context_filter entity lists
+#   - Per-stage inject_context flag
+#   - Per-stage llm_override.model (ROF_DECIDE_MODEL env var takes precedence)
+#   - Pipeline-level config (on_failure, retry_count, retry_delay_s,
+#     inject_prior_context, max_snapshot_entities)
+#
+# Non-serialisable concerns that stay in pipeline_factory.py (not here):
+#   - LLM provider object construction
+#   - Tool instantiation and per-stage tool list overrides
+#   - ConfidentPipeline / RoutingMemory wiring
+#
+# Hot-reload: POST /control/reload re-reads this file and rebuilds the pipeline.
+# rl_file paths are relative to this file's location (workflows/).
 
 name: rof-bot
 description: "5-stage ROF general-purpose agentic bot pipeline"
 
 config:
-  on_failure: continue          # never halt the service on a single-cycle failure
+  on_failure: continue # never halt the service on a single-cycle failure
   retry_count: 2
   retry_delay_s: 2.0
-  inject_prior_context: true    # each stage receives prior-stage snapshot as context
-  max_snapshot_entities: 50     # budget: prevents context window overflow
-  snapshot_merge: accumulate    # entities accumulate across stages within a run
+  inject_prior_context: true # each stage receives prior-stage snapshot as context
+  max_snapshot_entities: 50 # budget: prevents context window overflow
+  snapshot_merge: accumulate # entities accumulate across stages within a run
 
 stages:
   # ── Stage 1: Data Collection ──────────────────────────────────────────────
   # Always runs on fresh data — never seeded from a prior cycle snapshot.
   # Produces: Subject, Context
   - name: collect
-    rl_file: workflows/01_collect.rl
+    rl_file: 01_collect.rl
     description: "Data collection and normalisation from primary source"
-    inject_context: false        # always fresh — never seed from prior cycle
+    inject_context: false # always fresh — never seed from prior cycle
 
   # ── Stage 2: Analysis & Enrichment ───────────────────────────────────────
   # Receives Subject and Context from the collect stage.
   # Produces: Analysis, ExternalSignal
   - name: analyse
-    rl_file: workflows/02_analyse.rl
+    rl_file: 02_analyse.rl
     description: "Analysis, scoring, external signal retrieval, and enrichment"
     context_filter:
       entities: [Subject, Context]
@@ -39,7 +52,7 @@ stages:
   # Hard guardrails block the pipeline; soft guardrails trigger human review.
   # Produces: Constraints, ResourceBudget
   - name: validate
-    rl_file: workflows/03_validate.rl
+    rl_file: 03_validate.rl
     description: "Constraint evaluation and guardrail enforcement"
     context_filter:
       entities: [Subject, Analysis, BotState]
@@ -47,15 +60,16 @@ stages:
   # ── Stage 4: Decision ─────────────────────────────────────────────────────
   # The only stage that uses a powerful (expensive) LLM model.
   # Receives the fully enriched snapshot; produces a typed Decision entity.
-  # The llm_override below is applied by pipeline_factory.py at build time.
+  # llm_override.model is read by pipeline_factory.py at build time.
+  # Override at runtime without editing this file: set ROF_DECIDE_MODEL in .env.
   # Produces: Decision
   - name: decide
-    rl_file: workflows/04_decide.rl
+    rl_file: 04_decide.rl
     description: "Decision synthesis (powerful LLM — claude-opus-4-6)"
     context_filter:
       entities: [Subject, Analysis, Constraints, ResourceBudget]
     llm_override:
-      model: claude-opus-4-6     # overrides ROF_MODEL for this stage only
+      model: claude-opus-4-6 # overrides ROF_MODEL for this stage only
 
   # ── Stage 5: Execution ────────────────────────────────────────────────────
   # Executes the decision via ActionExecutorTool.
@@ -63,8 +77,8 @@ stages:
   # on_failure: continue — a failed action never crashes the service.
   # Produces: Action (written to action_log), updated BotState
   - name: execute
-    rl_file: workflows/05_execute.rl
+    rl_file: 05_execute.rl
     description: "Action execution and audit trail"
     context_filter:
       entities: [Decision, Subject, ResourceBudget, BotState]
-    on_failure: continue         # execution failures are logged, never fatal
+    on_failure: continue # execution failures are logged, never fatal

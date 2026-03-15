@@ -9,3 +9,4 @@ demos/rof_self_demo/
 demos/rof_ai_demo/rof_output/
 src/rof_providers/
 .coverage
+demos/rof_bot/.env

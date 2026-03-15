@@ -12,7 +12,7 @@ define NewsQuery     as "The search topic and parameters for this monitoring cyc
 define SearchResults as "Raw web search results for the configured topic".
 
 // ── Seed values — easily changed to target a different topic ─────────────────
-NewsQuery has topic       of "artificial intelligence safety".
+NewsQuery has topic       of "Organoid Intelligence biological computing using human brain cells research".
 NewsQuery has max_results of 8.
 NewsQuery has recency     of "week".
 

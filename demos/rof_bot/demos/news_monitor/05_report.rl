@@ -46,12 +46,14 @@ ensure compose NewsReport content from all evidence.
 //   NewsReport has saved_at of "<ISO timestamp>".
 ensure write NewsReport to file as markdown.
 
-// Mark the report entity as completed so the pipeline runner can confirm
+// Record the report entity status so the pipeline runner can confirm
 // this stage finished cleanly and include it in the run summary.
-ensure mark NewsReport as completed.
+// NOTE: goal wording avoids "mark/approve/confirm" keywords that could
+// accidentally route to HumanInLoopTool via keyword or memory drift.
+ensure record NewsReport status as completed.
 
 // ── Declarative routing hints ─────────────────────────────────────────────────
 // These are stripped by RoutingHintExtractor before parsing. Lint-safe.
-route goal "write NewsReport"    via FileSaveTool with min_confidence 0.75.
-route goal "compose NewsReport"  via any          with min_confidence 0.60.
-route goal "mark NewsReport"     via any          with min_confidence 0.60.
+route goal "write NewsReport"    via FileSaveTool    with min_confidence 0.75.
+route goal "compose NewsReport"  via any             with min_confidence 0.60.
+route goal "record NewsReport"   via StateManagerTool with min_confidence 0.70.

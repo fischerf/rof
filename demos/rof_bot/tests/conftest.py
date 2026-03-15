@@ -229,9 +229,9 @@ class MockSettings:
         self.rof_decide_model = "stub-decide-model"
 
         self.external_api_key = ""
-        self.external_api_base_url = "http://test.invalid"
+        self.external_api_base_url = ""  # blank by default — matches real Settings
         self.external_signal_api_key = ""
-        self.external_signal_base_url = "http://signals.test.invalid"
+        self.external_signal_base_url = ""  # blank by default — no warning emitted when unset
         self.signal_cache_ttl_seconds = 0  # disable cache in tests
 
         self.database_url = db_url
@@ -554,6 +554,10 @@ def build_pipeline_for_test(mock_settings, all_mock_tools, tmp_db_path: Path):
     ):
         _llm = llm or StubLLMProvider()
         _settings = settings or mock_settings
+        # Use caller-supplied tools, or fall back to the shared mock tool list.
+        # Passing tools= to build_pipeline() skips build_tool_registry() entirely
+        # so no real external calls are made during tests.
+        _tools = tools if tools is not None else all_mock_tools
 
         # Patch create_provider so the factory always gets our stub LLM
         with patch(
@@ -567,6 +571,7 @@ def build_pipeline_for_test(mock_settings, all_mock_tools, tmp_db_path: Path):
                 chromadb_path=str(_TESTS_DIR / ".chromadb_test"),
                 state_tool=None,
                 bus=None,
+                tools=_tools,
             )
 
         # Attach the seed snapshot so callers can pass it directly to run()

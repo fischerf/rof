@@ -454,6 +454,7 @@ def create_app() -> FastAPI:
             "## Quick start\n"
             "1. `POST /control/start` — lint workflows and begin cycling\n"
             "2. `GET /status` — current state\n"
+            "2a. `GET /status/routing` — routing trace summary from last run\n"
             "3. `GET /runs` — pipeline run history\n"
             "4. `WS /ws/feed` — live event stream\n"
             "5. `POST /control/force-run` — trigger one immediate cycle\n"

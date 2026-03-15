@@ -91,17 +91,45 @@ if _PYDANTIC_AVAILABLE:
         # ── External system credentials ─────────────────────────────────
         external_api_key: str = Field(default="", description="Primary external system API key")
         external_api_base_url: str = Field(
-            default="https://api.example.com",
-            description="Primary external system base URL",
+            default="",
+            description=(
+                "Primary external system base URL. "
+                "Set only when using DataSourceTool / ContextEnrichmentTool / ActionExecutorTool directly. "
+                "Workflows that use APICallTool declare endpoints inline in the .rl files."
+            ),
         )
         external_signal_api_key: str = Field(default="", description="Signal source API key")
         external_signal_base_url: str = Field(
-            default="https://signals.example.com",
-            description="Signal source base URL",
+            default="",
+            description=(
+                "Signal source base URL (optional). "
+                "Leave empty if your workflow does not use ExternalSignalTool. "
+                "When empty the tool silently returns signal_available=false — no warning is emitted."
+            ),
         )
         signal_cache_ttl_seconds: int = Field(
             default=300,
             description="Redis TTL for cached external signals (seconds)",
+        )
+
+        # ── Web search ───────────────────────────────────────────────────
+        web_search_backend: str = Field(
+            default="auto",
+            description=(
+                "WebSearchTool backend: auto | duckduckgo | serpapi | brave. "
+                "'auto' tries DuckDuckGo first (no key needed), then falls back "
+                "to SerpAPI / Brave if web_search_api_key is set."
+            ),
+        )
+        web_search_api_key: str = Field(
+            default="",
+            description="API key for SerpAPI or Brave Search (leave empty for DuckDuckGo).",
+        )
+        web_search_max_results: int = Field(
+            default=8,
+            ge=1,
+            le=50,
+            description="Maximum number of web search results returned per query.",
         )
 
         # ── Storage ─────────────────────────────────────────────────────
@@ -279,12 +307,14 @@ else:
             self.rof_decide_model = e.get("ROF_DECIDE_MODEL", "claude-opus-4-6")
 
             self.external_api_key = e.get("EXTERNAL_API_KEY", "")
-            self.external_api_base_url = e.get("EXTERNAL_API_BASE_URL", "https://api.example.com")
+            self.external_api_base_url = e.get("EXTERNAL_API_BASE_URL", "")
             self.external_signal_api_key = e.get("EXTERNAL_SIGNAL_API_KEY", "")
-            self.external_signal_base_url = e.get(
-                "EXTERNAL_SIGNAL_BASE_URL", "https://signals.example.com"
-            )
+            self.external_signal_base_url = e.get("EXTERNAL_SIGNAL_BASE_URL", "")
             self.signal_cache_ttl_seconds = int(e.get("SIGNAL_CACHE_TTL_SECONDS", "300"))
+
+            self.web_search_backend = e.get("WEB_SEARCH_BACKEND", "auto")
+            self.web_search_api_key = e.get("WEB_SEARCH_API_KEY", "")
+            self.web_search_max_results = int(e.get("WEB_SEARCH_MAX_RESULTS", "8"))
 
             self.database_url = e.get("DATABASE_URL", "sqlite:///./rof_bot.db")
             self.redis_url = e.get("REDIS_URL", "redis://localhost:6379/0")

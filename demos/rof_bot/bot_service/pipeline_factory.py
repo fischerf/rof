@@ -10,7 +10,20 @@ This module is the single place where:
   - The RoutingMemory and StateAdapter are wired together
   - Context filters map snapshot entities to each stage
 
-It is imported by main.py at startup and by /control/reload for hot-swaps.
+Stage topology is driven by ``workflows/pipeline.yaml``.  The YAML file is
+loaded by ``_load_pipeline_yaml()`` and controls:
+  - Stage names, order, and rl_file paths
+  - Per-stage ``context_filter`` entity lists
+  - Per-stage ``inject_context`` flag
+  - Per-stage ``llm_override.model`` (maps to the decide LLM provider)
+  - Pipeline-level config (on_failure, retry_count, retry_delay_s,
+    inject_prior_context, max_snapshot_entities)
+
+Non-serialisable Python concerns that *cannot* live in YAML remain here:
+  - LLM provider object construction (needs API key, provider class)
+  - Tool instantiation (needs settings, db_url, chromadb_path)
+  - Per-stage tool list overrides (execute stage gets a RW DatabaseTool)
+  - ConfidentPipeline wiring (RoutingMemory, write_routing_traces, bus)
 
 Async boundary
 --------------
@@ -54,11 +67,15 @@ try:
     from rof_framework.routing.memory import RoutingMemory
     from rof_framework.routing.pipeline import ConfidentPipeline
     from rof_framework.tools import (
+        APICallTool,
+        CodeRunnerTool,
         DatabaseTool,
-        HumanInLoopTool,
+        FileReaderTool,
+        FileSaveTool,
         RAGTool,
         ToolRegistry,
         ValidatorTool,
+        WebSearchTool,
     )
 except ImportError as exc:
     raise ImportError(
@@ -324,9 +341,38 @@ def build_tool_registry(
     registry.register(ValidatorTool())
     logger.debug("build_tool_registry: registered ValidatorTool")
 
-    # HumanInLoopTool — used by 03_validate.rl for constraint breach approval
-    registry.register(HumanInLoopTool())
-    logger.debug("build_tool_registry: registered HumanInLoopTool")
+    # WebSearchTool — used by search/collect stages to retrieve live web results.
+    # Backend auto-selects DuckDuckGo (no key needed) → SerpAPI → Brave → offline mock.
+    # SERPAPI_KEY / BRAVE_SEARCH_API_KEY env vars activate the paid backends.
+    registry.register(
+        WebSearchTool(
+            backend=getattr(settings, "web_search_backend", "auto"),
+            api_key=getattr(settings, "web_search_api_key", "") or None,
+            max_results=getattr(settings, "web_search_max_results", 8),
+        )
+    )
+    logger.debug("build_tool_registry: registered WebSearchTool")
+
+    # FileSaveTool — writes reports / exports to disk (e.g. markdown news reports).
+    # Triggered by goals containing "save file", "write file", "write … to file".
+    registry.register(FileSaveTool())
+    logger.debug("build_tool_registry: registered FileSaveTool")
+
+    # APICallTool — generic HTTP REST caller; useful for webhook notifications,
+    # external audit endpoints, or any ad-hoc API goal the LLM resolves.
+    registry.register(APICallTool())
+    logger.debug("build_tool_registry: registered APICallTool")
+
+    # CodeRunnerTool — sandboxed Python/JS/Lua/shell execution.
+    # Used when a workflow goal asks to run a scoring script or transform data.
+    registry.register(CodeRunnerTool())
+    logger.debug("build_tool_registry: registered CodeRunnerTool")
+
+    # FileReaderTool — reads .txt/.md/.csv/.json/.pdf/.docx/.xlsx files.
+    # Useful for loading reference documents, previous reports, or config files
+    # from disk without a separate RAG query.
+    registry.register(FileReaderTool())
+    logger.debug("build_tool_registry: registered FileReaderTool")
 
     # RAGTool — used by 02_analyse.rl for historical case retrieval
     try:
@@ -357,6 +403,129 @@ def build_tool_registry(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# pipeline.yaml loader
+# ---------------------------------------------------------------------------
+
+#: Fallback stage definitions used when pipeline.yaml cannot be read.
+_FALLBACK_STAGES = [
+    {
+        "name": "collect",
+        "rl_file": "workflows/01_collect.rl",
+        "description": "Data collection and normalisation from primary source",
+        "inject_context": False,
+        "context_filter": {"entities": []},
+    },
+    {
+        "name": "analyse",
+        "rl_file": "workflows/02_analyse.rl",
+        "description": "Analysis, scoring, external signal retrieval, and enrichment",
+        "inject_context": True,
+        "context_filter": {"entities": ["Subject", "Context"]},
+    },
+    {
+        "name": "validate",
+        "rl_file": "workflows/03_validate.rl",
+        "description": "Constraint evaluation and guardrail enforcement",
+        "inject_context": True,
+        "context_filter": {"entities": ["Subject", "Analysis", "BotState"]},
+    },
+    {
+        "name": "decide",
+        "rl_file": "workflows/04_decide.rl",
+        "description": "Decision synthesis (powerful LLM)",
+        "inject_context": True,
+        "context_filter": {"entities": ["Subject", "Analysis", "Constraints", "ResourceBudget"]},
+        "llm_override": {"model": "claude-opus-4-6"},
+    },
+    {
+        "name": "execute",
+        "rl_file": "workflows/05_execute.rl",
+        "description": "Action execution and audit trail",
+        "inject_context": True,
+        "context_filter": {"entities": ["Decision", "Subject", "ResourceBudget", "BotState"]},
+    },
+]
+
+#: Fallback pipeline-level config used when pipeline.yaml cannot be read.
+_FALLBACK_CONFIG = {
+    "on_failure": "continue",
+    "retry_count": 2,
+    "retry_delay_s": 2.0,
+    "inject_prior_context": True,
+    "max_snapshot_entities": 50,
+}
+
+
+def _load_pipeline_yaml(yaml_path: Optional[Path] = None) -> tuple[list[dict], dict]:
+    """
+    Load stage definitions and pipeline config from ``pipeline.yaml``.
+
+    Reads ``workflows/pipeline.yaml`` (relative to the rof_bot root) and
+    returns the stage list and config dict.  Falls back to
+    ``_FALLBACK_STAGES`` / ``_FALLBACK_CONFIG`` if the file is missing or
+    PyYAML is not installed, so the service can always start.
+
+    Parameters
+    ----------
+    yaml_path:
+        Explicit path to ``pipeline.yaml``.  When ``None`` the file is
+        looked up at ``<rof_bot_root>/workflows/pipeline.yaml``.
+
+    Returns
+    -------
+    tuple[list[dict], dict]
+        ``(stages, config)`` — raw dicts straight from the YAML.
+        Callers are responsible for resolving rl_file paths, building
+        lambdas for context_filter, etc.
+    """
+    if yaml_path is None:
+        yaml_path = _HERE / "workflows" / "pipeline.yaml"
+
+    if not yaml_path.exists():
+        logger.warning(
+            "_load_pipeline_yaml: %s not found — using built-in fallback topology",
+            yaml_path,
+        )
+        return list(_FALLBACK_STAGES), dict(_FALLBACK_CONFIG)
+
+    try:
+        import yaml  # type: ignore[import]
+    except ImportError:
+        logger.warning(
+            "_load_pipeline_yaml: PyYAML not installed — using built-in fallback topology. "
+            "Install with: pip install pyyaml"
+        )
+        return list(_FALLBACK_STAGES), dict(_FALLBACK_CONFIG)
+
+    try:
+        raw: dict = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        logger.error(
+            "_load_pipeline_yaml: failed to parse %s (%s) — using built-in fallback topology",
+            yaml_path,
+            exc,
+        )
+        return list(_FALLBACK_STAGES), dict(_FALLBACK_CONFIG)
+
+    stages: list[dict] = raw.get("stages", [])
+    cfg: dict = raw.get("config", {})
+
+    if not stages:
+        logger.warning(
+            "_load_pipeline_yaml: %s has no stages — using built-in fallback topology",
+            yaml_path,
+        )
+        return list(_FALLBACK_STAGES), dict(_FALLBACK_CONFIG)
+
+    logger.info(
+        "_load_pipeline_yaml: loaded %d stages from %s",
+        len(stages),
+        yaml_path,
+    )
+    return stages, cfg
+
+
 def build_pipeline(
     settings: Any,
     routing_memory: Optional[RoutingMemory] = None,
@@ -364,9 +533,17 @@ def build_pipeline(
     chromadb_path: str = "",
     state_tool: Optional[Any] = None,
     bus: Optional[EventBus] = None,
+    pipeline_yaml: Optional[Path] = None,
+    tools: Optional[list] = None,
 ) -> ConfidentPipeline:
     """
     Build and return the ConfidentPipeline for the ROF Bot.
+
+    Stage topology is loaded from ``workflows/pipeline.yaml``.  The YAML
+    controls stage order, rl_file paths, context_filter entity lists,
+    inject_context flags, and the llm_override model name for the decide
+    stage.  Non-serialisable concerns (provider objects, tool instances,
+    RoutingMemory wiring) remain in Python here.
 
     The pipeline uses ConfidentPipeline (not plain Pipeline) so that routing
     decisions are learned over time via EMA-based RoutingMemory.
@@ -387,6 +564,13 @@ def build_pipeline(
     bus:
         EventBus instance for metrics and WebSocket broadcasting.
         When None, a new EventBus is created.
+    pipeline_yaml:
+        Explicit path to ``pipeline.yaml``.  When None the file is
+        resolved automatically from the rof_bot root.
+    tools:
+        Optional pre-built tool list.  When provided, ``build_tool_registry()``
+        is skipped entirely and these tools are used directly.  Intended for
+        tests that inject mock tools so no real external calls are made.
 
     Returns
     -------
@@ -396,147 +580,169 @@ def build_pipeline(
     resolved_db_url = db_url or getattr(settings, "database_url", "sqlite:///./rof_bot.db")
     resolved_chroma = chromadb_path or getattr(settings, "chromadb_path", "./data/chromadb")
 
-    # ── LLM providers ────────────────────────────────────────────────────────
+    # ── Load topology from pipeline.yaml ─────────────────────────────────────
+    stages_cfg, pipeline_cfg = _load_pipeline_yaml(pipeline_yaml)
+
+    # ── LLM providers ─────────────────────────────────────────────────────────
+    # The default provider is used for all stages unless a stage declares
+    # llm_override.model, in which case a second provider is constructed for
+    # that stage.  ROF_DECIDE_MODEL env var takes precedence over the YAML
+    # llm_override so operators can change the model without editing the file.
     provider_name = getattr(settings, "rof_provider", "anthropic")
     default_model = getattr(settings, "rof_model", "claude-sonnet-4-6")
-    decide_model = getattr(settings, "rof_decide_model", "claude-opus-4-6")
     api_key = getattr(settings, "rof_api_key", "")
 
     default_llm = create_provider(provider_name, default_model, api_key)
-    decide_llm = create_provider(provider_name, decide_model, api_key)
+
+    # Build a map of stage_name → llm_provider for stages with llm_override.
+    # The env var ROF_DECIDE_MODEL wins over the YAML value.
+    _override_providers: dict[str, Any] = {}
+    for s in stages_cfg:
+        override = s.get("llm_override", {})
+        if override and isinstance(override, dict):
+            yaml_model = override.get("model", "")
+            if yaml_model:
+                # ROF_DECIDE_MODEL env var wins
+                effective_model = getattr(settings, "rof_decide_model", "") or yaml_model
+                _override_providers[s["name"]] = create_provider(
+                    provider_name, effective_model, api_key
+                )
+                logger.info(
+                    "build_pipeline: stage '%s' llm_override → %s/%s",
+                    s["name"],
+                    provider_name,
+                    effective_model,
+                )
 
     logger.info(
-        "build_pipeline: default_llm=%s/%s  decide_llm=%s/%s",
+        "build_pipeline: default_llm=%s/%s  override_stages=%s",
         provider_name,
         default_model,
-        provider_name,
-        decide_model,
+        list(_override_providers.keys()) or "none",
     )
 
-    # ── Tool registry ─────────────────────────────────────────────────────────
-    registry = build_tool_registry(
-        settings=settings,
-        db_url=resolved_db_url,
-        chromadb_path=resolved_chroma,
-        state_tool=state_tool,
-    )
-
-    # Extract tools list — ConfidentPipeline expects a list of ToolProvider
-    if hasattr(registry, "all_tools"):
-        tools = list(registry.all_tools().values())
+    # ── Tool registry ──────────────────────────────────────────────────────────
+    if tools is not None:
+        # Caller supplied a pre-built tool list (e.g. test mock tools) —
+        # skip registry construction entirely.
+        logger.debug(
+            "build_pipeline: using %d caller-supplied tools — skipping build_tool_registry()",
+            len(tools),
+        )
     else:
-        tools = []
-        logger.warning("build_pipeline: ToolRegistry.all_tools() not available — empty tool list")
+        registry = build_tool_registry(
+            settings=settings,
+            db_url=resolved_db_url,
+            chromadb_path=resolved_chroma,
+            state_tool=state_tool,
+        )
 
-    # Separate read-write DatabaseTool for stage 5 (execute)
+        if hasattr(registry, "all_tools"):
+            tools = list(registry.all_tools().values())
+        else:
+            tools = []
+            logger.warning(
+                "build_pipeline: ToolRegistry.all_tools() not available — empty tool list"
+            )
+
+    # Read-write DatabaseTool for the execute stage — not in the shared registry
+    # because all other stages must never write to the DB directly.
     db_tool_rw = DatabaseTool(dsn=resolved_db_url, read_only=False)
+    execute_tools = tools + [db_tool_rw]
 
-    # ── Routing memory ────────────────────────────────────────────────────────
+    # ── Routing memory ─────────────────────────────────────────────────────────
     memory = routing_memory or RoutingMemory()
 
-    # ── Resolve workflow file paths ───────────────────────────────────────────
-    # Support both running from demos/rof_bot/ and from project root
-    def _resolve_rl(relative_path: str) -> str:
+    # ── Resolve rl_file paths ─────────────────────────────────────────────────
+    # pipeline.yaml paths are relative to workflows/.  Support running from
+    # demos/rof_bot/ or from the project root.
+    _workflows_dir = _HERE / "workflows"
+
+    def _resolve_rl(rl_file: str) -> str:
         candidates = [
-            Path(relative_path),
-            _HERE / relative_path,
+            _workflows_dir / rl_file,  # relative to workflows/ (standard)
+            _HERE / rl_file,  # relative to rof_bot root
+            Path(rl_file),  # absolute or CWD-relative
         ]
         for p in candidates:
             if p.exists():
                 return str(p)
-        # Return the relative path as-is and let the pipeline runner handle it
-        logger.warning("build_pipeline: workflow file not found: %s", relative_path)
-        return relative_path
+        logger.warning("build_pipeline: workflow file not found: %s", rl_file)
+        return rl_file
 
-    rl_collect = _resolve_rl("workflows/01_collect.rl")
-    rl_analyse = _resolve_rl("workflows/02_analyse.rl")
-    rl_validate = _resolve_rl("workflows/03_validate.rl")
-    rl_decide = _resolve_rl("workflows/04_decide.rl")
-    rl_execute = _resolve_rl("workflows/05_execute.rl")
+    # ── Build pipeline stages from YAML ───────────────────────────────────────
+    builder = PipelineBuilder(llm=default_llm, tools=tools, bus=bus)
 
-    logger.debug(
-        "build_pipeline: workflow paths: collect=%s analyse=%s validate=%s decide=%s execute=%s",
-        rl_collect,
-        rl_analyse,
-        rl_validate,
-        rl_decide,
-        rl_execute,
+    for s in stages_cfg:
+        stage_name: str = s["name"]
+        rl_file: str = s.get("rl_file", "")
+        if not rl_file:
+            logger.error("build_pipeline: stage '%s' has no rl_file — skipping", stage_name)
+            continue
+
+        resolved_rl = _resolve_rl(rl_file)
+
+        # context_filter: convert the YAML entity list into a lambda
+        cf_cfg = s.get("context_filter", {})
+        entity_list: list[str] = cf_cfg.get("entities", []) if isinstance(cf_cfg, dict) else []
+        if entity_list:
+            # Capture entity_list by value with a default argument
+            ctx_filter = lambda snap, _ents=entity_list: filter_entities(snap, _ents)
+        else:
+            ctx_filter = None
+
+        inject_ctx: bool = bool(s.get("inject_context", True))
+
+        # Per-stage tool list: execute stage gets the RW DB tool
+        stage_tools = execute_tools if stage_name == "execute" else None
+
+        # Per-stage LLM provider (from llm_override in YAML)
+        stage_llm = _override_providers.get(stage_name)
+
+        logger.debug(
+            "build_pipeline: adding stage '%s' rl=%s inject=%s "
+            "filter=%s llm_override=%s tools_override=%s",
+            stage_name,
+            resolved_rl,
+            inject_ctx,
+            entity_list or "none",
+            bool(stage_llm),
+            stage_tools is not None,
+        )
+
+        builder.stage(
+            name=stage_name,
+            rl_file=resolved_rl,
+            description=s.get("description", ""),
+            inject_context=inject_ctx,
+            context_filter=ctx_filter,
+            llm_provider=stage_llm,  # None → uses pipeline default
+            tools=stage_tools,  # None → uses pipeline default
+        )
+
+    # ── Pipeline-level config from YAML ───────────────────────────────────────
+    _on_fail_str = str(pipeline_cfg.get("on_failure", "continue")).upper()
+    _on_fail = (
+        OnFailure[_on_fail_str] if _on_fail_str in OnFailure.__members__ else OnFailure.CONTINUE
     )
 
-    # ── Build pipeline ────────────────────────────────────────────────────────
-    # Stage 5 (execute) needs both the default tools AND the read-write DB tool.
-    # We append it to the shared tool list for that stage only.
-    execute_tools = tools + [db_tool_rw]
-
-    builder = (
-        PipelineBuilder(
-            llm=default_llm,
-            tools=tools,
-            bus=bus,
-        )
-        # Stage 1: Data Collection — always fresh, no prior-context injection
-        .stage(
-            name="collect",
-            rl_file=rl_collect,
-            description="Data collection and normalisation",
-            inject_context=False,  # always fresh — never seed from prior cycle
-        )
-        # Stage 2: Analysis & Enrichment
-        .stage(
-            name="analyse",
-            rl_file=rl_analyse,
-            description="Analysis, scoring, and external signal retrieval",
-            context_filter=lambda s: filter_entities(s, ["Subject", "Context"]),
-        )
-        # Stage 3: Constraints & Guardrails
-        .stage(
-            name="validate",
-            rl_file=rl_validate,
-            description="Constraint evaluation and guardrail enforcement",
-            context_filter=lambda s: filter_entities(s, ["Subject", "Analysis", "BotState"]),
-        )
-        # Stage 4: Decision — powerful model override
-        .stage(
-            name="decide",
-            rl_file=rl_decide,
-            description="Decision synthesis (powerful LLM)",
-            llm_provider=decide_llm,
-            context_filter=lambda s: filter_entities(
-                s, ["Subject", "Analysis", "Constraints", "ResourceBudget"]
-            ),
-        )
-        # Stage 5: Execution — read-write DB tool, on_failure=continue
-        .stage(
-            name="execute",
-            rl_file=rl_execute,
-            description="Action execution and audit trail",
-            tools=execute_tools,
-            context_filter=lambda s: filter_entities(
-                s, ["Decision", "Subject", "ResourceBudget", "BotState"]
-            ),
-            # on_failure=OnFailure.CONTINUE is set in .config() below;
-            # per-stage on_failure is not directly supported by PipelineStage
-            # in all versions — the pipeline-level config covers this stage.
-        )
-        # Pipeline-level configuration
-        .config(
-            on_failure=OnFailure.CONTINUE,  # never halt service on single-cycle failure
-            retry_count=2,
-            retry_delay_s=2.0,
-            inject_prior_context=True,
-            max_snapshot_entities=50,
-        )
+    builder.config(
+        on_failure=_on_fail,
+        retry_count=int(pipeline_cfg.get("retry_count", 2)),
+        retry_delay_s=float(pipeline_cfg.get("retry_delay_s", 2.0)),
+        inject_prior_context=bool(pipeline_cfg.get("inject_prior_context", True)),
+        max_snapshot_entities=int(pipeline_cfg.get("max_snapshot_entities", 50)),
     )
 
-    # Build as ConfidentPipeline
-    # PipelineBuilder.build() returns a plain Pipeline; we construct
-    # ConfidentPipeline directly using the same parameters.
+    # ── Wrap as ConfidentPipeline ──────────────────────────────────────────────
+    # PipelineBuilder.build() produces a plain Pipeline; we re-wrap its steps
+    # and config into ConfidentPipeline to enable routing memory learning.
     plain_pipeline = builder.build()
 
     confident_pipeline = ConfidentPipeline(
         steps=plain_pipeline._steps,
         llm_provider=default_llm,
-        tools=execute_tools,  # includes read-write DatabaseTool for stage 5
+        tools=execute_tools,  # broadest tool set (execute needs the RW DB tool)
         config=plain_pipeline._config,
         bus=bus,
         routing_memory=memory,
@@ -544,7 +750,8 @@ def build_pipeline(
     )
 
     logger.info(
-        "build_pipeline: ConfidentPipeline ready — %d stages, %d tools, routing_memory=%r",
+        "build_pipeline: ConfidentPipeline ready — %d stages, %d tools, "
+        "routing_memory=%r (loaded from pipeline.yaml)",
         len(plain_pipeline._steps),
         len(tools),
         type(memory).__name__,

@@ -184,7 +184,7 @@ class TestPipelineExecution:
 
                 def complete(self, request: LLMRequest) -> LLMResponse:
                     self.call_count += 1
-                    return LLMResponse(content=f"Stage {self.call_count} complete", raw={})
+                    return LLMResponse(content=f'Stub has status of "complete".', raw={})
 
                 def supports_tool_calling(self) -> bool:
                     return False

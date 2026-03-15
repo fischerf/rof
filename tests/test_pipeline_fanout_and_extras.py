@@ -60,7 +60,7 @@ from rof_framework.pipeline.stage import FanOutGroup, PipelineStage
 class _StubLLM(LLMProvider):
     """Minimal LLM that always succeeds with a canned response."""
 
-    def __init__(self, content: str = "ok"):
+    def __init__(self, content: str = 'Stub has status of "ok".'):
         self._content = content
         self.call_count = 0
         self._lock = threading.Lock()

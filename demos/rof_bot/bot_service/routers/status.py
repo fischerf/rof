@@ -6,6 +6,7 @@ FastAPI router for status, run history, and config read endpoints.
 Endpoints
 ---------
 GET /status                  — current bot state, last cycle result, uptime
+GET /status/routing          — routing trace summary from the last pipeline run
 GET /runs                    — paginated pipeline run history
 GET /runs/{run_id}           — full snapshot for a specific run
 GET /config                  — current bot configuration (read-only view)
@@ -211,6 +212,136 @@ async def get_status(request: "Request") -> dict:
         "dry_run": dry_run,
         "targets": targets,
         "ws_clients": ws_clients,
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /status/routing
+# ---------------------------------------------------------------------------
+
+
+@router.get("/status/routing")
+async def get_routing_status(request: "Request") -> dict:
+    """
+    Return a summary of routing decisions from the most recent pipeline run.
+
+    Extracts all ``RoutingTrace_<stage>_<hash>`` entities from the last
+    snapshot stored on ``app.state.last_snapshot`` and groups them by stage.
+
+    Also reports the size of the in-memory routing memory (number of
+    pattern entries accumulated across all cycles).
+
+    Response fields
+    ---------------
+    run_id              Short run ID the traces belong to (or null)
+    stages              Dict keyed by stage name, each containing a list of
+                        trace dicts with the fields below
+    routing_memory_entries  Total entries in the live RoutingMemory object
+    total_traces        Total number of RoutingTrace entities in the snapshot
+
+    Each trace dict contains
+    ------------------------
+    trace_id            Full entity key (e.g. ``RoutingTrace_analyse_9de63d``)
+    stage               Pipeline stage (analyse / validate / decide / execute)
+    goal_expr           The goal expression that triggered routing
+    goal_pattern        The extracted pattern used for memory lookup
+    tool_selected       Tool the router chose
+    static_confidence   Static (pattern-match) confidence score  0.0–1.0
+    session_confidence  Session-history confidence score          0.0–1.0
+    hist_confidence     Cross-session history confidence score    0.0–1.0
+    composite           Final composite confidence                0.0–1.0
+    dominant_tier       Which tier drove the composite score
+    satisfaction        Post-execution satisfaction score         0.0–1.0
+    is_uncertain        Whether the router flagged uncertainty
+    """
+    app = _get_app(request)
+
+    last_snapshot = getattr(app.state, "last_snapshot", None)
+    routing_memory = getattr(app.state, "routing_memory", None)
+
+    # ── Routing memory size ───────────────────────────────────────────────────
+    routing_memory_entries = 0
+    if routing_memory is not None and hasattr(routing_memory, "dump"):
+        try:
+            routing_memory_entries = len(routing_memory.dump())
+        except Exception:
+            pass
+
+    if not last_snapshot or not isinstance(last_snapshot, dict):
+        return {
+            "run_id": None,
+            "stages": {},
+            "routing_memory_entries": routing_memory_entries,
+            "total_traces": 0,
+            "detail": "No completed pipeline run found yet — start the bot and wait for a cycle.",
+        }
+
+    entities = last_snapshot.get("entities", {})
+
+    # ── Collect all RoutingTrace entities ─────────────────────────────────────
+    traces: list[dict] = []
+    for key, value in entities.items():
+        if not key.startswith("RoutingTrace_"):
+            continue
+        if not isinstance(value, dict):
+            continue
+
+        attrs = value.get("attributes", {})
+
+        # Parse stage from key: RoutingTrace_<stage>_<hash>
+        parts = key.split("_")
+        # parts[0] = "RoutingTrace", parts[1] = stage, parts[2] = hash
+        stage = parts[1] if len(parts) >= 3 else "unknown"
+
+        traces.append(
+            {
+                "trace_id": key,
+                "stage": attrs.get("stage", stage),
+                "goal_expr": attrs.get("goal_expr", ""),
+                "goal_pattern": attrs.get("goal_pattern", ""),
+                "tool_selected": attrs.get("tool_selected", ""),
+                "static_confidence": attrs.get("static_confidence"),
+                "session_confidence": attrs.get("session_confidence"),
+                "hist_confidence": attrs.get("hist_confidence"),
+                "composite": attrs.get("composite"),
+                "dominant_tier": attrs.get("dominant_tier", ""),
+                "satisfaction": attrs.get("satisfaction"),
+                "is_uncertain": attrs.get("is_uncertain", "False"),
+                "run_id_short": attrs.get("run_id_short", ""),
+            }
+        )
+
+    # ── Group by stage in pipeline order ─────────────────────────────────────
+    _STAGE_ORDER = ["analyse", "validate", "decide", "execute"]
+
+    stages: dict[str, list[dict]] = {}
+    for trace in traces:
+        s = trace["stage"]
+        stages.setdefault(s, []).append(trace)
+
+    # Sort each stage's traces by trace_id for stable ordering
+    for s in stages:
+        stages[s].sort(key=lambda t: t["trace_id"])
+
+    # Return stages in pipeline order (unknown stages appended at the end)
+    ordered_stages: dict[str, list[dict]] = {}
+    for s in _STAGE_ORDER:
+        if s in stages:
+            ordered_stages[s] = stages[s]
+    for s in stages:
+        if s not in ordered_stages:
+            ordered_stages[s] = stages[s]
+
+    # ── Derive run_id from first trace ───────────────────────────────────────
+    run_id_short: Optional[str] = None
+    if traces:
+        run_id_short = traces[0].get("run_id_short") or None
+
+    return {
+        "run_id": run_id_short,
+        "stages": ordered_stages,
+        "routing_memory_entries": routing_memory_entries,
+        "total_traces": len(traces),
     }
 
 

@@ -68,39 +68,62 @@ Every cycle (e.g. every 60 seconds):
 
 ---
 
-### What the four external URLs are for
+### What the external credentials are for
 
-This is where it clicks. There are **two distinct external integrations**, each with two config values (URL + key):
+There are **two optional external integrations**, each with a URL and an optional API key.
+Both default to empty — no fake placeholder URLs are shipped.
 
 ```
 EXTERNAL_API_BASE_URL   ┐
-EXTERNAL_API_KEY        ┘  ← THE THING YOU OPERATE ON
-                              (your primary system)
+EXTERNAL_API_KEY        ┘  ← YOUR PRIMARY SYSTEM  (optional key)
 
 EXTERNAL_SIGNAL_BASE_URL  ┐
-EXTERNAL_SIGNAL_API_KEY   ┘  ← AN ADVISORY INPUT FROM A SECOND SOURCE
-                               (optional — tells you something about the thing)
+EXTERNAL_SIGNAL_API_KEY   ┘  ← AN ADVISORY SECOND SOURCE  (optional key)
 ```
 
-**`EXTERNAL_API_BASE_URL` + `EXTERNAL_API_KEY`** — Your **primary system**. This is what the bot *reads from* (Stage 1 `DataSourceTool`) and *acts upon* (Stage 5 `ActionExecutorTool`). Used by three tools via the same base URL:
+**API keys are never required by the framework** — only set them when the endpoint you are calling actually needs authentication.  Public APIs, internal services on a trusted network, or endpoints that use other auth mechanisms (e.g. mTLS, IP allowlist) work fine with the key left blank.
 
-| Tool | Endpoint called | Purpose |
-|------|----------------|---------|
+---
+
+**`EXTERNAL_API_BASE_URL` / `EXTERNAL_API_KEY`** — Your **primary system**.  Used only when you implement `DataSourceTool`, `ContextEnrichmentTool`, or `ActionExecutorTool` directly and want a single shared base URL injected at startup.
+
+| Tool | Default endpoint pattern | Purpose |
+|------|--------------------------|---------|
 | `DataSourceTool` | `GET {BASE_URL}/subjects/{id}` | Fetch the item to process |
 | `ContextEnrichmentTool` | `GET {BASE_URL}/context/{id}` | Fetch history/context for the item |
 | `ActionExecutorTool` | `POST {BASE_URL}/actions` | Execute the decision |
 
-**`EXTERNAL_SIGNAL_BASE_URL` + `EXTERNAL_SIGNAL_API_KEY`** — A **second, read-only advisory source**. Used only by `ExternalSignalTool` in Stage 2 to enrich the analysis with an external data point. The signal is advisory — the pipeline doesn't hard-fail if it's unavailable. Think of it as "what does a second opinion say about this item?"
+**If your workflow uses `APICallTool` instead**, leave `EXTERNAL_API_BASE_URL` empty and declare the endpoint directly in the `.rl` file:
+
+```
+ensure retrieve subject_data from "https://your-api.example.com/v1/subjects".
+route goal "retrieve subject_data" via APICallTool with min_confidence 0.85.
+```
+
+This keeps the URL co-located with the logic that uses it and removes the need for a globally shared base URL.
+
+---
+
+**`EXTERNAL_SIGNAL_BASE_URL` / `EXTERNAL_SIGNAL_API_KEY`** — A **second, read-only advisory source**.  Used only by `ExternalSignalTool` in Stage 2.  The signal is purely advisory — the pipeline never hard-fails when it is unavailable; `ExternalSignal has signal_available of "false"` is returned silently and downstream rules branch on that value.
+
+**When left empty**: no warning is emitted.  The tool enters its unavailable path immediately and the pipeline continues normally.
+
+As with the primary API, you can skip `ExternalSignalTool` entirely and call the signal endpoint directly from the `.rl` file via `APICallTool`:
+
+```
+ensure retrieve ExternalSignal from "https://your-signal-source.example.com/v1/signals".
+route goal "retrieve ExternalSignal" via APICallTool with min_confidence 0.75.
+```
 
 **Concrete examples across domains:**
 
-| Bot type | `EXTERNAL_API` (primary) | `EXTERNAL_SIGNAL` (advisory) |
-|----------|--------------------------|------------------------------|
-| Support bot | Zendesk / Freshdesk API | Customer health score from CRM |
-| DevOps bot | PagerDuty / Alertmanager | Deployment freeze status API |
-| Content moderation | Content queue API | Spam score from ML service |
-| Research bot | RSS / News API | Fact-check score from 3rd party |
-| **Our test example** | **JSONPlaceholder (fake REST)** | **None / stub** |
+| Bot type | Primary API | Signal source | Key needed? |
+|----------|-------------|---------------|-------------|
+| Support bot | Zendesk / Freshdesk API | Customer health score from CRM | Usually yes |
+| DevOps bot | PagerDuty / Alertmanager | Deployment freeze status API | Depends |
+| Content moderation | Content queue API | Spam score from ML service | Usually yes |
+| Research bot | RSS / News API | Fact-check score from 3rd party | Depends |
+| **News monitor demo** | **WebSearchTool (no external API)** | **None** | **—** |
 
 ---
 

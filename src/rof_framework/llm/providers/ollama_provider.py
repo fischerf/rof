@@ -91,9 +91,19 @@ class OllamaProvider(LLMProvider):
             if request.temperature is not None
             else self._default_temperature,
         }
-        # Ollama OpenAI-compat supports response_format json_object
+        # Ollama OpenAI-compat: send the full JSON schema via json_schema response_format.
+        # This enforces the schema at the sampler level, matching what the native httpx
+        # path does with the `format` field.  Plain `json_object` only guarantees valid
+        # JSON — it does not constrain the shape to the rof_graph_update schema.
         if getattr(request, "output_mode", "json") == "json":
-            params["response_format"] = {"type": "json_object"}
+            params["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "rof_graph_update",
+                    "strict": True,
+                    "schema": ROF_GRAPH_UPDATE_SCHEMA,
+                },
+            }
 
         try:
             resp = self._openai_client.chat.completions.create(**params)  # type: ignore[union-attr]
@@ -104,16 +114,55 @@ class OllamaProvider(LLMProvider):
         return LLMResponse(content=content, raw=resp.model_dump(), tool_calls=[])
 
     def _complete_via_httpx(self, request: LLMRequest) -> LLMResponse:
-        """Direct Ollama API call without the openai SDK."""
+        """Direct Ollama API call using /api/chat (supports thinking models, system messages).
+
+        Thinking-model compatibility (qwen3, deepseek-r1, etc.)
+        --------------------------------------------------------
+        Ollama thinking models (any model that exposes a <think> block) behave
+        differently depending on the combination of `think` and `format` fields:
+
+          think=omitted, format=<schema>  → content populated, but SLOW (thinking tokens
+                                            are counted against num_predict, so 512 tokens
+                                            is often exhausted before the JSON is written;
+                                            done_reason=length → content='')
+          think=false,   format=<schema>  → format constraint is IGNORED by the model;
+                                            returns prose (schema not enforced at sampler)
+          think=omitted, format=omitted   → content='' (all output goes to message.thinking)
+          think=false,   format=omitted   → content populated with prose ✓  (RL mode)
+          think=false,   format="json"    → content populated with valid JSON ✓  (JSON mode)
+
+        The pragmatic fix is therefore:
+          • Always send think=false to disable the thinking chain entirely.
+          • For JSON mode use format="json" (the simple string form) which instructs
+            the model to emit valid JSON without grammar-constraining the schema shape.
+            Schema shape is already enforced via the system prompt that the ROF
+            orchestrator injects, so grammar constraints are redundant here.
+          • For RL mode omit format so the model produces free-form prose.
+        """
         try:
             import httpx  # type: ignore[import-untyped,import-not-found]
         except ImportError as e:
             raise ImportError("httpx not installed. Run: pip install httpx") from e
 
+        # Build messages array — /api/chat is the correct modern endpoint.
+        # /api/generate uses a flat `prompt` + `response` shape which:
+        #   - puts thinking-model output into `response` and returns empty content
+        #   - requires `system` as a separate top-level field (ignored by some models)
+        # /api/chat uses `messages` + `message.content` which works correctly for
+        # all model families including thinking models (qwen3, deepseek-r1, etc.).
+        messages: list[dict[str, str]] = []
+        if request.system:
+            messages.append({"role": "system", "content": request.system})
+        messages.append({"role": "user", "content": request.prompt})
+
         payload: dict[str, Any] = {
             "model": self._model,
-            "prompt": request.prompt,
+            "messages": messages,
             "stream": False,
+            # Disable the thinking chain so that output goes to message.content
+            # rather than message.thinking.  Without this, thinking models exhaust
+            # num_predict on internal reasoning and return an empty content field.
+            "think": False,
             "options": {
                 "num_predict": request.max_tokens or self._default_max_tokens,
                 "temperature": request.temperature
@@ -121,16 +170,19 @@ class OllamaProvider(LLMProvider):
                 else self._default_temperature,
             },
         }
-        if request.system:
-            payload["system"] = request.system
 
-        # Ollama native API supports a `format` field for JSON schema enforcement
+        # For JSON output mode use format="json" (simple string).
+        # This instructs Ollama to guarantee the output is valid JSON without
+        # grammar-constraining it to a specific schema object — the latter breaks
+        # with think=false (the model ignores the schema and returns prose instead).
+        # The rof_graph_update schema shape is already enforced through the system
+        # prompt constructed by the ROF orchestrator.
         if getattr(request, "output_mode", "json") == "json":
-            payload["format"] = ROF_GRAPH_UPDATE_SCHEMA
+            payload["format"] = "json"
 
         try:
             r = httpx.post(
-                f"{self._base_url}/api/generate",
+                f"{self._base_url}/api/chat",
                 json=payload,
                 timeout=request.timeout if request.timeout is not None else self._timeout,
             )
@@ -141,19 +193,34 @@ class OllamaProvider(LLMProvider):
             raise ProviderError(f"Ollama HTTP call failed: {e}") from e
 
         data = r.json()
-        content = data.get("response", "")
+        # /api/chat response shape: {"message": {"role": "assistant", "content": "..."}}
+        content = data.get("message", {}).get("content", "")
         return LLMResponse(content=content, raw=data, tool_calls=[])
 
     def supports_tool_calling(self) -> bool:
         return self._use_openai_compat
 
     def supports_structured_output(self) -> bool:
-        # The native httpx path sends Ollama's `format` field, which is
-        # best-effort and model-dependent — not reliable enough to treat as
-        # structured output for output_mode="auto" resolution.
-        # Only the OpenAI-compat path (use_openai_compat=True) sends
-        # response_format={"type": "json_object"} which is actually enforced.
-        return self._use_openai_compat
+        # Both paths produce valid JSON output when output_mode="json":
+        #
+        #   Native httpx (/api/chat):
+        #     Sends think=false + format="json" (simple string form).
+        #     think=false prevents thinking models (qwen3, deepseek-r1, etc.) from
+        #     exhausting num_predict tokens on internal reasoning, which would leave
+        #     message.content empty.  format="json" guarantees the output is valid
+        #     JSON; the rof_graph_update schema shape is enforced via the system
+        #     prompt that the ROF orchestrator constructs (grammar-constraining with
+        #     a schema object breaks when think=false — the model ignores the
+        #     constraint and returns prose).
+        #
+        #   OpenAI-compat (/v1/chat/completions):
+        #     Sends response_format={type: json_schema, json_schema: {...}}
+        #     which enforces the schema at the sampler level.
+        #
+        # Returning True here means output_mode="auto" will correctly resolve to
+        # "json" for Ollama, so explicit `output_mode: json` in a pipeline YAML
+        # is honoured without needing to set use_openai_compat=True.
+        return True
 
     @property
     def context_limit(self) -> int:
