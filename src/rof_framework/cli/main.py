@@ -680,6 +680,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         max_iterations=getattr(args, "max_iter", 25),
         auto_save_state=False,
         pause_on_error=False,
+        output_mode=getattr(args, "output_mode", "auto"),
     )
 
     # ── Inject tools ──────────────────────────────────────────────────────
@@ -921,11 +922,19 @@ def cmd_debug(args: argparse.Namespace) -> int:
         def supports_tool_calling(self) -> bool:
             return self._inner.supports_tool_calling()
 
+        def supports_structured_output(self) -> bool:
+            return self._inner.supports_structured_output()
+
         @property
         def context_limit(self) -> int:
             return self._inner.context_limit
 
-    config = core.OrchestratorConfig(auto_save_state=False, pause_on_error=False)
+    config = core.OrchestratorConfig(
+        max_iterations=getattr(args, "max_iter", 25),
+        auto_save_state=False,
+        pause_on_error=False,
+        output_mode=getattr(args, "output_mode", "auto"),
+    )
     orch = core.Orchestrator(
         llm_provider=_DebugProvider(provider),
         bus=bus,
@@ -1243,6 +1252,9 @@ def cmd_pipeline_debug(args: argparse.Namespace) -> int:
         def supports_tool_calling(self) -> bool:
             return self._inner.supports_tool_calling()
 
+        def supports_structured_output(self) -> bool:
+            return self._inner.supports_structured_output()
+
         @property
         def context_limit(self) -> int:
             return self._inner.context_limit
@@ -1273,15 +1285,38 @@ def cmd_pipeline_debug(args: argparse.Namespace) -> int:
 
     for s in stages_cfg:
         rl_file = s.get("rl_file", "")
+        stage_output_mode = s.get("output_mode", "auto")
+
+        # Build a per-stage OrchestratorConfig when the stage explicitly
+        # overrides output_mode — mirrors cmd_pipeline_run behaviour so that
+        # output_mode: json/rl in the YAML is honoured during debug runs too.
+        stage_orch_cfg = None
+        if stage_output_mode != "auto":
+            stage_orch_cfg = core.OrchestratorConfig(
+                auto_save_state=False,
+                pause_on_error=False,
+                output_mode=stage_output_mode,
+            )
+
         if rl_file:
             resolved = str(base_dir / rl_file)
-            builder.stage(name=s["name"], rl_file=resolved, description=s.get("description", ""))
+            builder.stage(
+                name=s["name"],
+                rl_file=resolved,
+                description=s.get("description", ""),
+                orch_config=stage_orch_cfg,
+            )
         else:
             rl_source = s.get("rl_source", "")
             if not rl_source:
                 _err(f"Stage '{s.get('name', '?')}' needs rl_file or rl_source.")
                 return 2
-            builder.stage(name=s["name"], rl_source=rl_source, description=s.get("description", ""))
+            builder.stage(
+                name=s["name"],
+                rl_source=rl_source,
+                description=s.get("description", ""),
+                orch_config=stage_orch_cfg,
+            )
 
     cfg_raw = raw.get("config", {})
     on_fail_str = cfg_raw.get("on_failure", "halt").upper()
@@ -1463,6 +1498,7 @@ def build_parser() -> argparse.ArgumentParser:
               rof run customer.rl --provider anthropic --model claude-sonnet-4-5
               rof run customer.rl --json --output-snapshot snap.json
               rof debug customer.rl --step
+              rof debug customer.rl --max-iter 5 --provider openai
               rof pipeline run pipeline.yaml
               rof pipeline run pipeline.yaml --verbose
               rof pipeline debug pipeline.yaml
@@ -1539,6 +1575,19 @@ def build_parser() -> argparse.ArgumentParser:
         dest="seed_snapshot",
         help="Load initial snapshot from a JSON file",
     )
+    p_run.add_argument(
+        "--output-mode",
+        dest="output_mode",
+        choices=["auto", "json", "rl"],
+        default="auto",
+        help=(
+            "How the LLM is asked to respond. "
+            "'auto' uses 'json' when the provider supports structured output, otherwise 'rl'. "
+            "'json' enforces the rof_graph_update JSON schema (all providers including Ollama). "
+            "'rl' requests plain RelateLang text (legacy fallback). "
+            "Default: auto"
+        ),
+    )
     _provider_args(p_run)
 
     # ── debug ─────────────────────────────────────────────────────────────
@@ -1548,6 +1597,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--step", action="store_true", help="Pause and wait for Enter after each step"
     )
     p_dbg.add_argument("--json", action="store_true", help="Output full trace as JSON")
+    p_dbg.add_argument(
+        "--max-iter",
+        dest="max_iter",
+        type=int,
+        default=25,
+        help="Maximum orchestrator iterations (default: 25)",
+    )
+    p_dbg.add_argument(
+        "--output-mode",
+        dest="output_mode",
+        choices=["auto", "json", "rl"],
+        default="auto",
+        help=(
+            "How the LLM is asked to respond. "
+            "'auto' uses 'json' when the provider supports structured output, otherwise 'rl'. "
+            "'json' enforces the rof_graph_update JSON schema (all providers including Ollama). "
+            "'rl' requests plain RelateLang text (legacy fallback). "
+            "Default: auto"
+        ),
+    )
     _provider_args(p_dbg)
 
     # ── pipeline ──────────────────────────────────────────────────────────

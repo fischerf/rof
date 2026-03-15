@@ -129,7 +129,7 @@ stages:
   - name: gather
     rl_file: 01_gather.rl
     model: gemma3:12b          # cheap local model for extraction
-    output_mode: rl            # Ollama: no structured output → RL + regex fallback
+    output_mode: auto          # Ollama: structured output supported — auto resolves to json
   - name: decide
     rl_file: 03_decide.rl
     model: claude-opus-4-5     # powerful model for final reasoning
@@ -143,8 +143,8 @@ This enables cost optimisation (cheap model for simple extraction, expensive mod
 | `output_mode` | Best for | How it works |
 |---|---|---|
 | `"auto"` *(default)* | Any provider | Uses `"json"` if `provider.supports_structured_output()`, otherwise `"rl"` |
-| `"json"` | OpenAI, Anthropic, Gemini, Ollama ≥ 0.4 | JSON schema enforced; response parsed as structured object; re-emitted as RL for the audit trail |
-| `"rl"` | Ollama local models, older APIs | Full RLParser attempt; regex line-by-line fallback; RetryManager re-prompts with an RL hint on failure |
+| `"json"` | OpenAI, Anthropic, Gemini, Ollama | JSON schema enforced at the sampler level; response parsed as structured object; re-emitted as RL for the audit trail |
+| `"rl"` | Older/custom APIs, fine-tuned models | Full RLParser attempt; regex line-by-line fallback; RetryManager re-prompts with an RL hint on failure |
 
 Both paths produce the same graph delta (entity / attribute / predicate updates) and the same immutable RL audit snapshot — the output mode only affects how the LLM is asked to respond and how the response is decoded.
 
@@ -891,8 +891,10 @@ without writing any Python.
 
 ```
   Prints every LLM prompt (system + user) and raw response for each goal.
-  --step    Pause and wait for Enter after each step
-  --json    Output full trace including all LLM prompts/responses as JSON
+  --step          Pause and wait for Enter after each step
+  --json          Output full trace including all LLM prompts/responses as JSON
+  --max-iter N    Max orchestrator iterations (default: 25)
+  + provider flags (see below)
 ```
 
 **`rof pipeline run`** — YAML-driven pipeline

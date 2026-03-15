@@ -393,8 +393,8 @@ python rof_ai_demo.py --provider github_copilot
 | Value | When to use |
 |-------|-------------|
 | `auto` | Uses `json` if the provider supports structured output, otherwise `rl`. Safe default. |
-| `json` | Enforce the `rof_graph_update` JSON schema. Best for cloud models (OpenAI, Anthropic). |
-| `rl` | Plain RelateLang text. Works with any model including local Ollama. |
+| `json` | Enforce the `rof_graph_update` JSON schema. Works with OpenAI, Anthropic, Gemini, and Ollama (≥ 0.4, grammar-sampled). |
+| `rl` | Plain RelateLang text. Legacy / fallback mode. Use when targeting very old APIs or models that ignore schema constraints. |
 
 ### GitHub Copilot options
 

@@ -1,123 +1,63 @@
 // 04_decide.rl
 // Stage 4 — Decision
 //
-// Purpose: The only stage that uses a powerful (expensive) LLM. Receives a
-// fully enriched snapshot and applies domain logic to produce a typed
-// Decision entity. The LLM override (claude-opus-4-6) is set in pipeline.yaml
-// and pipeline_factory.py — not here.
+// Purpose: Determine whether the retrieved news warrants a report, should be
+// skipped, or should be deferred for a later cycle. This is the only stage
+// that uses a more capable LLM (set via llm_override in pipeline.yaml).
 //
-// Receives: Subject, Analysis, Constraints, ResourceBudget (context_filter)
-// Produces: Decision
+// Receives: NewsAnalysis, MonitorConstraints
+// Produces: ReportDecision
 //
-// output_mode: json   (structured, schema-enforced output)
+// output_mode: json
 // llm: claude-opus-4-6  (per-stage model override — set in pipeline.yaml)
 
-define Decision        as "The action to take for this Subject this cycle".
-define Subject         as "The item being processed this cycle".
-define Analysis        as "Derived analytical result for the current Subject".
-define Constraints     as "Current operational limit assessment".
-define ResourceBudget  as "Available capacity for this action cycle".
-define BotState        as "Persistent operational metrics from the state store".
+define NewsAnalysis       as "Credibility and significance assessment of retrieved news".
+define MonitorConstraints as "Operational limits for this monitoring cycle".
+define ReportDecision     as "Whether and how to generate the report".
 
-// ── Priority classification ────────────────────────────────────────────────────
-// High-confidence + priority category → immediate action candidate.
+// ── Priority paths ────────────────────────────────────────────────────────────
+// High-significance news with a clear data set → high-priority report.
 
-if Analysis has confidence_level of "high" and Analysis has subject_category of "priority",
-    then ensure Subject is immediate_action_candidate.
+if NewsAnalysis has overall_significance of "high"
+    and MonitorConstraints is ready_to_decide,
+    then ensure ReportDecision is high_priority_report.
 
-// ── Defer candidates ──────────────────────────────────────────────────────────
-// Low confidence → defer for human or next-cycle review.
+// Medium-significance news with a clear data set → standard report.
 
-if Analysis has confidence_level of "low",
-    then ensure Subject is defer_for_review_candidate.
+if NewsAnalysis has overall_significance of "medium"
+    and MonitorConstraints is ready_to_decide,
+    then ensure ReportDecision is standard_report.
 
-// ── Forced defer due to operational limits ────────────────────────────────────
-// Hard guardrails from 03_validate.rl override any analysis-based path.
-// This predicate blocks PrimaryAction evaluation below.
+// ── Skip paths ────────────────────────────────────────────────────────────────
+// When guardrails flagged a data problem, skip the report entirely.
 
-if Constraints is resource_limit_reached or Constraints is concurrency_limit_reached,
-    then ensure Decision is forced_defer.
+if MonitorConstraints is no_results_found
+    or MonitorConstraints is insufficient_data,
+    then ensure ReportDecision is skip_report.
 
-// ── Primary action evaluation ─────────────────────────────────────────────────
-// All four conditions must hold:
-//   1. Subject is an immediate action candidate (analysis says go)
-//   2. Decision has not been force-deferred (operational limits clear)
-//   3. Error budget has not been exhausted (today's failure rate is within budget)
-//   4. Confidence threshold of 0.65 is met (routing contract)
+// ── Goals ─────────────────────────────────────────────────────────────────────
 
-if Subject is immediate_action_candidate
-    and not Decision is forced_defer
-    and Constraints is not error_budget_exhausted,
-    then ensure evaluate PrimaryAction for Decision with confidence threshold 0.65.
+// The LLM must resolve the evaluated paths above into a single authoritative
+// action: generate_report, skip_report, or defer_report.
+ensure determine ReportDecision as one of: generate_report, skip_report, defer_report.
 
-// ── Defer evaluation ──────────────────────────────────────────────────────────
-// Covers both analysis-driven defer and forced defer paths.
+// Assign a numeric confidence score so the confidence floor below can gate
+// uncertain decisions without producing an unreliable report.
+ensure assign confidence_score to ReportDecision between 0.0 and 1.0.
 
-if Subject is defer_for_review_candidate,
-    then ensure evaluate DeferAction for Decision.
-
-if Decision is forced_defer,
-    then ensure evaluate DeferAction for Decision.
-
-// ── Escalation path ───────────────────────────────────────────────────────────
-// Medium confidence with priority subject → escalate for human review
-// rather than acting autonomously or silently deferring.
-
-if Analysis has confidence_level of "medium"
-    and Analysis has subject_category of "priority"
-    and Constraints is operational_limits_clear,
-    then ensure evaluate EscalateAction for Decision.
-
-// ── Skip path ─────────────────────────────────────────────────────────────────
-// When data was incomplete at collection time, skip this cycle entirely
-// and record the reason so the operator can investigate the source system.
-
-if Analysis has subject_category of "unknown",
-    then ensure evaluate SkipAction for Decision with reason "data_incomplete".
-
-// ── Final decision synthesis ──────────────────────────────────────────────────
-// The LLM must resolve the evaluated actions above into a single authoritative
-// decision with a numeric confidence score and a human-readable explanation.
-//
-// Action vocabulary (domain-neutral):
-//   proceed   — execute the primary action
-//   defer     — delay to the next cycle or human review queue
-//   escalate  — hand off to a human operator immediately
-//   skip      — record and discard this cycle (data/system issue)
-//
-// Domain adaptation note: replace these verbs with domain-appropriate values.
-// Examples:
-//   Moderation bot:  approve / reject / review / ignore
-//   Support bot:     resolve / reassign / escalate / close
-//   DevOps bot:      remediate / defer / page / acknowledge
-
-ensure determine final Decision as one of: proceed, defer, escalate, skip.
-ensure assign confidence_score to Decision between 0.0 and 1.0.
-ensure assign reasoning_summary to Decision in plain text.
+// Provide a human-readable explanation of why this decision was reached,
+// including which signals were most influential.
+ensure assign reasoning to ReportDecision.
 
 // ── Confidence floor enforcement ──────────────────────────────────────────────
-// If the LLM cannot meet the minimum confidence floor for any action,
-// the decision defaults to defer. This prevents uncertain autonomous action.
+// If the LLM cannot confidently commit to generate_report, default to
+// defer_report so the operator can review rather than act on weak signals.
 
-if Decision has confidence_score < 0.50,
-    then ensure Decision has action of "defer".
+if ReportDecision has confidence_score < 0.40,
+    then ensure ReportDecision has action of "defer_report".
 
-if Decision has confidence_score < 0.50,
-    then ensure Decision has reasoning_summary of "Confidence below threshold — defaulting to defer for safety".
-
-// ── Dry-run annotation ────────────────────────────────────────────────────────
-// Annotate the decision with the dry-run flag so 05_execute.rl and
-// ActionExecutorTool can surface it in logs without re-reading settings.
-// The actual dry-run gate is enforced at the tool layer, not here.
-
-ensure annotate Decision with dry_run_active from BotState configuration.
-
-// ── Declarative routing hints ──────────────────────────────────────────────────
-// High confidence required for the final decision goal — this is the most
-// consequential step in the pipeline.
-route goal "evaluate PrimaryAction"   via any with min_confidence 0.65.
-route goal "evaluate DeferAction"     via any with min_confidence 0.60.
-route goal "evaluate EscalateAction"  via any with min_confidence 0.65.
-route goal "evaluate SkipAction"      via any with min_confidence 0.60.
-route goal "determine final Decision" via any with min_confidence 0.70.
-route goal "annotate Decision"        via any with min_confidence 0.60.
+// ── Declarative routing hints ─────────────────────────────────────────────────
+// These are stripped by RoutingHintExtractor before parsing. Lint-safe.
+route goal "determine ReportDecision"    via any with min_confidence 0.65.
+route goal "assign confidence_score"     via any with min_confidence 0.65.
+route goal "assign reasoning"            via any with min_confidence 0.65.
