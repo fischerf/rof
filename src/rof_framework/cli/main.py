@@ -402,12 +402,26 @@ def cmd_version(args: argparse.Namespace) -> int:
         except ImportError:
             pass
 
+        core_modules: dict[str, str] = {}
+        for mod in [
+            "rof_framework.core",
+            "rof_framework.llm",
+            "rof_framework.tools",
+            "rof_framework.pipeline",
+            "rof_framework.routing",
+        ]:
+            try:
+                __import__(mod)
+                core_modules[mod] = "ok"
+            except ImportError:
+                core_modules[mod] = "not found"
+
         print(
             json.dumps(
                 {
                     "rof_version": __version__,
                     "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
-                    "rof_core": "ok",
+                    "core_modules": core_modules,
                     "dependencies": deps,
                     "generic_providers": generic_info,
                 },
@@ -459,6 +473,7 @@ def cmd_version(args: argparse.Namespace) -> int:
         ("rof_framework.llm", "rof_framework.llm"),
         ("rof_framework.tools", "rof_framework.tools"),
         ("rof_framework.pipeline", "rof_framework.pipeline"),
+        ("rof_framework.routing", "rof_framework.routing"),
     ]:
         try:
             __import__(mod)

@@ -81,7 +81,8 @@ class TestVersion:
         data = json.loads(out)
         assert "rof_version" in data
         assert "python" in data
-        assert "rof_core" in data
+        assert "core_modules" in data
+        assert data["core_modules"]["rof_framework.routing"] == "ok"
 
     def test_no_command_exits_nonzero(self):
         code, _ = run_cli()
@@ -1129,7 +1130,8 @@ class TestAdditionalCommandOptions:
         data = json.loads(out)
         assert "rof_version" in data
         assert "python" in data
-        assert "rof_core" in data
+        assert "core_modules" in data
+        assert data["core_modules"]["rof_framework.routing"] == "ok"
         assert "dependencies" in data
         # Check for some common dependencies
         deps = data["dependencies"]
