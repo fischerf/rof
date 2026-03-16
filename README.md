@@ -600,12 +600,28 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   │   rag.add_documents([{"id": "d1", "text": "..."}])
   │   Output: query, documents[], rl_context
   │
+  ├── AICodeGenTool
+  │   AI-powered source code generation. Calls the LLM with a precise
+  │   code-generation prompt, strips markdown fences, and saves the result
+  │   to a file in output_dir.
+  │   This tool ONLY generates and saves — it does NOT execute the code.
+  │   Pair it with an execution tool in the same workflow:
+  │     CodeRunnerTool  – for non-interactive scripts (stdout captured)
+  │     LLMPlayerTool   – for interactive programs (games, questionnaires)
+  │   Languages: python · lua · javascript · shell
+  │   Output: language, saved_to (file path), filename
+  │   Trigger keywords: "generate python code", "generate lua code",
+  │                     "generate code", "write code", "implement code"
+  │
   ├── CodeRunnerTool
-  │   Sandboxed code execution. Languages:
+  │   Executes non-interactive scripts produced by AICodeGenTool (or any
+  │   pre-existing script referenced in the workflow graph).
+  │   Languages:
   │     python     – subprocess via sys.executable
   │     javascript – py_mini_racer (V8 in-process) → Node.js fallback
   │     lua        – lupa (LuaJIT in-process) → lua binary fallback
   │     shell      – $SHELL -c
+  │   Do NOT use for interactive programs — use LLMPlayerTool instead.
   │   Context variables injected as preamble. Timeout enforced.
   │   Output: stdout, stderr, returncode, timed_out
   │
@@ -655,6 +671,23 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   │   Output: file_path (str), bytes_written (int)
   │   Constructor: FileSaveTool()
   │   Trigger keywords: "save file", "write file"
+  │
+  ├── LLMPlayerTool
+  │   Drives any interactive program (Python, Lua, JS) through its
+  │   stdin/stdout pipe, using the LLM to decide what to type at each
+  │   prompt.  Designed to follow AICodeGenTool in a workflow.
+  │   How it works:
+  │     1. Starts the script as a subprocess with stdin/stdout piped.
+  │     2. Reads stdout until idle (no new output for idle_wait seconds).
+  │     3. Sends the accumulated output to the LLM and asks what to type.
+  │     4. Writes the LLM's answer back to the process stdin.
+  │     5. Repeats until the process exits or max_turns is reached.
+  │     6. Saves the full turn-by-turn transcript to a .txt file.
+  │   Output: transcript (list of {game_output, llm_choice}),
+  │           transcript_file (path), turns, script, returncode
+  │   Trigger keywords: "play game", "play text adventure",
+  │                     "play and record choices", "let llm play",
+  │                     "play interactively", "run interactively"
   │
   ├── LuaRunTool
   │   Runs a Lua script interactively in the current terminal.

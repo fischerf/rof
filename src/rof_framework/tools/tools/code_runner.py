@@ -4,8 +4,25 @@ tools/tools/code_runner.py
 
 from __future__ import annotations
 
-import copy, csv, hashlib, io, json, logging, math, os, queue, re, shlex, shutil
-import subprocess, sys, tempfile, textwrap, threading, time, uuid
+import copy
+import csv
+import hashlib
+import io
+import json
+import logging
+import math
+import os
+import queue
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
+import threading
+import time
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -20,6 +37,7 @@ logger = logging.getLogger("rof.tools")
 
 
 __all__ = ["RunnerLanguage", "CodeRunResult", "CodeRunnerTool"]
+
 
 # rof_tools/tools/code_runner.py
 class RunnerLanguage(Enum):
@@ -121,6 +139,25 @@ class CodeRunnerTool(ToolProvider):
                         timeout = edata.get("timeout", timeout)
                         context = edata.get("context", context)
                         break
+                    # Accept saved_to path written by AICodeGenTool
+                    saved_to = edata.get("saved_to", "")
+                    if saved_to:
+                        p = Path(saved_to)
+                        if p.exists():
+                            code = p.read_text(encoding="utf-8")
+                            # Infer language from extension when not explicitly set
+                            _ext_map = {
+                                ".py": "python",
+                                ".lua": "lua",
+                                ".js": "javascript",
+                                ".sh": "shell",
+                            }
+                            lang_str = edata.get(
+                                "language", _ext_map.get(p.suffix, lang_str)
+                            ).lower()
+                            timeout = edata.get("timeout", timeout)
+                            context = edata.get("context", context)
+                            break
                     # Accept 'description' only if language is also set on entity
                     if edata.get("language") and edata.get("description"):
                         lang_str = edata["language"].lower()
@@ -301,4 +338,3 @@ class CodeRunnerTool(ToolProvider):
 
 
 import shutil  # needed by CodeRunnerTool – import here to keep header clean
-

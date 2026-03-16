@@ -15,12 +15,14 @@ Stage 1  PLANNING
 Stage 2  EXECUTION
   RLParser --> WorkflowAST --> Orchestrator (or ConfidentOrchestrator)
       --> keyword routing per `ensure` goal:
-          AICodeGenTool  LLM generates code --> CodeRunnerTool runs it
-          WebSearchTool  ddgs live search
-          APICallTool    httpx REST call
-          ValidatorTool  RL schema check
-          HumanInLoopTool  pause for approval
-          <LLM fallback>  plain RelateLang answer
+          AICodeGenTool    LLM generates code, saves to file (no execution)
+          CodeRunnerTool   executes non-interactive scripts (stdout captured)
+          LLMPlayerTool    drives interactive programs via LLM-controlled stdin
+          WebSearchTool    ddgs live search
+          APICallTool      httpx REST call
+          ValidatorTool    RL schema check
+          HumanInLoopTool  pause for human approval
+          <LLM fallback>   plain RelateLang answer
 
 Learned routing (rof_routing)
 ------------------------------
@@ -88,15 +90,10 @@ Usage
     # Disable learned routing (use static routing only)
     python rof_ai_demo.py --provider github_copilot --no-routing
 
-    # Fujitsu AI Foundation Chat-AI  (rof_providers optional extension)
-    python rof_ai_demo.py --provider fujitsu --api-key <KEY>
-    python rof_ai_demo.py --provider fujitsu --api-key <KEY> --model gpt-4o-2024-08-06
-    python rof_ai_demo.py --provider fujitsu \\
-                          --api-key <KEY> \\
-                          --endpoint https://my-proxy.corp.com/chat-ai/gpt4
-    # Key may also be supplied via the environment:
-    #   export FUJITSU_API_KEY="<KEY>"
-    python rof_ai_demo.py --provider fujitsu
+    # Generic providers from rof_providers (e.g. any provider registered in
+    # rof_providers.PROVIDER_REGISTRY) are discovered and loaded automatically.
+    # Run with --provider <name> where <name> matches a registry key.
+    python rof_ai_demo.py --provider <generic-name> --api-key <KEY>
 """
 
 from __future__ import annotations
@@ -195,17 +192,19 @@ from rof_framework.rof_llm import (  # type: ignore
     create_provider,
 )
 
-# rof_providers is an optional extension package (lives outside rof_framework).
-# Loaded only when --provider fujitsu is requested so the demo degrades
-# gracefully when rof_providers is not installed.
-try:
-    from rof_providers import FujitsuChatAIProvider as _FujitsuChatAIProvider
-    from rof_providers.fujitsu_chatai_provider import _DEFAULT_ENDPOINT as _FUJITSU_DEFAULT_EP
 
-    _HAS_FUJITSU = True
-except ImportError:
-    _HAS_FUJITSU = False
-    _FUJITSU_DEFAULT_EP = "https://api.ai-service.global.fujitsu.com/ai-foundation/chat-ai/gpt4"
+# rof_providers is an optional extension package (lives outside rof_framework).
+# Generic providers are discovered at runtime from rof_providers.PROVIDER_REGISTRY
+# so the demo degrades gracefully when rof_providers is not installed.
+def _load_generic_providers() -> dict[str, dict[str, Any]]:
+    """Return rof_providers.PROVIDER_REGISTRY if available, else {}."""
+    try:
+        import rof_providers as _rp
+    except ImportError:
+        return {}
+    registry: dict[str, dict[str, Any]] = getattr(_rp, "PROVIDER_REGISTRY", {})
+    return {name: spec for name, spec in registry.items() if spec.get("cls") is not None}
+
 
 # rof_tools is optional (graceful degradation)
 _HAS_TOOLS = rof_tools is not None
@@ -715,19 +714,23 @@ no explanation, no prose before or after.
 ## Available Tools and their trigger keywords
 Use these EXACT phrases in ensure statements to activate tools:
 
-  CodeRunnerTool   – "run code"  /  "execute code"  /  "run python"
-                     "run lua"   /  "run javascript" /  "run script"
-                     (NOTE: AICodeGenTool already runs the code it generates —
-                      only add a CodeRunnerTool goal when you have existing code
-                      to execute, NOT when you are also generating it)
   AICodeGenTool    – "generate python code"  /  "generate python script"
                      "generate lua code"      /  "generate javascript code"
                      "generate code"          /  "write code"  /  "create code"
                      "implement code"         /  "generate <lang> code"
-                     (NOTE: this tool generates AND executes the code in one step —
-                      never pair it with a CodeRunnerTool goal for the same task)
+                     (NOTE: AICodeGenTool ONLY generates and saves the source file —
+                      it does NOT execute it. Pair it with CodeRunnerTool to run
+                      non-interactive scripts, or with LLMPlayerTool to run
+                      interactive programs such as games and questionnaires.)
+  CodeRunnerTool   – "run code"  /  "execute code"  /  "run python"
+                     "run lua"   /  "run javascript" /  "run script"
+                     (Use after AICodeGenTool for non-interactive scripts only.
+                      Do NOT use for interactive programs — use LLMPlayerTool instead.)
   LLMPlayerTool    – "play game"  /  "play text adventure"  /  "play python game"
                      "play adventure"  /  "play and record choices"  /  "let llm play"
+                     (Use after AICodeGenTool for interactive programs: games,
+                      questionnaires, menus. LLMPlayerTool executes the script and
+                      drives its stdin/stdout using the LLM as the player.)
   WebSearchTool    – "retrieve web_information"  /  "search web"  /  "look up"
   APICallTool      – "call api"  /  "http request"  /  "fetch url"
   FileReaderTool   – "read file"  /  "parse file"  /  "extract text"
@@ -749,16 +752,20 @@ Use these EXACT phrases in ensure statements to activate tools:
 4. For code tasks use:   ensure generate <language> code for <brief description>.
 5. For web tasks use:    ensure retrieve web_information about <topic>.
 6. Keep workflows concise: 2–6 statements plus 1–3 goals.
-7. When the user asks to SAVE or EXPORT derived data (CSV, JSON, report, …):
-   a. Use a SINGLE AICodeGenTool goal: ensure generate python code for <full
-      description including saving the file>.  AICodeGenTool generates the script
-      AND executes it automatically — the file will be written to disk.
-   b. Do NOT add a separate CodeRunnerTool goal — AICodeGenTool already runs
-      the generated code internally.  Adding a second goal will cause a routing
-      error because the generated code is not in the snapshot as a runnable entity.
-   c. Do NOT use FileSaveTool for derived/computed data — it can only write a
+7. AICodeGenTool ONLY generates and saves the source file — it never executes it.
+   Always follow it with an execution goal:
+   a. Non-interactive scripts (no user input): add a CodeRunnerTool goal.
+      ensure generate python code for <description>.
+      ensure run python code.
+   b. Interactive programs (games, menus, questionnaires): add a LLMPlayerTool goal.
+      ensure generate python code for <description>.
+      ensure play game with llm player and record choices.
+   c. When the user asks to SAVE or EXPORT derived data written by the script,
+      include the file-saving logic inside the generate goal description — the
+      script itself will write the file when CodeRunnerTool executes it.
+   d. Do NOT use FileSaveTool for derived/computed data — it can only write a
       content string that already exists verbatim as a snapshot attribute.
-   d. The `ensure generate python code for …` goal text MUST describe the task
+   e. The `ensure generate python code for …` goal text MUST describe the task
       in plain terms — NEVER include the words "web search", "retrieve",
       "search results", or any other WebSearchTool trigger phrase inside a
       generate goal, or the router will mis-route it to WebSearchTool instead
@@ -766,10 +773,9 @@ Use these EXACT phrases in ensure statements to activate tools:
       "search_data") or a neutral description ("the collected data", "the results").
 8. All statements MUST end with a full stop (.).
 9. String values MUST be quoted with double quotes.
-10. NEVER combine a LLMPlayerTool goal ("play game", "play text adventure", …)
-    with a CodeRunnerTool goal ("run python", "run code", "run script", …).
-    LLMPlayerTool already executes the script; adding CodeRunnerTool will break
-    on interactive programs. Choose one or the other, never both.
+10. NEVER pair a LLMPlayerTool goal with a CodeRunnerTool goal for the same script.
+    LLMPlayerTool executes the script itself — CodeRunnerTool would run it a second
+    time. Choose one execution tool per generated script, never both.
 
 ## Examples
 
@@ -778,6 +784,7 @@ define Task as "Fibonacci sequence computation".
 Task has language of "python".
 Task has count of 10.
 ensure generate python code for computing the first 10 Fibonacci numbers.
+ensure run python code.
 
 ### Request: "Search for the latest news about large language models"
 define Topic as "Large language model news".
@@ -789,6 +796,7 @@ Task has language of "lua".
 Task has type of "questionnaire".
 Task has questions of 3.
 ensure generate lua code for an interactive CLI questionnaire with 3 questions.
+ensure play interactively with llm player and record choices.
 
 ### Request: "Write a Python script that generates a random maze"
 define Task as "Random maze generator".
@@ -796,12 +804,13 @@ Task has language of "python".
 Task has width of 21.
 Task has height of 11.
 ensure generate python code for a random maze generator printed to stdout.
+ensure run python code.
 
 ### Request: "Create a text adventure in Python, let the LLM play it, and save the choices"
 define Task as "Text Adventure Game".
 Task has language of "python".
 ensure generate python code for a small text adventure game.
-ensure play text adventure game with llm player and record choices.
+ensure play game with llm player and record choices.
 
 ### Request: "Search for current AI news and save the results as a CSV file"
 define Task as "AI news collection and CSV export".
@@ -809,6 +818,7 @@ Task has topic of "artificial intelligence news".
 Task has output_file of "ai_news.csv".
 ensure retrieve web_information about latest artificial intelligence news.
 ensure generate python code for reading the SearchResult entities from the graph snapshot and writing ai_news.csv with columns title, url, snippet.
+ensure run python code.
 
 ### Request: "Find the top 5 stocks influenced by tech news and export them to stocks.csv"
 define Task as "Tech news stock impact analysis".
@@ -816,6 +826,7 @@ Task has topic of "technology news stock market impact".
 Task has output_file of "stocks.csv".
 ensure retrieve web_information about technology news and stock market impact.
 ensure generate python code for reading the graph snapshot entities and writing stocks.csv with columns event, stock_ticker, impact, source.
+ensure run python code.
 
 ### Request: "Search for latest Python news and save to a file"
 define Task as "Python news collection".
@@ -823,6 +834,7 @@ Task has topic of "Python programming language".
 Task has output_file of "python_news.txt".
 ensure retrieve web_information about latest Python programming news.
 ensure generate python code for writing the collected titles and urls to python_news.txt.
+ensure run python code.
 
 ### Request: "Look up recent climate change articles and export to climate.csv"
 define Task as "Climate news export".
@@ -830,6 +842,8 @@ Task has topic of "climate change".
 Task has output_file of "climate.csv".
 ensure retrieve web_information about recent climate change articles.
 ensure generate python code for writing climate.csv with columns title, url, snippet from the collected data.
+ensure run python code.
+
 """
 
 # ===========================================================================
@@ -1916,13 +1930,39 @@ class ROFSession:
 # Setup wizard  –  interactive provider / key configuration
 # ===========================================================================
 
-PROVIDER_DEFAULTS = {
+# Built-in provider defaults: name → (default_model, api_key_env_var)
+_BUILTIN_PROVIDER_DEFAULTS: dict[str, tuple[str, str | None]] = {
     "anthropic": ("claude-opus-4-5", "ANTHROPIC_API_KEY"),
     "openai": ("gpt-4o", "OPENAI_API_KEY"),
     "ollama": ("deepseek-r1:8b", None),
     "github_copilot": ("gpt-4o", "GITHUB_TOKEN"),
-    "fujitsu": ("gpt-4o-2024-08-06", "FUJITSU_API_KEY"),
 }
+
+
+def _get_provider_defaults(provider: str) -> tuple[str, str | None]:
+    """Return (default_model, env_key) for a provider name.
+
+    Checks built-ins first, then falls back to the generic registry from
+    rof_providers.  Returns a sensible fallback when the name is unknown.
+    """
+    if provider in _BUILTIN_PROVIDER_DEFAULTS:
+        return _BUILTIN_PROVIDER_DEFAULTS[provider]
+    generic = _load_generic_providers()
+    if provider in generic:
+        spec = generic[provider]
+        # Use the class's default model if inspectable, otherwise "gpt-4o"
+        cls = spec["cls"]
+        import inspect
+
+        sig = inspect.signature(cls.__init__)
+        model_param = sig.parameters.get("model")
+        default_model = (
+            model_param.default
+            if model_param and model_param.default is not inspect.Parameter.empty
+            else "gpt-4o"
+        )
+        return (default_model, spec.get("env_key"))
+    return ("gpt-4o", None)
 
 
 def _setup_wizard(args: argparse.Namespace) -> LLMProvider:
@@ -1942,48 +1982,48 @@ def _setup_wizard(args: argparse.Namespace) -> LLMProvider:
         "copilot": "github_copilot",
         "github-copilot": "github_copilot",
         "gh-copilot": "github_copilot",
-        "fujitsu-chatai": "fujitsu",
-        "fujitsu_chatai": "fujitsu",
     }
 
     # --- Provider --------------------------------------------------------
     provider = args.provider
+    _generic_providers = _load_generic_providers()
     if not provider:
+        # Build menu dynamically: built-ins first, then generic providers
+        _menu_items = [
+            ("anthropic", "Anthropic Claude  (claude-opus-4-5, claude-sonnet-4-5, …)"),
+            ("openai", "OpenAI GPT        (gpt-4o, gpt-4o-mini, o1, …)"),
+            ("ollama", "Local Ollama/vLLM (deepseek-r1:8b, mistral, …)"),
+            ("github_copilot", "GitHub Copilot    (no key needed — browser login on first run)"),
+        ]
+        for _gname, _gspec in sorted(_generic_providers.items()):
+            _menu_items.append((_gname, _gspec.get("description", _gspec["cls"].__name__)))
+
         print(f"  {bold('Available providers:')}")
-        print(
-            f"    {cyan('1')}. {bold('anthropic')}      (Claude claude-opus-4-5, claude-sonnet-4-5, \u2026)"
-        )
-        print(f"    {cyan('2')}. {bold('openai')}         (GPT-4o, GPT-4o-mini, o1, \u2026)")
-        print(
-            f"    {cyan('3')}. {bold('ollama')}         (local models: deepseek-r1:8b, mistral, \u2026)"
-        )
-        print(f"    {cyan('4')}. {bold('github_copilot')} (Copilot Chat via PAT / OAuth token)")
-        fujitsu_note = "" if _HAS_FUJITSU else dim("  (needs: pip install rof_providers)")
-        print(
-            f"    {cyan('5')}. {bold('fujitsu')}        (Fujitsu AI Foundation Chat-AI){fujitsu_note}"
-        )
+        for _idx, (_pname, _pdesc) in enumerate(_menu_items, start=1):
+            print(f"    {cyan(str(_idx))}. {bold(_pname):<20} {_pdesc}")
         print()
-        choice = input(f"  {bold('Choose provider')} [1/2/3/4/5] or name: ").strip()
-        provider = {
-            "1": "anthropic",
-            "2": "openai",
-            "3": "ollama",
-            "4": "github_copilot",
-            "5": "fujitsu",
-        }.get(choice, choice)
+        _num_map = {str(i): name for i, (name, _) in enumerate(_menu_items, start=1)}
+        choice = input(f"  {bold('Choose provider')} [1–{len(_menu_items)}] or name: ").strip()
+        provider = _num_map.get(choice, choice)
         if not provider:
             provider = "anthropic"
 
     provider = _ALIASES.get(provider.lower(), provider.lower())
-    default_model, env_key = PROVIDER_DEFAULTS.get(provider, ("gpt-4o", None))
+    default_model, env_key = _get_provider_defaults(provider)
     # Register for headline display
     set_headline_identity(provider, "")
 
     # --- Model -----------------------------------------------------------
+    # In one-shot mode (or when provider was given on the CLI) never block
+    # on an interactive prompt — silently fall back to the provider default.
+    _non_interactive = bool(getattr(args, "one_shot", None) or getattr(args, "provider", None))
     model = args.model
     if not model:
-        typed = input(f"  {bold('Model')} [default: {cyan(default_model)}]: ").strip()
-        model = typed or default_model
+        if _non_interactive:
+            model = default_model
+        else:
+            typed = input(f"  {bold('Model')} [default: {cyan(default_model)}]: ").strip()
+            model = typed or default_model
     set_headline_identity(provider, model)
 
     # --- Output directory (needed by all paths) --------------------------
@@ -2104,57 +2144,60 @@ def _setup_wizard(args: argparse.Namespace) -> LLMProvider:
         return llm, output_dir
 
     # =========================================================================
-    # Fujitsu AI Foundation Chat-AI  (rof_providers optional extension)
+    # Generic providers from rof_providers.PROVIDER_REGISTRY
     # =========================================================================
-    if provider == "fujitsu":
-        if not _HAS_FUJITSU:
-            err(
-                "rof_providers is not installed — cannot use the Fujitsu provider.\n"
-                "  Install it with:  pip install -e .  (from the project root)\n"
-                "  or add src/ to PYTHONPATH so rof_providers can be imported."
-            )
-            sys.exit(1)
+    if provider in _generic_providers:
+        spec = _generic_providers[provider]
+        cls = spec["cls"]
+        api_key_kwarg: str | None = spec.get("api_key_kwarg")
+        env_key_for_generic: str | None = spec.get("env_key")
+        env_fallbacks: list[str] = spec.get("env_fallback", [])
+        label: str = spec.get("label", cls.__name__)
 
-        # Resolve API key: --api-key > FUJITSU_API_KEY env var > interactive prompt
-        api_key = args.api_key or os.environ.get("FUJITSU_API_KEY", "")
-        if not api_key:
-            api_key = input(f"  {bold('Fujitsu API key')} (or set FUJITSU_API_KEY): ").strip()
+        # Resolve API key: --api-key → ROF_API_KEY → provider env var → fallbacks
+        api_key = args.api_key or os.environ.get("ROF_API_KEY", "")
+        if not api_key and env_key_for_generic:
+            api_key = os.environ.get(env_key_for_generic, "")
+        for _fb in env_fallbacks:
             if not api_key:
-                err("No Fujitsu API key provided.")
+                api_key = os.environ.get(_fb, "")
+
+        if not api_key and api_key_kwarg:
+            if _non_interactive:
+                key_hint = env_key_for_generic or "the appropriate env var"
+                err(
+                    f"No API key found for provider '{provider}'.  "
+                    f"Set {key_hint} or pass --api-key."
+                )
+                sys.exit(1)
+            api_key = input(
+                f"  {bold(label + ' API key')} (or set {env_key_for_generic or 'API_KEY'}): "
+            ).strip()
+            if not api_key:
+                err(f"No API key provided for provider '{provider}'.")
                 sys.exit(1)
 
-        # Resolve endpoint: --endpoint arg > FUJITSU_CHATAI_ENDPOINT env var > default
-        endpoint = (
-            getattr(args, "endpoint", None)
-            or os.environ.get("FUJITSU_CHATAI_ENDPOINT", "")
-            or _FUJITSU_DEFAULT_EP
-        )
-
-        masked_key = api_key[:8] + "*" * max(0, len(api_key) - 8)
+        masked_key = (api_key[:8] + "*" * max(0, len(api_key) - 8)) if api_key else dim("(none)")
+        extra_rows = []
+        if api_key and api_key_kwarg:
+            extra_rows.append(("API key", masked_key))
+        extra_rows.append(("Class", cls.__name__))
         print()
-        _print_config_box(
-            provider,
-            model,
-            output_dir,
-            extra_rows=[
-                ("API key", masked_key),
-                ("Endpoint", endpoint),
-                ("Package", "rof_providers.FujitsuChatAIProvider"),
-                ("Auth header", dim("api-key  (not Authorization: Bearer)")),
-            ],
-        )
+        _print_config_box(provider, model, output_dir, extra_rows=extra_rows)
+
+        kwargs: dict[str, Any] = {}
+        if api_key and api_key_kwarg:
+            kwargs[api_key_kwarg] = api_key
+        if model:
+            kwargs["model"] = model
 
         try:
-            base_llm = _FujitsuChatAIProvider(
-                api_key=api_key,
-                endpoint=endpoint,
-                model=model,
-                # The executor stage drives output_mode; inject_json_schema is
-                # handled internally by the provider when output_mode=="json".
-                inject_json_schema=True,
-            )
+            base_llm = cls(**kwargs)
         except AuthError as exc:
-            err(f"Fujitsu provider initialisation failed: {exc}")
+            err(f"Provider '{provider}' initialisation failed: {exc}")
+            sys.exit(1)
+        except Exception as exc:
+            err(f"Failed to create provider '{provider}': {exc}")
             sys.exit(1)
 
         llm = RetryManager(
@@ -2169,12 +2212,29 @@ def _setup_wizard(args: argparse.Namespace) -> LLMProvider:
         return llm, output_dir
 
     # =========================================================================
-    # All other providers — standard API-key path
+    # Unknown provider — give a helpful error before attempting built-in path
+    # =========================================================================
+    if provider not in _BUILTIN_PROVIDER_DEFAULTS:
+        _known = list(_BUILTIN_PROVIDER_DEFAULTS.keys()) + sorted(_generic_providers.keys())
+        err(f"Unknown provider: '{provider}'")
+        err(f"  Supported: {', '.join(_known)}")
+        if not _generic_providers:
+            err("  Additional providers may be available via: pip install rof-providers")
+        sys.exit(1)
+
+    # =========================================================================
+    # Built-in providers — standard API-key path
     # =========================================================================
     api_key = args.api_key or ""
     if not api_key and env_key:
         api_key = os.environ.get(env_key, "")
     if not api_key and provider != "ollama":
+        if _non_interactive:
+            err(
+                f"No API key found for provider '{provider}'.  "
+                f"Set {env_key or 'the appropriate env var'} or pass --api-key."
+            )
+            sys.exit(1)
         api_key = input(f"  API key ({env_key or 'key'}): ").strip()
         if not api_key:
             err("No API key provided.")
@@ -2373,15 +2433,12 @@ def _parse_args() -> argparse.Namespace:
               github_copilot – GitHub Copilot    (no key needed! browser login on first run,
                                                   token cached at ~/.config/rof/copilot_oauth.json
                                                   for all future runs automatically)
-              fujitsu        – Fujitsu AI Foundation Chat-AI  (--api-key or FUJITSU_API_KEY;
-                                                  optional --endpoint to override the URL;
-                                                  requires: rof_providers package)
 
-            Fujitsu tips:
-              python rof_ai_demo.py --provider fujitsu --api-key <KEY>
-              python rof_ai_demo.py --provider fujitsu  # reads FUJITSU_API_KEY from env
-              python rof_ai_demo.py --provider fujitsu --endpoint https://proxy.corp.com/chat-ai/gpt4
-              python rof_ai_demo.py --provider fujitsu --output-mode rl  # safest for all models
+            Generic providers (rof_providers package):
+              Install rof-providers to enable additional providers discovered
+              automatically from rof_providers.PROVIDER_REGISTRY.
+              Run the demo with --provider <name> where <name> is any registry key.
+              Run without --provider to see a full dynamic menu including generics.
 
             Output modes (--output-mode):
               auto  (default) – json if provider.supports_structured_output(), else rl
@@ -2434,8 +2491,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--provider",
         help=(
-            "LLM provider: anthropic | openai | ollama | github_copilot | fujitsu "
-            "(aliases: copilot, github-copilot, fujitsu-chatai)"
+            "LLM provider: anthropic | openai | ollama | github_copilot "
+            "| <generic>  (aliases: copilot, github-copilot). "
+            "Generic providers are loaded from rof_providers.PROVIDER_REGISTRY "
+            "when rof_providers is installed.  Omit to see a full interactive menu."
         ),
     )
     p.add_argument("--model", help="Model name (e.g. claude-opus-4-5, gpt-4o)")
@@ -2443,22 +2502,12 @@ def _parse_args() -> argparse.Namespace:
         "--api-key",
         dest="api_key",
         help=(
-            "LLM API key (anthropic / openai). "
+            "LLM API key.  For generic providers the key is forwarded via the "
+            "constructor kwarg declared in PROVIDER_REGISTRY.  "
             "For Copilot: also accepted as a GitHub token if --github-token is not set."
         ),
     )
     p.add_argument("--base-url", dest="base_url", help="Ollama/vLLM base URL")
-    p.add_argument(
-        "--endpoint",
-        dest="endpoint",
-        metavar="URL",
-        default="",
-        help=(
-            "Fujitsu Chat-AI endpoint URL override. "
-            "Defaults to FUJITSU_CHATAI_ENDPOINT env var, then: "
-            f"{_FUJITSU_DEFAULT_EP}"
-        ),
-    )
     p.add_argument("--output-dir", dest="output_dir", help="Directory for generated files")
     p.add_argument(
         "--one-shot",
@@ -2611,24 +2660,6 @@ def _parse_args() -> argparse.Namespace:
             "'json' enforces the rof_graph_update JSON schema (all providers including Ollama). "
             "'rl' requests plain RelateLang text (legacy fallback, works with any model). "
             "Default: auto"
-        ),
-    )
-
-    # ------------------------------------------------------------------ #
-    # Fujitsu options                                                     #
-    # ------------------------------------------------------------------ #
-    fujitsu = p.add_argument_group(
-        "Fujitsu AI Foundation options",
-        "Used when --provider is fujitsu.  Requires the rof_providers package.",
-    )
-    fujitsu.add_argument(
-        "--fujitsu-endpoint",
-        dest="endpoint",  # same dest as --endpoint so both flags work
-        metavar="URL",
-        default=argparse.SUPPRESS,  # only overrides if explicitly passed
-        help=(
-            "Alias for --endpoint (Fujitsu Chat-AI URL). "
-            "Defaults to FUJITSU_CHATAI_ENDPOINT env var, then the public endpoint."
         ),
     )
 
