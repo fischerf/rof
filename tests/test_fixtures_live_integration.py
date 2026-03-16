@@ -939,6 +939,25 @@ class TestPipelineYamlLiveRun:
         pipeline cannot run correctly in the live integration suite.
     """
 
+    # ── Rate-limit guard ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _skip_on_rate_limit(result) -> None:
+        """
+        Inspect a PipelineResult (or any object with an ``.error`` string) and
+        call ``pytest.skip`` when the error is clearly a provider-side rate
+        limit (HTTP 429 / "rate limit exceeded").
+
+        This prevents transient quota errors from being recorded as test
+        failures, while still letting genuine logic failures through.
+        """
+        error_str = str(getattr(result, "error", "") or "").lower()
+        if "429" in error_str or "rate limit" in error_str:
+            pytest.skip(
+                f"Provider rate-limited (HTTP 429) — skipping instead of failing. "
+                f"Original error: {getattr(result, 'error', '')}"
+            )
+
     @staticmethod
     def _build_live_pipeline(yaml_path: Path, llm):
         """Build a Pipeline from a YAML file with the given live LLM.
@@ -1134,16 +1153,19 @@ class TestPipelineYamlLiveRun:
         """2-stage output_mode pipeline must complete without raising."""
         pipeline = self._build_live_pipeline(PIPELINE_OUTPUT_MODE / "pipeline.yaml", live_llm)
         result = pipeline.run()
+        self._skip_on_rate_limit(result)
         assert result is not None
 
     def test_output_mode_pipeline_has_two_steps(self, live_llm):
         pipeline = self._build_live_pipeline(PIPELINE_OUTPUT_MODE / "pipeline.yaml", live_llm)
         result = pipeline.run()
+        self._skip_on_rate_limit(result)
         assert len(result.steps) == 2, f"Expected 2 stage results, got {len(result.steps)}"
 
     def test_output_mode_pipeline_stage_names(self, live_llm):
         pipeline = self._build_live_pipeline(PIPELINE_OUTPUT_MODE / "pipeline.yaml", live_llm)
         result = pipeline.run()
+        self._skip_on_rate_limit(result)
         names = result.stage_names()
         assert "extract" in names, f"'extract' not in stage names: {names}"
         assert "classify" in names, f"'classify' not in stage names: {names}"
@@ -1152,6 +1174,7 @@ class TestPipelineYamlLiveRun:
         """Customer entity seeded in stage 1 must survive into the final snapshot."""
         pipeline = self._build_live_pipeline(PIPELINE_OUTPUT_MODE / "pipeline.yaml", live_llm)
         result = pipeline.run()
+        self._skip_on_rate_limit(result)
         entities = result.final_snapshot.get("entities", {})
         assert "Customer" in entities, (
             f"'Customer' missing from final snapshot. Found: {list(entities.keys())}"
@@ -1164,6 +1187,7 @@ class TestPipelineYamlLiveRun:
         """
         pipeline = self._build_live_pipeline(PIPELINE_OUTPUT_MODE / "pipeline.yaml", live_llm)
         result = pipeline.run()
+        self._skip_on_rate_limit(result)
         classify_result = result.stage("classify")
         if classify_result is not None:
             # input_snapshot is populated when inject_prior_context=true
