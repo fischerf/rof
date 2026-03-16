@@ -19,7 +19,7 @@ Optional live-LLM integration tests that exercise:
        - pipeline_load_approval/pipeline.yaml
        - pipeline_fakenews_detection/pipeline.yaml
        - pipeline_output_mode/pipeline.yaml
-       - pipeline_questionnaire/pipeline_questionnaire.yaml
+       - pipeline_questionnaire/pipeline.yaml
 
   4. Pipeline YAML fixtures run against a **real** LLM (skipped by default):
        - pipeline_load_approval          (3-stage)
@@ -176,7 +176,7 @@ PIPELINE_CONFIGS = [
     ("load_approval", PIPELINE_LOAD_APPROVAL / "pipeline.yaml", 3),
     ("fakenews_detection", PIPELINE_FAKENEWS / "pipeline.yaml", 6),
     ("output_mode", PIPELINE_OUTPUT_MODE / "pipeline.yaml", 2),
-    ("questionnaire", PIPELINE_QUESTIONNAIRE / "pipeline_questionnaire.yaml", 3),
+    ("questionnaire", PIPELINE_QUESTIONNAIRE / "pipeline.yaml", 3),
 ]
 
 
@@ -776,9 +776,9 @@ class TestPipelineStageFilesParsing:
 
     @pytest.mark.parametrize(
         "stage_name, rl_path",
-        _pipeline_rl_files(PIPELINE_QUESTIONNAIRE / "pipeline_questionnaire.yaml"),
+        _pipeline_rl_files(PIPELINE_QUESTIONNAIRE / "pipeline.yaml"),
         ids=[
-            s for s, _ in _pipeline_rl_files(PIPELINE_QUESTIONNAIRE / "pipeline_questionnaire.yaml")
+            s for s, _ in _pipeline_rl_files(PIPELINE_QUESTIONNAIRE / "pipeline.yaml")
         ],
     )
     def test_questionnaire_stage_parses(self, stage_name: str, rl_path: Path):
