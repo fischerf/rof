@@ -453,13 +453,29 @@ class Orchestrator:
             r'^(\w+)\s+has\s+(\w+)\s+of\s+"?([^".\n]+)"?\s*\.',
             re.IGNORECASE | re.MULTILINE,
         )
+        # Catches LLM shorthand: "ApprovalDecision outcome is "approved"."
+        # i.e. "Entity attribute is value." — two leading \w tokens before "is".
+        _attr_is_re = re.compile(
+            r'^(\w+)\s+(\w+)\s+is\s+"?([^".\n]+)"?\s*\.',
+            re.IGNORECASE | re.MULTILINE,
+        )
         _pred_re = re.compile(
             r'^(\w+)\s+is\s+"?([^".\n]+)"?\s*\.',
             re.IGNORECASE | re.MULTILINE,
         )
         _skip_prefixes = {"define", "relate", "if ", "ensure"}
+        # Attribute-name words that should not be treated as attribute names
+        # in the "Entity attr is value" pattern (they are predicate labels or
+        # keywords handled by other paths).
+        _attr_is_skip_attrs = frozenset(
+            {"creditworthy", "eligible", "highvalue", "standard", "approved", "rejected"}
+        )
 
         attr_updates = pred_updates = 0
+        # Track character spans already consumed by the canonical "has … of" pattern
+        # so the "attr is" fallback doesn't double-count the same text.
+        _has_of_spans: list[tuple[int, int]] = []
+
         for m in _attr_re.finditer(content):
             entity, name, raw_val = m.group(1), m.group(2), m.group(3).strip()
             val: Any = raw_val
@@ -472,6 +488,35 @@ class Orchestrator:
                     pass
             graph.set_attribute(entity, name, val)
             attr_updates += 1
+            _has_of_spans.append(m.span())
+
+        for m in _attr_is_re.finditer(content):
+            # Skip if this span was already captured by the "has … of" pattern
+            if any(s <= m.start() < e for s, e in _has_of_spans):
+                continue
+            line_lower = m.group(0).lower()
+            if any(line_lower.startswith(s) for s in _skip_prefixes):
+                continue
+            attr_name = m.group(2).lower()
+            if attr_name in _attr_is_skip_attrs:
+                continue
+            entity, name, raw_val = m.group(1), m.group(2), m.group(3).strip()
+            val2: Any = raw_val
+            try:
+                val2 = int(raw_val)
+            except ValueError:
+                try:
+                    val2 = float(raw_val)
+                except ValueError:
+                    pass
+            graph.set_attribute(entity, name, val2)
+            attr_updates += 1
+            logger.debug(
+                "_integrate_response: attr-is fallback set %s.%s = %r",
+                entity,
+                name,
+                val2,
+            )
 
         for m in _pred_re.finditer(content):
             line_lower = m.group(0).lower()
