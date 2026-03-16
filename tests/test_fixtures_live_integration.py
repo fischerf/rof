@@ -32,8 +32,13 @@ variables to enable the live LLM tests:
     ROF_TEST_PROVIDER   – provider name understood by ``create_provider``:
                           "openai" | "anthropic" | "gemini" | "ollama"
                           | "github_copilot"
+                          | <any key in rof_providers.PROVIDER_REGISTRY>
+                            (generic providers — loaded automatically when
+                            the rof_providers package is installed)
     ROF_TEST_API_KEY    – API key for the chosen provider
-                          (not required for "ollama" / local providers)
+                          (not required for "ollama" / local providers;
+                          for generic providers it is forwarded via the
+                          constructor kwarg declared in PROVIDER_REGISTRY)
     ROF_TEST_MODEL      – (optional) model override, e.g. "gpt-4o-mini"
 
 Example (PowerShell):
@@ -44,6 +49,10 @@ Example (PowerShell):
 
 Example (bash):
     ROF_TEST_PROVIDER=anthropic ROF_TEST_API_KEY=sk-ant-... \\
+        pytest tests/test_fixtures_live_integration.py -v -m live_integration
+
+    # Generic provider from rof_providers (e.g. any key in PROVIDER_REGISTRY):
+    ROF_TEST_PROVIDER=<registry-key> ROF_TEST_API_KEY=<key> \\
         pytest tests/test_fixtures_live_integration.py -v -m live_integration
 """
 
@@ -196,11 +205,69 @@ def _require_env() -> tuple[str, str | None, str | None]:
 
 @pytest.fixture(scope="session")
 def live_llm():
-    """Build a real LLMProvider from env-var configuration (session-scoped)."""
+    """Build a real LLMProvider from env-var configuration (session-scoped).
+
+    Supports both built-in providers (openai, anthropic, gemini, ollama,
+    github_copilot) and any generic provider registered in
+    ``rof_providers.PROVIDER_REGISTRY``.  No provider names are hardcoded here.
+
+    Resolution order
+    ----------------
+    1. Built-in providers via ``rof_framework.llm.create_provider``.
+    2. Generic providers discovered from ``rof_providers.PROVIDER_REGISTRY``.
+
+    Skips automatically when ``ROF_TEST_PROVIDER`` is not set.
+    """
+    # Import the conftest helpers (same module, already on sys.path via conftest.py)
+    import importlib
+    import sys
+
+    _conftest = sys.modules.get("conftest")
+    if _conftest is None:
+        try:
+            import conftest as _conftest  # type: ignore[no-redef]
+        except ImportError:
+            _conftest = None
+
+    # Prefer the conftest implementation which handles generic providers
+    if _conftest is not None and hasattr(_conftest, "_require_live_env"):
+        from conftest import (  # type: ignore[import]
+            _load_generic_registry,
+            _make_generic_provider,
+            _require_live_env,
+        )
+
+        provider_name, api_key, model = _require_live_env()
+
+        _BUILTIN_NAMES = {"openai", "anthropic", "gemini", "google", "ollama", "github_copilot"}
+        if provider_name in _BUILTIN_NAMES:
+            if not ROF_LLM_AVAILABLE:
+                pytest.skip("rof_llm not available")
+            kwargs: dict = {}
+            if model:
+                kwargs["model"] = model
+            if api_key:
+                kwargs["api_key"] = api_key
+            return create_provider(provider_name, **kwargs)
+
+        registry = _load_generic_registry()
+        if provider_name in registry:
+            try:
+                return _make_generic_provider(provider_name, api_key, model)
+            except Exception as exc:
+                pytest.skip(f"Generic provider '{provider_name}' could not be instantiated: {exc}")
+
+        pytest.skip(
+            f"Unknown provider '{provider_name}'. "
+            f"Supported built-ins: {', '.join(sorted(_BUILTIN_NAMES))}. "
+            f"Generic: {', '.join(sorted(registry.keys())) or '(none — install rof-providers)'}."
+        )
+
+    # Fallback: built-ins only (original behaviour)
     if not ROF_LLM_AVAILABLE:
         pytest.skip("rof_llm not available")
     provider, api_key, model = _require_env()
-    kwargs: dict = {}
+    kwargs = {}
     if model:
         kwargs["model"] = model
     return create_provider(provider, api_key=api_key, **kwargs)

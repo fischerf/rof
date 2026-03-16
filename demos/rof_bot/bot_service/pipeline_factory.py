@@ -111,11 +111,30 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 
+def _load_generic_providers() -> dict[str, Any]:
+    """Return ``rof_providers.PROVIDER_REGISTRY`` if the package is installed, else ``{}``.
+
+    The import is lazy so the bot service starts cleanly without ``rof_providers``
+    on the path.  The registry is owned entirely by that package — nothing
+    provider-specific is hardcoded here.
+    """
+    try:
+        import rof_providers as _rp
+    except ImportError:
+        return {}
+    registry: dict[str, Any] = getattr(_rp, "PROVIDER_REGISTRY", {})
+    return {name: spec for name, spec in registry.items() if spec.get("cls") is not None}
+
+
 def create_provider(provider_name: str, model: str, api_key: str = "") -> Any:
     """
     Create an LLMProvider for the named provider + model.
 
-    Supports: anthropic, openai, gemini, ollama
+    Supports built-ins: anthropic, openai, gemini, ollama.
+    Also supports any provider registered in ``rof_providers.PROVIDER_REGISTRY``
+    when the ``rof_providers`` package is installed — no provider-specific
+    names are hardcoded here.
+
     Falls back to a stub provider when the requested provider is unavailable
     so the pipeline can still be built (useful for testing without API keys).
     """
@@ -150,6 +169,52 @@ def create_provider(provider_name: str, model: str, api_key: str = "") -> Any:
             provider_name,
             exc,
         )
+
+    # ── Generic providers from rof_providers.PROVIDER_REGISTRY ───────────────
+    generic = _load_generic_providers()
+    if provider_name in generic:
+        spec = generic[provider_name]
+        cls = spec["cls"]
+        api_key_kwarg: str | None = spec.get("api_key_kwarg")
+        env_key: str | None = spec.get("env_key")
+        env_fallbacks: list[str] = spec.get("env_fallback", [])
+
+        # Resolve API key: explicit arg → provider env var → fallback env vars
+        resolved_key = api_key or ""
+        if not resolved_key and env_key:
+            import os
+
+            resolved_key = os.environ.get(env_key, "")
+        if not resolved_key:
+            import os
+
+            for fb in env_fallbacks:
+                resolved_key = os.environ.get(fb, "")
+                if resolved_key:
+                    break
+
+        kwargs: dict[str, Any] = {}
+        if resolved_key and api_key_kwarg:
+            kwargs[api_key_kwarg] = resolved_key
+        if model:
+            kwargs["model"] = model
+
+        try:
+            provider_instance = cls(**kwargs)
+            logger.info(
+                "create_provider: instantiated generic provider %r (%s) model=%r",
+                provider_name,
+                cls.__name__,
+                model,
+            )
+            return provider_instance
+        except Exception as exc:
+            logger.warning(
+                "create_provider: generic provider %r failed to initialise (%s) — "
+                "falling back to stub.",
+                provider_name,
+                exc,
+            )
 
     # Stub fallback — builds the pipeline without a real LLM
     try:
