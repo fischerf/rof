@@ -777,9 +777,7 @@ class TestPipelineStageFilesParsing:
     @pytest.mark.parametrize(
         "stage_name, rl_path",
         _pipeline_rl_files(PIPELINE_QUESTIONNAIRE / "pipeline.yaml"),
-        ids=[
-            s for s, _ in _pipeline_rl_files(PIPELINE_QUESTIONNAIRE / "pipeline.yaml")
-        ],
+        ids=[s for s, _ in _pipeline_rl_files(PIPELINE_QUESTIONNAIRE / "pipeline.yaml")],
     )
     def test_questionnaire_stage_parses(self, stage_name: str, rl_path: Path):
         """Every questionnaire stage .rl file must parse without exception."""
@@ -924,9 +922,21 @@ class TestPipelineYamlLiveRun:
     Run the pipeline YAML fixtures against a real LLM.
     Skipped automatically unless ROF_TEST_PROVIDER is set.
 
-    Note: pipeline_questionnaire is excluded from the live run suite because
-    stage 2 requires interactive terminal input (LuaRunTool + human answers),
-    which cannot be automated in a CI/headless context.
+    Excluded pipelines
+    ------------------
+    pipeline_questionnaire
+        Stage 2 requires interactive terminal input via LuaRunTool + human
+        answers, which cannot be automated in a CI/headless context.  Lua
+        must also be installed for the tool to function.
+
+    pipeline_fakenews_detection
+        Requires a set of special domain tools (ClaimExtractorTool,
+        SourceLookupTool, SourceCredibilityTool, CrossReferenceTool,
+        BiasDetectorTool, CredibilityScorerTool, ReportFormatterTool) to be
+        registered at runtime — see
+        tests/fixtures/pipeline_fakenews_detection/run_factcheck.py.
+        These tools are not registered in the standard test harness, so the
+        pipeline cannot run correctly in the live integration suite.
     """
 
     @staticmethod
@@ -1036,17 +1046,38 @@ class TestPipelineYamlLiveRun:
 
     # ── fakenews_detection (6-stage, on_failure=continue) ───────────────────
 
+    @pytest.mark.skip(
+        reason=(
+            "pipeline_fakenews_detection requires special domain tools "
+            "(ClaimExtractorTool, SourceLookupTool, SourceCredibilityTool, "
+            "CrossReferenceTool, BiasDetectorTool, CredibilityScorerTool, "
+            "ReportFormatterTool) to be registered at runtime.  "
+            "See tests/fixtures/pipeline_fakenews_detection/run_factcheck.py."
+        )
+    )
     def test_fakenews_pipeline_runs(self, live_llm):
         """Full 6-stage fact-check pipeline must complete without raising."""
         pipeline = self._build_live_pipeline(PIPELINE_FAKENEWS / "pipeline.yaml", live_llm)
         result = pipeline.run()
         assert result is not None
 
+    @pytest.mark.skip(
+        reason=(
+            "pipeline_fakenews_detection requires special domain tools — "
+            "see tests/fixtures/pipeline_fakenews_detection/run_factcheck.py."
+        )
+    )
     def test_fakenews_pipeline_has_six_steps(self, live_llm):
         pipeline = self._build_live_pipeline(PIPELINE_FAKENEWS / "pipeline.yaml", live_llm)
         result = pipeline.run()
         assert len(result.steps) == 6, f"Expected 6 stage results, got {len(result.steps)}"
 
+    @pytest.mark.skip(
+        reason=(
+            "pipeline_fakenews_detection requires special domain tools — "
+            "see tests/fixtures/pipeline_fakenews_detection/run_factcheck.py."
+        )
+    )
     def test_fakenews_pipeline_all_stage_names_present(self, live_llm):
         pipeline = self._build_live_pipeline(PIPELINE_FAKENEWS / "pipeline.yaml", live_llm)
         result = pipeline.run()
@@ -1062,6 +1093,12 @@ class TestPipelineYamlLiveRun:
         for name in expected:
             assert name in names, f"'{name}' missing from stage names: {names}"
 
+    @pytest.mark.skip(
+        reason=(
+            "pipeline_fakenews_detection requires special domain tools — "
+            "see tests/fixtures/pipeline_fakenews_detection/run_factcheck.py."
+        )
+    )
     def test_fakenews_pipeline_snapshot_accumulates_across_stages(self, live_llm):
         """
         With inject_prior_context=true the final snapshot must contain
@@ -1074,6 +1111,12 @@ class TestPipelineYamlLiveRun:
             "Final snapshot should contain at least one entity after 6 stages"
         )
 
+    @pytest.mark.skip(
+        reason=(
+            "pipeline_fakenews_detection requires special domain tools — "
+            "see tests/fixtures/pipeline_fakenews_detection/run_factcheck.py."
+        )
+    )
     def test_fakenews_pipeline_individual_stage_results(self, live_llm):
         """Each stage result must have a stage_name and elapsed_s."""
         pipeline = self._build_live_pipeline(PIPELINE_FAKENEWS / "pipeline.yaml", live_llm)
