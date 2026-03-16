@@ -113,9 +113,7 @@ try:
         Relation as Relation,
     )
 except ImportError:
-    sys.exit(
-        "✗ rof_framework not found — install it with:  pip install rof"
-    )
+    sys.exit("✗ rof_framework not found — install it with:  pip install rof")
 
 # ── import rof-llm (optional — only used for ResponseParser demo) ─────────────
 try:
@@ -182,9 +180,7 @@ ensure generate support_recommendation for Customer.
 def demo_01_source() -> None:
     section(1, "RelateLang Workflow Source")
     print("  Instead of writing ad-hoc LLM prompts scattered across your codebase,")
-    print(
-        "  you write a single declarative .rl file that encodes your business logic.\n"
-    )
+    print("  you write a single declarative .rl file that encodes your business logic.\n")
     print(CODE("  ┌─ customer_segmentation.rl ─────────────────────────────────────┐"))
     for line in RL_SOURCE.strip().splitlines():
         print(CODE("  │ ") + line)
@@ -343,18 +339,10 @@ def demo_06_context_injector(graph: WorkflowGraph) -> None:
 
     context = injector.build(graph, goal_state)
 
-    print(
-        CODE(
-            "  ┌─ injected context for goal: "
-            + repr(goal_state.goal.goal_expr)
-            + " ──┐"
-        )
-    )
+    print(CODE("  ┌─ injected context for goal: " + repr(goal_state.goal.goal_expr) + " ──┐"))
     for line in context.splitlines():
         print(CODE("  │ ") + line)
-    print(
-        CODE("  └──────────────────────────────────────────────────────────────────┘")
-    )
+    print(CODE("  └──────────────────────────────────────────────────────────────────┘"))
 
     print(
         f"\n  Context size: {len(context)} chars  "
@@ -432,8 +420,7 @@ def demo_07_orchestrator(ast: WorkflowAST) -> RunResult:
     bus.subscribe(
         "goal.status_changed",
         lambda e: print(
-            f"  {DIM('→ goal.status_changed')} "
-            f"[{e.payload['status']}] {e.payload['goal']!r}"
+            f"  {DIM('→ goal.status_changed')} [{e.payload['status']}] {e.payload['goal']!r}"
         ),
     )
     bus.subscribe(
@@ -597,9 +584,7 @@ class SegmentationTool(ToolProvider):
 
         return ToolResponse(
             success=True,
-            output={
-                "Customer": {"segment": segment, "classified_by": "SegmentationTool"}
-            },
+            output={"Customer": {"segment": segment, "classified_by": "SegmentationTool"}},
         )
 
 
@@ -613,8 +598,7 @@ def demo_10_tool_provider(ast: WorkflowAST) -> None:
     bus.subscribe(
         "tool.executed",
         lambda e: print(
-            f"  {DIM('→ tool.executed')}  tool={e.payload['tool']!r} "
-            f"success={e.payload['success']}"
+            f"  {DIM('→ tool.executed')}  tool={e.payload['tool']!r} success={e.payload['success']}"
         ),
     )
     bus.subscribe(
@@ -679,24 +663,15 @@ def demo_11_response_parser() -> None:
             "Customer is priority_support.\n"
             "I recommend assigning a dedicated account manager.",
         ),
-        (
-            "Tool intent embedded in response",
-            "To complete this step I need to search the web for current benchmark data.\n"
-            'Customer has status of "pending".',
-        ),
     ]
 
     for label, text in samples:
         result = parser.parse(text)
         print(f"  {H2(label)}")
         print(f"    input    : {DIM(repr(text[:70] + '…'))}")
-        print(
-            f"    valid_rl : {OK('yes') if result.is_valid_rl else DIM('no (regex fallback)')}"
-        )
+        print(f"    valid_rl : {OK('yes') if result.is_valid_rl else DIM('no (regex fallback)')}")
         print(f"    attr Δ   : {result.attribute_deltas}")
         print(f"    pred Δ   : {result.predicate_deltas}")
-        if result.tool_intent:
-            print(f"    tool     : {H2(result.tool_intent)}")
         print()
 
 
@@ -742,9 +717,7 @@ def demo_summary() -> None:
         print(f"  {mod_str}  {cls_str}  {desc}")
 
     print(f"\n  {OK('All steps completed successfully.')}")
-    print(
-        f"  {DIM('Replace MockLLM with create_provider(...) to run against a real model.')}\n"
-    )
+    print(f"  {DIM('Replace MockLLM with create_provider(...) to run against a real model.')}\n")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -753,9 +726,7 @@ def demo_summary() -> None:
 
 if __name__ == "__main__":
     print(H1("\n  ROF × RelateLang — Framework Demo (no LLM required)"))
-    print(
-        DIM("  Uses a deterministic MockLLM — zero dependencies beyond rof_core.py\n")
-    )
+    print(DIM("  Uses a deterministic MockLLM — zero dependencies beyond rof_core.py\n"))
 
     demo_01_source()
 

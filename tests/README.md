@@ -36,7 +36,7 @@ Tests are organized by domain:
 - Tests workflow execution with mocked providers
 - Tests pipeline multi-stage execution
 - **Live integration tests** (10 tests, skipped by default)
-  - Tests with real LLM providers (OpenAI, Anthropic, Gemini, Ollama)
+  - Tests with real LLM providers (OpenAI, Anthropic, Gemini, Ollama, and generic providers)
   - Requires `ROF_TEST_PROVIDER` environment variable
   - See `LIVE_TESTS_GUIDE.md` for setup instructions
 
@@ -55,7 +55,18 @@ Tests are organized by domain:
 - Tests prompt rendering and response parsing
 - Mock provider integration tests
 
-### 7. **Tools & Registry** (`tests/test_tools_registry.py`)
+### 7. **Generic Providers** (`tests/test_generic_providers.py`) — **new**
+- Tests the `rof_providers.PROVIDER_REGISTRY` contract (structure, types, completeness)
+- Tests the CLI discovery helper (`rof_framework.cli.main._load_generic_providers`)
+- Tests the pipeline-factory discovery helper (`bot_service.pipeline_factory._load_generic_providers`)
+- Tests the `generic_providers` conftest fixture
+- Mock-HTTP `complete()` round-trip for every provider registered in the registry
+  (parametrised — new providers are covered automatically without any code changes here)
+- **Live smoke tests** (skipped by default)
+  - Requires `ROF_TEST_PROVIDER` to match a key in `rof_providers.PROVIDER_REGISTRY`
+  - See [Generic provider live tests](#generic-provider-live-tests) below
+
+### 8. **Tools & Registry** (`tests/test_tools_registry.py`)
 - Tests tool provider interface
 - Tests ToolRegistry registration and lookup
 - Tests ToolRouter keyword and semantic routing
@@ -63,13 +74,13 @@ Tests are organized by domain:
 - Tests `@rof_tool` decorator and `FunctionTool`
 - Tests `create_default_registry` and registry+router integration
 
-### 8. **Pipeline** (`tests/test_pipeline_runner.py`)
+### 9. **Pipeline** (`tests/test_pipeline_runner.py`)
 - Tests multi-stage pipeline orchestration
 - Tests PipelineBuilder fluent API
 - Tests failure handling strategies (HALT, CONTINUE, RETRY)
 - Tests snapshot accumulation and merging
 
-### 9. **Routing** (`tests/test_routing.py`)
+### 10. **Routing** (`tests/test_routing.py`)
 - Tests `GoalPatternNormalizer` – entity/number/stopword stripping, stable pattern keys
 - Tests `RoutingStats` – update logic, EMA confidence, reliability, serialisation
 - Tests `RoutingMemory` – CRUD, persistence via `StateAdapter`, merge-on-load semantics
@@ -155,40 +166,62 @@ To run without coverage (faster, e.g. during active development):
 python -m pytest --no-cov
 ```
 
-### Run Live Integration Tests
+---
+
+## Run Live Integration Tests
 
 Live integration tests execute workflows against **real LLM providers** and are **skipped by default**. They require environment variables to be set.
 
-#### Environment Variables
+The test infrastructure supports two categories of provider:
+
+| Category | Examples | Handled by |
+|---|---|---|
+| **Built-in** | `openai`, `anthropic`, `gemini`, `ollama`, `github_copilot` | `rof_framework.llm.create_provider` |
+| **Generic** | any key in `rof_providers.PROVIDER_REGISTRY` | `rof_providers` package (optional install) |
+
+Both categories use the same three environment variables — no provider-specific variable names appear in the test suite itself.
+
+### Environment Variables
 
 | Variable | Required | Description | Example |
 |----------|----------|-------------|---------|
-| `ROF_TEST_PROVIDER` | **Yes** | Provider name | `openai`, `anthropic`, `gemini`, `ollama` |
-| `ROF_TEST_API_KEY` | No* | API key for provider | `sk-...` |
-| `ROF_TEST_MODEL` | No | Model override | `gpt-4o-mini`, `claude-3-5-sonnet-20241022` |
+| `ROF_TEST_PROVIDER` | **Yes** | Provider name — built-in or any key in `rof_providers.PROVIDER_REGISTRY` | `openai`, `anthropic`, `ollama`, `<registry-key>` |
+| `ROF_TEST_API_KEY` | No* | API key forwarded to the provider | `sk-...` |
+| `ROF_TEST_MODEL` | No | Model override; uses the provider's own default when omitted | `gpt-4o-mini` |
+| `ROF_TEST_BASE_URL` | No | Base URL override for local providers (e.g. Ollama / vLLM) | `http://localhost:11434` |
 
-\* Not required for `ollama` or local providers
+\* Not required for `ollama` or other key-free providers. For generic providers the key is forwarded via the `api_key_kwarg` field declared in `PROVIDER_REGISTRY` — the test harness reads this automatically; you do not need to know the internal field name.
 
-#### Quick Setup Examples
+### How the `live_llm` fixture resolves a provider
+
+The session-scoped `live_llm` fixture defined in `conftest.py` is shared across all live test modules. It resolves `ROF_TEST_PROVIDER` in this order:
+
+1. **Built-in providers** — delegates to `rof_framework.llm.create_provider`.
+2. **Generic providers** — loads `rof_providers.PROVIDER_REGISTRY`, finds the matching entry, reads the constructor kwarg and environment-variable names from the entry, and instantiates the class.
+3. **Unknown name** — skips the test with a message listing all known provider names (built-ins + registry keys).
+
+Nothing provider-specific is hardcoded in the test files. If a new provider is added to `rof_providers.PROVIDER_REGISTRY` it is immediately available for live testing with `ROF_TEST_PROVIDER=<new-key>` — no test-code changes required.
+
+### Built-in provider quick-start
 
 **Windows PowerShell:**
 ```powershell
 # OpenAI (cheapest: gpt-4o-mini)
-$env:ROF_TEST_PROVIDER="openai"
-$env:ROF_TEST_API_KEY="sk-..."
-$env:ROF_TEST_MODEL="gpt-4o-mini"
+$env:ROF_TEST_PROVIDER = "openai"
+$env:ROF_TEST_API_KEY  = "sk-..."
+$env:ROF_TEST_MODEL    = "gpt-4o-mini"
 
 # Anthropic
-$env:ROF_TEST_PROVIDER="anthropic"
-$env:ROF_TEST_API_KEY="sk-ant-..."
-$env:ROF_TEST_MODEL="claude-3-5-sonnet-20241022"
+$env:ROF_TEST_PROVIDER = "anthropic"
+$env:ROF_TEST_API_KEY  = "sk-ant-..."
+$env:ROF_TEST_MODEL    = "claude-3-5-haiku-20241022"
 
-# Ollama (local, FREE - recommended for development)
-$env:ROF_TEST_PROVIDER="ollama"
-$env:ROF_TEST_MODEL="llama3"
+# Ollama (local, FREE — recommended for development)
+$env:ROF_TEST_PROVIDER = "ollama"
+$env:ROF_TEST_MODEL    = "llama3"
 
 # Then run tests
-pytest tests/test_cli.py -v -m live_integration
+pytest tests/ -v -m live_integration
 ```
 
 **Linux/macOS:**
@@ -198,69 +231,148 @@ export ROF_TEST_PROVIDER=openai
 export ROF_TEST_API_KEY=sk-...
 export ROF_TEST_MODEL=gpt-4o-mini
 
+# Anthropic
+export ROF_TEST_PROVIDER=anthropic
+export ROF_TEST_API_KEY=sk-ant-...
+export ROF_TEST_MODEL=claude-3-5-haiku-20241022
+
 # Ollama (local, FREE)
 export ROF_TEST_PROVIDER=ollama
 export ROF_TEST_MODEL=llama3
 
-# Then run tests
-pytest tests/test_cli.py -v -m live_integration
+# Run all live tests
+pytest tests/ -v -m live_integration
 ```
 
-#### Available Live Test Suites
+### Generic provider live tests
 
-| Test Suite | Location | Tests | Description |
-|------------|----------|-------|-------------|
-| CLI Live Tests | `test_cli.py` | 10 | Command execution with real providers |
-| Core Workflows | `test_fixtures_live_integration.py` | varies | Workflow parsing & execution |
-| Tools | `test_tools_live_integration.py` | varies | Tool integration |
-
-#### Running Live Tests
+Generic providers live in the optional `rof_providers` package. Install it first:
 
 ```bash
-# Run ALL live integration tests
-pytest tests/ -v -m live_integration
-
-# Run only CLI live tests
-pytest tests/test_cli.py -v -m live_integration
-
-# Run specific test class
-pytest tests/test_cli.py::TestRunLiveIntegration -v -m live_integration
-
-# Run specific test
-pytest tests/test_cli.py::TestRunLiveIntegration::test_run_customer_segmentation_live -v
-
-# Exclude live tests (default behavior)
-pytest tests/test_cli.py -v -m "not live_integration"
+pip install rof-providers
+# or from source:
+pip install -e ".[all]"
 ```
 
-#### Cost Considerations
+To discover which provider names are registered in the current install:
+
+```bash
+# Quick inspection from the Python REPL:
+python -c "import rof_providers; print(list(rof_providers.PROVIDER_REGISTRY.keys()))"
+
+# Or via the CLI version command:
+rof version
+```
+
+Then set `ROF_TEST_PROVIDER` to any key printed above. The key is the same string you would pass to `--provider` in the CLI.
+
+**Windows PowerShell — generic provider:**
+```powershell
+# Replace <registry-key> with the actual name shown by `rof version`
+# Replace <KEY> with the API key required by that provider
+# (or set the provider-specific env var instead — see its documentation)
+$env:ROF_TEST_PROVIDER = "<registry-key>"
+$env:ROF_TEST_API_KEY  = "<KEY>"
+
+# Optionally pin the model (uses the provider's default when omitted)
+$env:ROF_TEST_MODEL    = "<model-name>"
+
+pytest tests/ -v -m live_integration
+```
+
+**Linux/macOS — generic provider:**
+```bash
+export ROF_TEST_PROVIDER=<registry-key>
+export ROF_TEST_API_KEY=<KEY>
+
+pytest tests/ -v -m live_integration
+```
+
+You can also use the provider-specific environment variable declared in `PROVIDER_REGISTRY` (check `rof_providers.PROVIDER_REGISTRY[name]["env_key"]`) instead of `ROF_TEST_API_KEY`:
+
+```bash
+# Provider-specific env var (looked up automatically from the registry entry)
+export <PROVIDER_ENV_KEY>=<KEY>
+export ROF_TEST_PROVIDER=<registry-key>
+
+pytest tests/ -v -m live_integration
+```
+
+#### Generic-provider-specific test suite
+
+`test_generic_providers.py` contains a dedicated live smoke-test class (`TestGenericProviderLiveSmoke`) that only runs when `ROF_TEST_PROVIDER` matches a registry key. It is automatically skipped for built-in providers.
+
+```bash
+# Unit tests only (no real LLM — always runs):
+pytest tests/test_generic_providers.py -v
+
+# Live smoke test for a generic provider:
+ROF_TEST_PROVIDER=<registry-key> ROF_TEST_API_KEY=<KEY> \
+    pytest tests/test_generic_providers.py -v -m live_integration
+```
+
+### Available live test suites
+
+| Test Suite | File | Tests | Description |
+|---|---|---|---|
+| CLI Live Tests | `test_cli.py` | 10 | CLI commands executed against a real provider |
+| Core Workflows | `test_fixtures_live_integration.py` | varies | `.rl` fixture parsing & orchestrator runs |
+| Tools | `test_tools_live_integration.py` | varies | Every built-in tool against a real LLM |
+| Generic Providers | `test_generic_providers.py` | 5 | Registry-contract smoke tests for generic providers |
+
+### Running live tests — command reference
+
+```bash
+# Run ALL live integration tests (all suites, any provider)
+pytest tests/ -v -m live_integration
+
+# Run all live tests for a specific suite
+pytest tests/test_fixtures_live_integration.py -v -m live_integration
+pytest tests/test_tools_live_integration.py    -v -m live_integration
+pytest tests/test_generic_providers.py         -v -m live_integration
+
+# Run a specific test class
+pytest tests/test_cli.py::TestRunLiveIntegration -v -m live_integration
+
+# Run a single test
+pytest tests/test_cli.py::TestRunLiveIntegration::test_run_customer_segmentation_live -v
+
+# Exclude live tests (default behaviour — nothing extra needed)
+pytest tests/ -v -m "not live_integration"
+```
+
+### Cost considerations
 
 ⚠️ **Warning**: Live tests make real API calls and may incur costs:
 
-| Provider | Approx. Cost/Run | Best For |
-|----------|------------------|----------|
-| **Ollama** | **$0.00** | **Development (recommended)** |
-| Gemini | $0.00 - $0.01 | Free tier available |
-| OpenAI | $0.01 - $0.05 | Use `gpt-4o-mini` |
-| Anthropic | $0.01 - $0.10 | Use `claude-3-5-haiku-20241022` |
+| Provider | Approx. Cost / Run | Notes |
+|---|---|---|
+| **Ollama** | **$0.00** | Local, free — recommended for development |
+| Gemini | $0.00–$0.01 | Free tier available |
+| OpenAI | $0.01–$0.05 | Use `gpt-4o-mini` to minimise cost |
+| Anthropic | $0.01–$0.10 | Use `claude-3-5-haiku-20241022` |
+| Generic providers | varies | Check the provider's pricing page |
 
-**Best Practices:**
-1. Use **Ollama** (local, free) for regular development
-2. Use cheap models for paid providers (`gpt-4o-mini`, `claude-3-5-haiku-20241022`)
-3. Run live tests selectively, not in every commit
-4. Monitor API usage dashboards
+**Best practices:**
+1. Use **Ollama** (local, free) for regular development.
+2. Use cheap models for paid providers (`gpt-4o-mini`, `claude-3-5-haiku-20241022`).
+3. Run live tests selectively, not on every commit.
+4. Monitor your API usage dashboards.
 
-#### Troubleshooting Live Tests
+### Troubleshooting live tests
 
 | Issue | Solution |
-|-------|----------|
-| Tests are skipped | Set `ROF_TEST_PROVIDER` environment variable |
-| Authentication errors | Verify `ROF_TEST_API_KEY` is correct |
-| Timeout errors | Use faster/smaller models |
+|---|---|
+| Tests are skipped | Set `ROF_TEST_PROVIDER` to a built-in or registry key |
+| Unknown provider error | Run `rof version` or `python -c "import rof_providers; print(list(rof_providers.PROVIDER_REGISTRY.keys()))"` to see valid names |
+| Authentication errors | Verify `ROF_TEST_API_KEY` is correct; or set the provider-specific env var (see `PROVIDER_REGISTRY[name]["env_key"]`) |
+| `rof_providers` not installed | `pip install rof-providers` then retry |
+| Generic provider not in registry | Check `rof_providers.PROVIDER_REGISTRY` — the key must match exactly (lowercase) |
+| Timeout errors | Use a faster/smaller model |
 | Ollama connection refused | Start Ollama: `ollama serve` |
-| Model not found | Check provider docs for available models |
+| Model not found | Check available models with `ollama list` or the provider's docs |
 
-For complete documentation, see `tests/LIVE_TESTS_GUIDE.md`.
+For extended documentation on the built-in provider live tests, see `tests/LIVE_TESTS_GUIDE.md`.
 
 > **Why not `--cov=rof_core` etc.?**
 > The source modules (`rof_core`, `rof_llm`, `rof_tools`, `rof_pipeline`, `rof_routing`) all live inside the
@@ -278,9 +390,10 @@ For complete documentation, see `tests/LIVE_TESTS_GUIDE.md`.
 
 ### Optional Dependencies (for specific test domains)
 - `colorama` — coloured output in `run_all_tests.py`
-- `httpx` — WebSearchTool tests
+- `httpx` — WebSearchTool tests and generic provider unit tests
 - `pyyaml` — pipeline tests
 - `sentence-transformers` — embedding-based routing tests
+- `rof-providers` — generic provider tests (`test_generic_providers.py`)
 - `nvidia-ml-py` — silences a PyTorch `FutureWarning` about deprecated `pynvml`
   that surfaces when running routing tests with `sentence-transformers` installed:
   ```cmd
@@ -337,6 +450,71 @@ class TestExampleComponent:
 > `from rof_framework.<module> import ...` — no manual `sys.path` manipulation needed
 > in individual test files.
 
+### Using the shared live fixtures
+
+`conftest.py` provides three session-scoped fixtures available to every test module:
+
+| Fixture | Type | Description |
+|---|---|---|
+| `live_llm` | `LLMProvider` | Real provider resolved from `ROF_TEST_PROVIDER`; skips if not set |
+| `generic_providers` | `dict[str, dict]` | Full `rof_providers.PROVIDER_REGISTRY`; empty dict when package not installed |
+| `generic_provider_names` | `list[str]` | Sorted list of registry keys |
+
+Example — a test that runs for every registered generic provider without naming any of them:
+
+```python
+import pytest
+from rof_framework.core.interfaces.llm_provider import LLMProvider
+
+def test_all_generic_providers_are_llm_providers(generic_providers):
+    for name, spec in generic_providers.items():
+        assert issubclass(spec["cls"], LLMProvider), name
+```
+
+Example — a live test that works for both built-in and generic providers:
+
+```python
+import pytest
+
+@pytest.mark.live_integration
+def test_provider_responds(live_llm):
+    from rof_framework.core.interfaces.llm_provider import LLMRequest
+    result = live_llm.complete(LLMRequest(prompt="Say hello.", max_tokens=16))
+    assert result.content.strip()
+```
+
+### Adding a new generic provider to `rof_providers`
+
+1. Implement the provider class in `src/rof_providers/`.
+2. Export it from `src/rof_providers/__init__.py`.
+3. Add one entry to `PROVIDER_REGISTRY` in `src/rof_providers/__init__.py`:
+
+```python
+PROVIDER_REGISTRY["my_provider"] = {
+    "cls":           MyProvider,          # the class itself
+    "label":         "My Provider Name",  # shown in rof version output
+    "description":   "One-line description for --help text",
+    "api_key_kwarg": "api_key",           # constructor kwarg for the key; None if not needed
+    "env_key":       "MY_PROVIDER_KEY",   # primary env var; None if not needed
+    "env_fallback":  [],                  # additional env vars checked in order
+}
+```
+
+That is the only change required. The CLI (`--provider my_provider`), rof_bot, rof_ai_demo, and the test suite all discover the new provider automatically — no changes needed in `rof_framework` or the test files.
+
+To verify the new provider passes all registry-contract tests:
+
+```bash
+pytest tests/test_generic_providers.py -v
+```
+
+To run the live smoke test:
+
+```bash
+ROF_TEST_PROVIDER=my_provider ROF_TEST_API_KEY=<key> \
+    pytest tests/test_generic_providers.py -v -m live_integration
+```
+
 ---
 
 ## Test Coverage Goals
@@ -349,6 +527,7 @@ class TestExampleComponent:
 | `rof_cli` | **74%** ✓ | > 75% |
 | `rof_pipeline` | ~65% | > 75% |
 | `rof_routing` | varies | > 80% (sections without optional deps skip gracefully) |
+| `rof_providers` | varies | > 80% (covered by `test_generic_providers.py` + `test_fujitsu_provider.py`) |
 
 ---
 
@@ -380,6 +559,27 @@ jobs:
         with:
           name: htmlcov
           path: htmlcov/
+
+  live-tests:
+    # Optional job — only runs when the secret is set in the repository
+    runs-on: windows-latest
+    if: ${{ secrets.ROF_TEST_API_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install rof-providers   # optional — enables generic provider live tests
+      - name: Run live integration tests
+        env:
+          ROF_TEST_PROVIDER: ${{ vars.ROF_TEST_PROVIDER }}
+          ROF_TEST_API_KEY:  ${{ secrets.ROF_TEST_API_KEY }}
+          ROF_TEST_MODEL:    ${{ vars.ROF_TEST_MODEL }}
+        run: python -m pytest tests/ -v -m live_integration --no-cov
 ```
 
 ---
@@ -394,6 +594,10 @@ jobs:
 ### Import Errors
 - Verify `tests/conftest.py` is present — it inserts `src/` into `sys.path` automatically.
 - Ensure the package is installed (editable install recommended): `pip install -e ".[dev]"`.
+
+### Generic provider tests skipped entirely
+- `test_generic_providers.py` unit tests (non-live) skip when `rof_providers` is not installed.
+  Install it with `pip install rof-providers` and re-run.
 
 ### Test Failures
 - Run with `-v` for verbose output (enabled by default via `pyproject.toml`).
@@ -413,9 +617,11 @@ When contributing new tests:
 
 1. Follow the existing test structure and naming conventions.
 2. Add tests to the appropriate domain file or create a new one.
-3. Update this README if adding a new test domain.
-4. Run the full suite (`python -m pytest` from the project root) before submitting a PR.
-5. Aim for meaningful assertions, not just "doesn't crash".
+3. If you are adding a new generic provider to `rof_providers`, verify it passes
+   `pytest tests/test_generic_providers.py -v` before opening a PR — no other test files need changing.
+4. Update this README if adding a new test domain.
+5. Run the full suite (`python -m pytest` from the project root) before submitting a PR.
+6. Aim for meaningful assertions, not just "doesn't crash".
 
 ---
 

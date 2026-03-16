@@ -10,8 +10,13 @@ variables to run them:
     ROF_TEST_PROVIDER   – provider name understood by ``create_provider``:
                           "openai" | "anthropic" | "gemini" | "ollama"
                           | "github_copilot"
+                          | <any key in rof_providers.PROVIDER_REGISTRY>
+                            (generic providers — loaded automatically when
+                            the rof_providers package is installed)
     ROF_TEST_API_KEY    – API key for the chosen provider
-                          (not required for "ollama" / local providers)
+                          (not required for "ollama" / local providers;
+                          for generic providers it is forwarded via the
+                          constructor kwarg declared in PROVIDER_REGISTRY)
     ROF_TEST_MODEL      – (optional) model override, e.g. "gpt-4o-mini"
 
 Example (PowerShell):
@@ -21,7 +26,11 @@ Example (PowerShell):
     pytest tests/test_tools_live_integration.py -v -m live_integration
 
 Example (bash):
-    ROF_TEST_PROVIDER=anthropic ROF_TEST_API_KEY=sk-ant-... \\
+    ROF_TEST_PROVIDER=anthropic ROF_TEST_API_KEY=sk-ant-... \
+        pytest tests/test_tools_live_integration.py -v -m live_integration
+
+    # Generic provider from rof_providers (e.g. any key in PROVIDER_REGISTRY):
+    ROF_TEST_PROVIDER=<registry-key> ROF_TEST_API_KEY=<key> \
         pytest tests/test_tools_live_integration.py -v -m live_integration
 """
 
@@ -95,17 +104,89 @@ def _require_env() -> tuple[str, str | None, str | None]:
     return provider, api_key, model
 
 
+def _load_generic_registry():
+    """Return ``rof_providers.PROVIDER_REGISTRY`` or ``{}`` when not installed."""
+    try:
+        import rof_providers as _rp
+    except ImportError:
+        return {}
+    registry = getattr(_rp, "PROVIDER_REGISTRY", {})
+    return {name: spec for name, spec in registry.items() if spec.get("cls") is not None}
+
+
+def _make_generic_provider(provider_name: str, api_key: str | None, model: str | None):
+    """Instantiate a generic provider from the registry.
+
+    All provider-specific details (class, kwarg names, env vars) are read
+    from the registry entry — nothing is hardcoded here.
+    """
+    registry = _load_generic_registry()
+    spec = registry[provider_name]
+
+    cls = spec["cls"]
+    api_key_kwarg: str | None = spec.get("api_key_kwarg")
+    env_key: str | None = spec.get("env_key")
+    env_fallbacks: list[str] = spec.get("env_fallback", [])
+
+    resolved_key = api_key or ""
+    if not resolved_key and env_key:
+        resolved_key = os.environ.get(env_key, "")
+    if not resolved_key:
+        for fb in env_fallbacks:
+            resolved_key = os.environ.get(fb, "")
+            if resolved_key:
+                break
+
+    kwargs: dict = {}
+    if resolved_key and api_key_kwarg:
+        kwargs[api_key_kwarg] = resolved_key
+    if model:
+        kwargs["model"] = model
+
+    return cls(**kwargs)
+
+
 # ── Fixtures ───────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture(scope="session")
 def live_llm():
-    """Build a real LLMProvider from env-var configuration (session-scoped)."""
-    provider, api_key, model = _require_env()
-    kwargs: dict = {}
-    if model:
-        kwargs["model"] = model
-    return create_provider(provider, api_key=api_key, **kwargs)
+    """Build a real LLMProvider from env-var configuration (session-scoped).
+
+    Supports both built-in providers (openai, anthropic, gemini, ollama,
+    github_copilot) and any generic provider registered in
+    ``rof_providers.PROVIDER_REGISTRY``.  No provider names are hardcoded here.
+
+    Resolution order
+    ----------------
+    1. Built-in providers via ``rof_framework.llm.create_provider``.
+    2. Generic providers discovered from ``rof_providers.PROVIDER_REGISTRY``.
+    """
+    provider_name, api_key, model = _require_env()
+    provider_name = provider_name.lower()
+
+    _BUILTIN_NAMES = {"openai", "anthropic", "gemini", "google", "ollama", "github_copilot"}
+    if provider_name in _BUILTIN_NAMES:
+        kwargs: dict = {}
+        if model:
+            kwargs["model"] = model
+        return create_provider(provider_name, api_key=api_key, **kwargs)
+
+    registry = _load_generic_registry()
+    if provider_name in registry:
+        try:
+            return _make_generic_provider(provider_name, api_key, model)
+        except Exception as exc:
+            pytest.skip(
+                f"Generic provider '{provider_name}' could not be instantiated: {exc}\n"
+                f"Check ROF_TEST_API_KEY or the provider-specific env var."
+            )
+
+    known = sorted(_BUILTIN_NAMES) + sorted(registry.keys())
+    pytest.skip(
+        f"Unknown provider '{provider_name}'.  Supported: {', '.join(known)}"
+        + ("\nInstall rof-providers for additional generic providers." if not registry else "")
+    )
 
 
 @pytest.fixture(scope="session")

@@ -12,9 +12,12 @@
           │  auto-retry on ParseError
           ▼
   Stage 2 — EXECUTION  (Orchestrator + tools)
-          │  keyword routing → AICodeGenTool / WebSearchTool /
-          │  APICallTool / FileReaderTool / ValidatorTool /
-          │  HumanInLoopTool / LLM fallback
+          │  keyword routing → AICodeGenTool (generate + save)
+          │                  → CodeRunnerTool (run non-interactive scripts)
+          │                  → LLMPlayerTool (drive interactive programs)
+          │                  → WebSearchTool / RAGTool / APICallTool
+          │                  → FileReaderTool / ValidatorTool
+          │                  → HumanInLoopTool / LLM fallback
           ▼
   RunResult { success, steps, snapshot, run_id }
           │
@@ -369,7 +372,7 @@ python rof_ai_demo.py --provider github_copilot
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--provider NAME` | — | LLM provider: `anthropic`, `openai`, `ollama`, `github_copilot`, `fujitsu` |
+| `--provider NAME` | — | LLM provider: `anthropic`, `openai`, `ollama`, `github_copilot`, or any generic provider from `rof_providers.PROVIDER_REGISTRY` |
 | `--model NAME` | — | Model name, e.g. `claude-opus-4-5`, `gpt-4o`, `qwen2.5:7b` |
 | `--api-key KEY` | env var | API key for Anthropic / OpenAI |
 | `--base-url URL` | — | Base URL for Ollama / vLLM |
@@ -410,13 +413,21 @@ python rof_ai_demo.py --provider github_copilot
 | `--editor-version VER` | `vscode/1.90.0` | `Editor-Version` header sent to Copilot |
 | `--integration-id ID` | `vscode-chat` | `Copilot-Integration-Id` header |
 
-### Fujitsu AI Foundation options
+### Generic providers (`rof_providers` package)
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--api-key KEY` | `FUJITSU_API_KEY` | Fujitsu Chat-AI API key |
-| `--endpoint URL` | `FUJITSU_CHATAI_ENDPOINT` / public endpoint | Chat-AI endpoint URL override |
-| `--fujitsu-endpoint URL` | same as above | Alias for `--endpoint` |
+Generic providers are optional extensions that live outside `rof_framework` and
+are discovered automatically at runtime from `rof_providers.PROVIDER_REGISTRY`.
+Install the package to make them available:
+
+```sh
+pip install rof-providers
+```
+
+Use `--provider <name>` where `<name>` is any key in the registry.  Run the demo
+without `--provider` to see a full interactive menu that includes all discovered
+generic providers.  Each generic provider declares its own API key constructor
+argument and environment variable — pass `--api-key KEY` or set the appropriate
+env var as shown in its documentation.
 
 ---
 
@@ -428,6 +439,8 @@ Every successful run writes files into `--output-dir` (default `./rof_output`):
 |------|-------------|
 | `rof_plan_<id8>.rl` | The generated RelateLang workflow (.rl source) — includes any auto-appended synthesis or fallback goals |
 | `rof_run_<id8>.json` | Run summary: `run_id`, `success`, `steps`, `snapshot` — steps include retry and fallback attempts |
+| `rof_generated_<ts>.<ext>` | Source file saved by `AICodeGenTool` (`.py`, `.lua`, `.js`, …) |
+| `rof_transcript_<ts>.txt` | Turn-by-turn play transcript saved by `LLMPlayerTool` |
 | `rof_fallback_<ts>.<ext>` | Raw LLM output saved when the planner produced 0 goals |
 | `routing_memory.json` | Persisted learned routing confidence (Tier 3 EMA scores) |
 | `chroma_store/` | ChromaDB embedding database directory (only with `--rag-backend chromadb`) |
@@ -571,19 +584,45 @@ title  : Python (programming language) - Wikipedia
 ## Example prompts
 
 ```
-create a small textadventure in python. play this textadventure and write the choices. save the python file.
-
+# Generate + run (non-interactive)
 Calculate the first 15 Fibonacci numbers in Python
 
 Write a Python script that draws an ASCII bar chart
 
 Generate a JavaScript function to validate email addresses
 
-Write a Lua script that implements a simple calculator
+# Generate + play (interactive — LLM drives stdin)
+Create a small RPG in Python and play it with the LLM player
 
-Create a small questionnaire for CLI, executed in Lua
+Create a small text adventure in Python, play it, and record the choices
 
+Create a small questionnaire for CLI in Lua, run it with the LLM player
+
+# Web search
 Search the web for the latest news about RelateLang
+```
+
+### How AICodeGenTool + execution tools work together
+
+`AICodeGenTool` **only generates and saves** the source file — it never runs
+it.  Every code workflow therefore needs a second goal that executes the file:
+
+| Program type | Execution tool | Example second goal |
+|---|---|---|
+| Non-interactive (pure output) | `CodeRunnerTool` | `ensure run python code.` |
+| Interactive (reads user input) | `LLMPlayerTool` | `ensure play game with llm player and record choices.` |
+
+The planner is instructed to always emit both goals automatically.  If you
+write prompts by hand, follow the same pattern:
+
+```
+# Non-interactive
+ensure generate python code for computing the first 15 Fibonacci numbers.
+ensure run python code.
+
+# Interactive
+ensure generate python code for a small text adventure game.
+ensure play game with llm player and record choices.
 ```
 
 ---
@@ -606,8 +645,8 @@ pip install lupa               # Lua execution in-process (fallback: lua binary)
 # rof_routing ships with rof_framework — no separate install needed
 # when rof_framework is installed from source
 
-# Optional Fujitsu provider
-pip install rof_providers      # FujitsuChatAIProvider
+# Optional providers
+pip install rof-providers      # optional generic providers (e.g. rof_providers.PROVIDER_REGISTRY)
 
 # Knowledge base (ChromaDB persistent backend)
 pip install chromadb sentence-transformers   # persistent vector store + real embeddings

@@ -19,7 +19,7 @@ Optional live-LLM integration tests that exercise:
        - pipeline_load_approval/pipeline.yaml
        - pipeline_fakenews_detection/pipeline.yaml
        - pipeline_output_mode/pipeline.yaml
-       - pipeline_questionnaire/pipeline_questionnaire.yaml
+       - pipeline_questionnaire/pipeline.yaml
 
   4. Pipeline YAML fixtures run against a **real** LLM (skipped by default):
        - pipeline_load_approval          (3-stage)
@@ -32,8 +32,13 @@ variables to enable the live LLM tests:
     ROF_TEST_PROVIDER   – provider name understood by ``create_provider``:
                           "openai" | "anthropic" | "gemini" | "ollama"
                           | "github_copilot"
+                          | <any key in rof_providers.PROVIDER_REGISTRY>
+                            (generic providers — loaded automatically when
+                            the rof_providers package is installed)
     ROF_TEST_API_KEY    – API key for the chosen provider
-                          (not required for "ollama" / local providers)
+                          (not required for "ollama" / local providers;
+                          for generic providers it is forwarded via the
+                          constructor kwarg declared in PROVIDER_REGISTRY)
     ROF_TEST_MODEL      – (optional) model override, e.g. "gpt-4o-mini"
 
 Example (PowerShell):
@@ -44,6 +49,10 @@ Example (PowerShell):
 
 Example (bash):
     ROF_TEST_PROVIDER=anthropic ROF_TEST_API_KEY=sk-ant-... \\
+        pytest tests/test_fixtures_live_integration.py -v -m live_integration
+
+    # Generic provider from rof_providers (e.g. any key in PROVIDER_REGISTRY):
+    ROF_TEST_PROVIDER=<registry-key> ROF_TEST_API_KEY=<key> \\
         pytest tests/test_fixtures_live_integration.py -v -m live_integration
 """
 
@@ -167,7 +176,7 @@ PIPELINE_CONFIGS = [
     ("load_approval", PIPELINE_LOAD_APPROVAL / "pipeline.yaml", 3),
     ("fakenews_detection", PIPELINE_FAKENEWS / "pipeline.yaml", 6),
     ("output_mode", PIPELINE_OUTPUT_MODE / "pipeline.yaml", 2),
-    ("questionnaire", PIPELINE_QUESTIONNAIRE / "pipeline_questionnaire.yaml", 3),
+    ("questionnaire", PIPELINE_QUESTIONNAIRE / "pipeline.yaml", 3),
 ]
 
 
@@ -196,11 +205,69 @@ def _require_env() -> tuple[str, str | None, str | None]:
 
 @pytest.fixture(scope="session")
 def live_llm():
-    """Build a real LLMProvider from env-var configuration (session-scoped)."""
+    """Build a real LLMProvider from env-var configuration (session-scoped).
+
+    Supports both built-in providers (openai, anthropic, gemini, ollama,
+    github_copilot) and any generic provider registered in
+    ``rof_providers.PROVIDER_REGISTRY``.  No provider names are hardcoded here.
+
+    Resolution order
+    ----------------
+    1. Built-in providers via ``rof_framework.llm.create_provider``.
+    2. Generic providers discovered from ``rof_providers.PROVIDER_REGISTRY``.
+
+    Skips automatically when ``ROF_TEST_PROVIDER`` is not set.
+    """
+    # Import the conftest helpers (same module, already on sys.path via conftest.py)
+    import importlib
+    import sys
+
+    _conftest = sys.modules.get("conftest")
+    if _conftest is None:
+        try:
+            import conftest as _conftest  # type: ignore[no-redef]
+        except ImportError:
+            _conftest = None
+
+    # Prefer the conftest implementation which handles generic providers
+    if _conftest is not None and hasattr(_conftest, "_require_live_env"):
+        from conftest import (  # type: ignore[import]
+            _load_generic_registry,
+            _make_generic_provider,
+            _require_live_env,
+        )
+
+        provider_name, api_key, model = _require_live_env()
+
+        _BUILTIN_NAMES = {"openai", "anthropic", "gemini", "google", "ollama", "github_copilot"}
+        if provider_name in _BUILTIN_NAMES:
+            if not ROF_LLM_AVAILABLE:
+                pytest.skip("rof_llm not available")
+            kwargs: dict = {}
+            if model:
+                kwargs["model"] = model
+            if api_key:
+                kwargs["api_key"] = api_key
+            return create_provider(provider_name, **kwargs)
+
+        registry = _load_generic_registry()
+        if provider_name in registry:
+            try:
+                return _make_generic_provider(provider_name, api_key, model)
+            except Exception as exc:
+                pytest.skip(f"Generic provider '{provider_name}' could not be instantiated: {exc}")
+
+        pytest.skip(
+            f"Unknown provider '{provider_name}'. "
+            f"Supported built-ins: {', '.join(sorted(_BUILTIN_NAMES))}. "
+            f"Generic: {', '.join(sorted(registry.keys())) or '(none — install rof-providers)'}."
+        )
+
+    # Fallback: built-ins only (original behaviour)
     if not ROF_LLM_AVAILABLE:
         pytest.skip("rof_llm not available")
     provider, api_key, model = _require_env()
-    kwargs: dict = {}
+    kwargs = {}
     if model:
         kwargs["model"] = model
     return create_provider(provider, api_key=api_key, **kwargs)
@@ -709,10 +776,8 @@ class TestPipelineStageFilesParsing:
 
     @pytest.mark.parametrize(
         "stage_name, rl_path",
-        _pipeline_rl_files(PIPELINE_QUESTIONNAIRE / "pipeline_questionnaire.yaml"),
-        ids=[
-            s for s, _ in _pipeline_rl_files(PIPELINE_QUESTIONNAIRE / "pipeline_questionnaire.yaml")
-        ],
+        _pipeline_rl_files(PIPELINE_QUESTIONNAIRE / "pipeline.yaml"),
+        ids=[s for s, _ in _pipeline_rl_files(PIPELINE_QUESTIONNAIRE / "pipeline.yaml")],
     )
     def test_questionnaire_stage_parses(self, stage_name: str, rl_path: Path):
         """Every questionnaire stage .rl file must parse without exception."""
@@ -857,20 +922,68 @@ class TestPipelineYamlLiveRun:
     Run the pipeline YAML fixtures against a real LLM.
     Skipped automatically unless ROF_TEST_PROVIDER is set.
 
-    Note: pipeline_questionnaire is excluded from the live run suite because
-    stage 2 requires interactive terminal input (LuaRunTool + human answers),
-    which cannot be automated in a CI/headless context.
+    Excluded pipelines
+    ------------------
+    pipeline_questionnaire
+        Stage 2 requires interactive terminal input via LuaRunTool + human
+        answers, which cannot be automated in a CI/headless context.  Lua
+        must also be installed for the tool to function.
+
+    pipeline_fakenews_detection
+        Requires a set of special domain tools (ClaimExtractorTool,
+        SourceLookupTool, SourceCredibilityTool, CrossReferenceTool,
+        BiasDetectorTool, CredibilityScorerTool, ReportFormatterTool) to be
+        registered at runtime — see
+        tests/fixtures/pipeline_fakenews_detection/run_factcheck.py.
+        These tools are not registered in the standard test harness, so the
+        pipeline cannot run correctly in the live integration suite.
     """
+
+    # ── Rate-limit guard ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _skip_on_rate_limit(result) -> None:
+        """
+        Inspect a PipelineResult (or any object with an ``.error`` string) and
+        call ``pytest.skip`` when the error is clearly a provider-side rate
+        limit (HTTP 429 / "rate limit exceeded").
+
+        This prevents transient quota errors from being recorded as test
+        failures, while still letting genuine logic failures through.
+        """
+        error_str = str(getattr(result, "error", "") or "").lower()
+        if "429" in error_str or "rate limit" in error_str:
+            pytest.skip(
+                f"Provider rate-limited (HTTP 429) — skipping instead of failing. "
+                f"Original error: {getattr(result, 'error', '')}"
+            )
 
     @staticmethod
     def _build_live_pipeline(yaml_path: Path, llm):
-        """Build a Pipeline from a YAML file with the given live LLM."""
+        """Build a Pipeline from a YAML file with the given live LLM.
+
+        Mirrors what cmd_pipeline_run() in the CLI does: reads output_mode
+        from each stage entry and passes a per-stage OrchestratorConfig when
+        the mode is explicitly set (i.e. not "auto").
+        """
         raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
         base_dir = yaml_path.parent
 
         builder = PipelineBuilder(llm=llm)
 
         for s in raw.get("stages", []):
+            stage_output_mode = s.get("output_mode", "auto")
+
+            # Build a per-stage OrchestratorConfig only when output_mode is
+            # explicitly overridden.  "auto" means let the provider decide.
+            stage_orch_cfg = None
+            if stage_output_mode != "auto":
+                stage_orch_cfg = OrchestratorConfig(
+                    auto_save_state=False,
+                    pause_on_error=False,
+                    output_mode=stage_output_mode,
+                )
+
             rl_file = s.get("rl_file", "")
             if rl_file:
                 resolved = str(base_dir / rl_file)
@@ -878,6 +991,7 @@ class TestPipelineYamlLiveRun:
                     name=s["name"],
                     rl_file=resolved,
                     description=s.get("description", ""),
+                    orch_config=stage_orch_cfg,
                 )
             else:
                 rl_source = s.get("rl_source", "")
@@ -886,6 +1000,7 @@ class TestPipelineYamlLiveRun:
                         name=s["name"],
                         rl_source=rl_source,
                         description=s.get("description", ""),
+                        orch_config=stage_orch_cfg,
                     )
 
         cfg_raw = raw.get("config", {})
@@ -950,17 +1065,38 @@ class TestPipelineYamlLiveRun:
 
     # ── fakenews_detection (6-stage, on_failure=continue) ───────────────────
 
+    @pytest.mark.skip(
+        reason=(
+            "pipeline_fakenews_detection requires special domain tools "
+            "(ClaimExtractorTool, SourceLookupTool, SourceCredibilityTool, "
+            "CrossReferenceTool, BiasDetectorTool, CredibilityScorerTool, "
+            "ReportFormatterTool) to be registered at runtime.  "
+            "See tests/fixtures/pipeline_fakenews_detection/run_factcheck.py."
+        )
+    )
     def test_fakenews_pipeline_runs(self, live_llm):
         """Full 6-stage fact-check pipeline must complete without raising."""
         pipeline = self._build_live_pipeline(PIPELINE_FAKENEWS / "pipeline.yaml", live_llm)
         result = pipeline.run()
         assert result is not None
 
+    @pytest.mark.skip(
+        reason=(
+            "pipeline_fakenews_detection requires special domain tools — "
+            "see tests/fixtures/pipeline_fakenews_detection/run_factcheck.py."
+        )
+    )
     def test_fakenews_pipeline_has_six_steps(self, live_llm):
         pipeline = self._build_live_pipeline(PIPELINE_FAKENEWS / "pipeline.yaml", live_llm)
         result = pipeline.run()
         assert len(result.steps) == 6, f"Expected 6 stage results, got {len(result.steps)}"
 
+    @pytest.mark.skip(
+        reason=(
+            "pipeline_fakenews_detection requires special domain tools — "
+            "see tests/fixtures/pipeline_fakenews_detection/run_factcheck.py."
+        )
+    )
     def test_fakenews_pipeline_all_stage_names_present(self, live_llm):
         pipeline = self._build_live_pipeline(PIPELINE_FAKENEWS / "pipeline.yaml", live_llm)
         result = pipeline.run()
@@ -976,6 +1112,12 @@ class TestPipelineYamlLiveRun:
         for name in expected:
             assert name in names, f"'{name}' missing from stage names: {names}"
 
+    @pytest.mark.skip(
+        reason=(
+            "pipeline_fakenews_detection requires special domain tools — "
+            "see tests/fixtures/pipeline_fakenews_detection/run_factcheck.py."
+        )
+    )
     def test_fakenews_pipeline_snapshot_accumulates_across_stages(self, live_llm):
         """
         With inject_prior_context=true the final snapshot must contain
@@ -988,6 +1130,12 @@ class TestPipelineYamlLiveRun:
             "Final snapshot should contain at least one entity after 6 stages"
         )
 
+    @pytest.mark.skip(
+        reason=(
+            "pipeline_fakenews_detection requires special domain tools — "
+            "see tests/fixtures/pipeline_fakenews_detection/run_factcheck.py."
+        )
+    )
     def test_fakenews_pipeline_individual_stage_results(self, live_llm):
         """Each stage result must have a stage_name and elapsed_s."""
         pipeline = self._build_live_pipeline(PIPELINE_FAKENEWS / "pipeline.yaml", live_llm)
@@ -1005,16 +1153,19 @@ class TestPipelineYamlLiveRun:
         """2-stage output_mode pipeline must complete without raising."""
         pipeline = self._build_live_pipeline(PIPELINE_OUTPUT_MODE / "pipeline.yaml", live_llm)
         result = pipeline.run()
+        self._skip_on_rate_limit(result)
         assert result is not None
 
     def test_output_mode_pipeline_has_two_steps(self, live_llm):
         pipeline = self._build_live_pipeline(PIPELINE_OUTPUT_MODE / "pipeline.yaml", live_llm)
         result = pipeline.run()
+        self._skip_on_rate_limit(result)
         assert len(result.steps) == 2, f"Expected 2 stage results, got {len(result.steps)}"
 
     def test_output_mode_pipeline_stage_names(self, live_llm):
         pipeline = self._build_live_pipeline(PIPELINE_OUTPUT_MODE / "pipeline.yaml", live_llm)
         result = pipeline.run()
+        self._skip_on_rate_limit(result)
         names = result.stage_names()
         assert "extract" in names, f"'extract' not in stage names: {names}"
         assert "classify" in names, f"'classify' not in stage names: {names}"
@@ -1023,6 +1174,7 @@ class TestPipelineYamlLiveRun:
         """Customer entity seeded in stage 1 must survive into the final snapshot."""
         pipeline = self._build_live_pipeline(PIPELINE_OUTPUT_MODE / "pipeline.yaml", live_llm)
         result = pipeline.run()
+        self._skip_on_rate_limit(result)
         entities = result.final_snapshot.get("entities", {})
         assert "Customer" in entities, (
             f"'Customer' missing from final snapshot. Found: {list(entities.keys())}"
@@ -1035,6 +1187,7 @@ class TestPipelineYamlLiveRun:
         """
         pipeline = self._build_live_pipeline(PIPELINE_OUTPUT_MODE / "pipeline.yaml", live_llm)
         result = pipeline.run()
+        self._skip_on_rate_limit(result)
         classify_result = result.stage("classify")
         if classify_result is not None:
             # input_snapshot is populated when inject_prior_context=true

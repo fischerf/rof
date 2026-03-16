@@ -1,11 +1,11 @@
-"""LLM response parser: detects RL content, extracts state deltas, identifies tool-call intents."""
+"""LLM response parser: detects RL content, extracts state deltas."""
 
 from __future__ import annotations
 
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 from rof_framework.core.interfaces.llm_provider import LLMRequest, LLMResponse
 from rof_framework.core.parser.rl_parser import RLParser
@@ -29,9 +29,6 @@ class ParsedResponse:
     attribute_deltas: dict = field(default_factory=dict)
     # Predicates added: {entity: [pred, ...]}
     predicate_deltas: dict = field(default_factory=dict)
-    # Tool intent: name of tool the response suggests calling, if any
-    tool_intent: Optional[str] = None
-    tool_args: dict = field(default_factory=dict)
     # Whether the response itself is valid RelateLang
     is_valid_rl: bool = False
     # Parsing errors (non-fatal)
@@ -45,7 +42,6 @@ class ResponseParser:
     Responsibilities:
     1. Detect whether the response is (partially) valid RelateLang.
     2. Extract attribute and predicate deltas for graph state updates.
-    3. Detect tool-call intents expressed in natural language or RL.
 
     Usage:
         parser   = ResponseParser()
@@ -53,35 +49,6 @@ class ResponseParser:
         for entity, attrs in parsed.attribute_deltas.items():
             graph.set_attribute(entity, ...)
     """
-
-    # Patterns for tool-call intent detection in natural language
-    _TOOL_INTENT_PATTERNS: list[tuple[re.Pattern, str]] = [
-        (
-            re.compile(
-                r"\b(search|look up|retrieve|fetch|query)\b.+\b(web|internet|online)\b", re.I
-            ),
-            "WebSearchTool",
-        ),
-        (re.compile(r"\b(search|retrieve|query)\b.+\b(database|db|vector|rag)\b", re.I), "RAGTool"),
-        (re.compile(r"\b(execute|run|call)\b.+\b(api|endpoint|http|rest)\b", re.I), "APICallTool"),
-        (
-            re.compile(r"\b(run|execute|compute)\b.+\b(code|script|python|javascript)\b", re.I),
-            "CodeRunnerTool",
-        ),
-        (re.compile(r"\b(query|read)\b.+\b(database|sql|table)\b", re.I), "DatabaseTool"),
-        (
-            re.compile(r"\b(read|parse|open)\b.+\b(file|pdf|csv|docx|document)\b", re.I),
-            "FileReaderTool",
-        ),
-        (
-            re.compile(r"\b(wait|pause|ask|confirm)\b.+\b(human|user|operator|approval)\b", re.I),
-            "HumanInLoopTool",
-        ),
-        (
-            re.compile(r"\b(validate|verify|check)\b.+\b(schema|format|output)\b", re.I),
-            "ValidatorTool",
-        ),
-    ]
 
     # RL statement pattern — a line that ends with '.' and looks declarative
     _RL_LINE_RE = re.compile(
@@ -144,7 +111,6 @@ class ResponseParser:
         # ── JSON mode: parse structured response first ────────────────────────
         if output_mode == "json":
             if self._try_json_parse(content, result):
-                self._detect_tool_intent(content, result)
                 return result
             # Fall through to RL parse if JSON parsing fails
             logger.debug("ResponseParser: JSON mode parse failed, falling back to RL extraction")
@@ -156,9 +122,6 @@ class ResponseParser:
         # 2. Fallback: regex-extract individual RL lines
         if not result.is_valid_rl:
             self._extract_rl_lines(content, result)
-
-        # 3. Tool intent detection
-        self._detect_tool_intent(content, result)
 
         return result
 
@@ -272,44 +235,3 @@ class ResponseParser:
             entity, pred = m.group(1), m.group(2).strip().strip('"')
             result.predicate_deltas.setdefault(entity, []).append(pred)
             result.rl_statements.append(m.group(0).strip())
-
-    def _detect_tool_intent(self, content: str, result: ParsedResponse) -> None:
-        """
-        Detect mentions of tool calls in the response text.
-        Priority: explicit RL tool trigger > NL pattern matching.
-        """
-        # Explicit RL tool trigger: ensure retrieve web_information / ensure call APICallTool
-        explicit_re = re.compile(
-            r"ensure\s+(retrieve\s+web_information"
-            r"|call\s+(\w+Tool)"
-            r"|query\s+database"
-            r"|run\s+code"
-            r"|read\s+file"
-            r"|validate\s+output"
-            r"|pause\s+for\s+human)",
-            re.I,
-        )
-        m = explicit_re.search(content)
-        if m:
-            intent_text = m.group(1).lower()
-            if "web" in intent_text:
-                result.tool_intent = "WebSearchTool"
-            elif "database" in intent_text or "sql" in intent_text:
-                result.tool_intent = "DatabaseTool"
-            elif "code" in intent_text:
-                result.tool_intent = "CodeRunnerTool"
-            elif "file" in intent_text:
-                result.tool_intent = "FileReaderTool"
-            elif "validate" in intent_text:
-                result.tool_intent = "ValidatorTool"
-            elif "human" in intent_text:
-                result.tool_intent = "HumanInLoopTool"
-            elif m.group(2):  # explicit tool name
-                result.tool_intent = m.group(2)
-            return
-
-        # NL pattern matching
-        for pattern, tool_name in self._TOOL_INTENT_PATTERNS:
-            if pattern.search(content):
-                result.tool_intent = tool_name
-                return

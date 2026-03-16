@@ -5,54 +5,60 @@ AICodeGenTool – AI-powered code generation.
 
 from __future__ import annotations
 
-import copy
-import csv
-import hashlib
-import io
-import json
 import logging
-import math
 import os
-import queue
 import re
-import shlex
-import shutil
-import subprocess
 import sys
 import tempfile
-import textwrap
-import threading
 import time
-import uuid
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
 
-from rof_framework.core.interfaces.llm_provider import LLMProvider, LLMRequest, LLMResponse
+from rof_framework.core.interfaces.llm_provider import LLMProvider, LLMRequest
 from rof_framework.core.interfaces.tool_provider import ToolProvider, ToolRequest, ToolResponse
-from rof_framework.tools.tools.code_runner import CodeRunnerTool
-from rof_framework.tools.tools.llm_player import (
-    LLMPlayerTool,
-    _t_bold,
-    _t_cyan,
-    _t_dim,
-    _t_info,
-    _t_red,
-    _t_section,
-    _t_step,
-    _t_warn,
-    _t_yellow,
-)
 
 logger = logging.getLogger("rof.tools")
 
 __all__ = ["AICodeGenTool", "CODEGEN_SYSTEM"]
 
-# AICodeGenTool
-# Calls the LLM to generate code, then runs it via CodeRunnerTool.
-# Interactive scripts (questionnaires, menus) are saved to disk instead.
+# ---------------------------------------------------------------------------
+# Console helpers (shared with LLMPlayerTool via import in other modules)
+# ---------------------------------------------------------------------------
+
+_USE_COLOUR = (
+    sys.stdout.isatty() and os.name != "nt" or (os.name == "nt" and os.environ.get("WT_SESSION"))
+)
+
+
+def _tc(text: str, code: str) -> str:
+    return f"\033[{code}m{text}\033[0m" if _USE_COLOUR else text
+
+
+def _t_cyan(t: str) -> str:
+    return _tc(t, "96")
+
+
+def _t_bold(t: str) -> str:
+    return _tc(t, "1")
+
+
+def _t_dim(t: str) -> str:
+    return _tc(t, "2")
+
+
+def _t_section(title: str) -> None:
+    print(f"\n{_t_dim('-' * 50)}")
+    print(f"  {_t_cyan(title)}")
+    print(_t_dim("-" * 50))
+
+
+def _t_info(text: str) -> None:
+    print(f"  {_t_dim('     ')}  {text}")
+
+
+# ---------------------------------------------------------------------------
+# System prompt
+# ---------------------------------------------------------------------------
+
 CODEGEN_SYSTEM = """\
 You are an expert programmer. Generate ONLY the requested source code.
 
@@ -61,57 +67,60 @@ Rules:
 - NO markdown fences (no ```lua or ```python).
 - NO prose, NO explanation before or after the code.
 - The code must be complete and runnable as-is.
-- For interactive programs (questionnaires, menus): use print() / io.write()
-  for prompts and io.read() / input() for answers. The code will be run
-  directly in the terminal so the user can interact with it live.
+- For interactive programs (questionnaires, games, menus): use print() /
+  io.write() for prompts and input() / io.read() for answers.
 - Prefer clear, readable code with comments.
 """
 
 
+# ---------------------------------------------------------------------------
+# Tool
+# ---------------------------------------------------------------------------
+
+
 class AICodeGenTool(ToolProvider):
     """
-    AI-powered code generation + execution tool.
+    AI-powered code generation tool.
 
-    Workflow:
-        1. Extract language and description from the goal / graph context
-        2. Call the LLM with a precise code-generation prompt
-        3. Strip any accidental markdown fences from the response
-        4. If the code is interactive (io.read, input(), readline…)
-              -> save to file, tell user to run it themselves
-           Else
-              -> execute via CodeRunnerTool and return stdout
+    Workflow
+    --------
+    1. Extract language and description from the goal / graph context.
+    2. Call the LLM with a precise code-generation prompt.
+    3. Strip any accidental markdown fences from the response.
+    4. Save the generated source file to ``output_dir``.
+    5. Return a ``ToolResponse`` whose output contains the entity attributes
+       ``language``, ``saved_to``, and ``filename``.
+
+    This tool deliberately does **not** execute the generated code.
+    Execution is the responsibility of downstream tools:
+
+    * ``CodeRunnerTool``  — runs non-interactive scripts and captures stdout.
+    * ``LLMPlayerTool``  — drives interactive programs (games, questionnaires)
+                           through their stdin/stdout pipe using the LLM as
+                           the player.
+
+    Trigger keywords
+    ----------------
+    "generate python code" / "generate lua code" / "generate javascript code"
+    "generate code" / "write code" / "implement code" / "create code"
     """
-
-    # Languages that commonly produce interactive CLIs
-    _INTERACTIVE_MARKERS = {
-        "lua": ["io.read", "io.write", "stdin"],
-        "python": ["input(", "sys.stdin", "getpass"],
-        "javascript": ["readline", "prompt(", "process.stdin"],
-    }
-
-    # Runtime commands for interactive execution
-    _LANG_CMD = {
-        "python": [sys.executable],
-        "lua": ["lua"],
-        "javascript": ["node"],
-        "js": ["node"],
-        "shell": ["bash"],
-    }
 
     def __init__(
         self,
         llm: LLMProvider,
-        output_dir: Optional[Path] = None,
-        code_timeout: float = 30.0,
+        output_dir: Path | None = None,
         max_tokens: int = 4096,
-        llm_timeout: float = 300.0,  # generous timeout for slow local models
+        llm_timeout: float = 300.0,
     ):
         self._llm = llm
         self._output_dir = output_dir or Path(tempfile.gettempdir()) / "rof_codegen"
-        self._code_timeout = code_timeout
         self._max_tokens = max_tokens
         self._llm_timeout = llm_timeout
         self._output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # ToolProvider interface
+    # ------------------------------------------------------------------
 
     @property
     def name(self) -> str:
@@ -195,6 +204,7 @@ class AICodeGenTool(ToolProvider):
             "javascript": ".js",
             "js": ".js",
             "shell": ".sh",
+            "bash": ".sh",
         }
         ext = ext_map.get(lang, f".{lang}")
         filename = f"rof_generated_{int(time.time())}{ext}"
@@ -204,171 +214,26 @@ class AICodeGenTool(ToolProvider):
         # --- Display generated code ------------------------------------
         _t_section(f"Generated {lang} code  [{filename}]")
         self._print_code(code, lang)
+        print()
+        _t_info(f"Saved to: {_t_bold(str(out_path))}")
+        print()
 
-        # --- Decide: run or hand off to user ---------------------------
-        is_interactive = self._is_interactive(code, lang)
-
-        if is_interactive:
-            _t_section("Interactive program detected")
-            print(
-                f"  {_t_yellow('This script reads from stdin — running it now in the terminal.')}"
-            )
-            print(f"  Script: {_t_bold(str(out_path))}")
-            print()
-
-            run_result = self._run_interactive(lang, out_path)
-
-            entity_name = self._entity_name(context)
-            if run_result["success"]:
-                return ToolResponse(
-                    success=True,
-                    output={
-                        entity_name: {
-                            "language": lang,
-                            "saved_to": str(out_path),
-                            "interactive": True,
-                            "returncode": run_result["returncode"],
-                        }
-                    },
-                )
-            else:
-                # Script failed to launch (missing runtime, etc.) — fall back
-                # to the old "save and tell user" behaviour so the workflow
-                # does not break silently.
-                run_cmd = self._run_cmd_str(lang, out_path.name)
-                _t_warn(f"Could not run interactively: {run_result['error']}")
-                print(f"  The script has been saved to:")
-                print(f"  {_t_bold(str(out_path))}")
-                print(f"  Run it manually with:  {_t_cyan(run_cmd)}")
-                print()
-                return ToolResponse(
-                    success=True,
-                    output={
-                        entity_name: {
-                            "language": lang,
-                            "saved_to": str(out_path),
-                            "interactive": True,
-                            "run_with": run_cmd,
-                        }
-                    },
-                )
-
-        # --- Execute non-interactive code ------------------------------
-        _t_section(f"Executing {lang} code")
-        runner = CodeRunnerTool(default_timeout=self._code_timeout)
-        run_req = ToolRequest(
-            name="CodeRunnerTool",
-            input={"language": lang, "code": code},
-            goal=goal,
-        )
-        run_resp = runner.execute(run_req)
-
-        if run_resp.success:
-            stdout = run_resp.output.get("stdout", "").strip()
-            _t_step("OUTPUT", "")
-            if stdout:
-                for line in stdout.splitlines():
-                    print(f"           {line}")
-            else:
-                _t_info("(no stdout output)")
-        else:
-            _t_warn(f"Execution failed: {run_resp.error}")
-            stderr = run_resp.output.get("stderr", "") if run_resp.output else ""
-            if stderr:
-                for line in stderr.splitlines():
-                    print(f"  {_t_red(line)}")
-
+        # --- Return saved_to so downstream tools can find the file -----
         entity_name = self._entity_name(context)
         return ToolResponse(
-            success=run_resp.success,
+            success=True,
             output={
                 entity_name: {
                     "language": lang,
                     "saved_to": str(out_path),
-                    "stdout": run_resp.output.get("stdout", "") if run_resp.output else "",
-                    "stderr": run_resp.output.get("stderr", "") if run_resp.output else "",
+                    "filename": filename,
                 }
             },
-            error=run_resp.error if not run_resp.success else "",
         )
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-
-    def _run_interactive(self, lang: str, script_path: Path) -> dict:
-        """Run an interactive script with the terminal's stdin/stdout/stderr
-        inherited directly, so the user can see output and type answers live.
-
-        Returns a dict with keys: success (bool), returncode (int), error (str).
-        """
-        base_cmd = self._LANG_CMD.get(lang)
-        if base_cmd is None:
-            # Unknown language — try to find a shebang or give up
-            return {
-                "success": False,
-                "returncode": -1,
-                "error": f"No runtime known for lang={lang!r}",
-            }
-
-        # Resolve the interpreter: for Lua check several binary names
-        import shutil as _shutil
-
-        if lang == "lua":
-            for candidate in ("lua", "lua5.4", "lua5.3", "luajit"):
-                if _shutil.which(candidate):
-                    base_cmd = [candidate]
-                    break
-            else:
-                return {
-                    "success": False,
-                    "returncode": -1,
-                    "error": "No Lua interpreter found on PATH",
-                }
-        elif lang in ("javascript", "js"):
-            for candidate in ("node", "nodejs"):
-                if _shutil.which(candidate):
-                    base_cmd = [candidate]
-                    break
-            else:
-                return {
-                    "success": False,
-                    "returncode": -1,
-                    "error": "No Node.js interpreter found on PATH",
-                }
-
-        cmd = base_cmd + [str(script_path)]
-
-        # Force UTF-8 output on Windows so printed characters are not garbled
-        env = os.environ.copy()
-        env["PYTHONIOENCODING"] = "utf-8"
-
-        try:
-            # stdin / stdout / stderr are NOT piped — they go straight to the
-            # real terminal so the user sees the questions and can type answers.
-            proc = subprocess.run(
-                cmd,
-                stdin=sys.stdin,
-                stdout=sys.stdout,
-                stderr=sys.stderr,
-                env=env,
-            )
-            return {"success": True, "returncode": proc.returncode, "error": ""}
-        except FileNotFoundError as exc:
-            return {"success": False, "returncode": -1, "error": str(exc)}
-        except Exception as exc:
-            return {"success": False, "returncode": -1, "error": str(exc)}
-
-    @staticmethod
-    def _run_cmd_str(lang: str, filename: str) -> str:
-        """Human-readable run command for the fallback message."""
-        return {
-            "lua": f"lua {filename}",
-            "python": f"python {filename}",
-            "javascript": f"node {filename}",
-            "js": f"node {filename}",
-            "shell": f"bash {filename}",
-        }.get(lang, f"./{filename}")
 
     def _entity_name(self, context: dict) -> str:
         """Pick the entity name to write results back into the graph.
@@ -399,8 +264,6 @@ class AICodeGenTool(ToolProvider):
             "ruby",
             "go",
             "rust",
-            "c",
-            "cpp",
         ):
             if lang in goal_lower:
                 return lang
@@ -442,12 +305,6 @@ class AICodeGenTool(ToolProvider):
         text = re.sub(r"^```[a-zA-Z]*\n?", "", text.strip(), flags=re.MULTILINE)
         text = re.sub(r"\n?```\s*$", "", text.strip(), flags=re.MULTILINE)
         return text.strip()
-
-    def _is_interactive(self, code: str, lang: str) -> bool:
-        """Heuristic: does this code read from stdin?"""
-        markers = self._INTERACTIVE_MARKERS.get(lang, [])
-        code_lower = code.lower()
-        return any(m.lower() in code_lower for m in markers)
 
     @staticmethod
     def _print_code(code: str, lang: str) -> None:

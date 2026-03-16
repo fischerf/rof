@@ -9,13 +9,13 @@ together and assert on the *actual outputs* produced at each stage.
 
 Chains tested
 -------------
-Chain 1 — Search → CodeGen → File
-    WebSearchTool  →  AICodeGenTool  →  (code executes and writes CSV)
+Chain 1 — Search → CodeGen → CodeRunner → File
+    WebSearchTool  →  AICodeGenTool (saves script)  →  CodeRunnerTool (runs it)
     Verifies: search data reaches code-gen prompt; generated code runs and
     produces a file on disk.
 
-Chain 2 — Search → CodeGen produces data → FileReader reads it → FileSave saves report
-    WebSearchTool  →  AICodeGenTool (writes data.txt)
+Chain 2 — Search → CodeGen → CodeRunner produces data → FileReader reads it → FileSave saves report
+    WebSearchTool  →  AICodeGenTool (saves script)  →  CodeRunnerTool (runs it)
     →  FileReaderTool (reads data.txt)  →  FileSaveTool (writes report.txt)
     Verifies: the full 4-tool chain; FileSaveTool receives FileReader content.
 
@@ -31,8 +31,16 @@ Chain 5 — Search → CodeGen → CodeRunner (explicit run goal)
     WebSearchTool  →  AICodeGenTool (saves script)  →  CodeRunnerTool (runs it)
     Verifies: the saved script path flows from AICodeGenTool to CodeRunnerTool.
 
+Chain 6 — Full 5-tool chain
+    WebSearchTool  →  AICodeGenTool (saves script)  →  CodeRunnerTool (runs it)
+    →  FileSaveTool  →  FileReaderTool
+    Verifies: the complete end-to-end pipeline.
+
 Design notes
 ------------
+- AICodeGenTool ONLY generates and saves the source file — it never executes
+  it.  Every pipeline that expects code to run must include a separate
+  CodeRunnerTool goal immediately after the AICodeGenTool goal.
 - No real network calls: WebSearchTool uses backend="mock" (returns synthetic
   SearchResult objects) or patches _search().
 - No real LLM calls: AICodeGenTool's LLM is replaced with a _StubCodeGenLLM
@@ -186,12 +194,13 @@ def _run_pipeline(
 class TestChain_Search_CodeGen_CSV:
     """
     WebSearchTool finds articles, AICodeGenTool receives them in context and
-    generates Python code that writes a CSV to disk.
+    generates Python code that writes a CSV to disk.  CodeRunnerTool executes
+    the saved script.
 
     The stub LLM emits code that reads the context attributes passed to the
     prompt and writes them as a CSV row.  We verify:
       1. AICodeGenTool's LLM prompt contains the search result data.
-      2. The generated code is executed.
+      2. CodeRunnerTool executes the saved script.
       3. The CSV file appears on disk with the expected content.
     """
 
@@ -221,14 +230,16 @@ class TestChain_Search_CodeGen_CSV:
         stub_llm = _StubCodeGenLLM([generated_code])
         search_tool = WebSearchTool(backend="mock")
         codegen_tool = AICodeGenTool(llm=stub_llm, output_dir=tmp_path)
+        runner_tool = CodeRunnerTool()
 
         with patch.object(search_tool, "_search", return_value=_mock_search_results(2)):
             source = (
                 'define Task as "AI news CSV".\n'
                 "ensure retrieve web_information about artificial intelligence news.\n"
-                "ensure generate python code for writing ai_news.csv from the collected data."
+                "ensure generate python code for writing ai_news.csv from the collected data.\n"
+                "ensure run python code."
             )
-            _run_pipeline(source, [search_tool, codegen_tool], llm=stub_llm)
+            _run_pipeline(source, [search_tool, codegen_tool, runner_tool], llm=stub_llm)
 
         # The stub LLM must have received at least one prompt
         assert stub_llm.prompts_received, "AICodeGenTool never called the LLM"
@@ -239,7 +250,7 @@ class TestChain_Search_CodeGen_CSV:
         )
 
     def test_csv_file_created_on_disk(self, tmp_path: Path):
-        """Generated code executes and produces a real CSV file."""
+        """Generated code is saved by AICodeGenTool, executed by CodeRunnerTool, and produces a real CSV file."""
         csv_path = tmp_path / "output.csv"
 
         generated_code = textwrap.dedent(f"""\
@@ -257,14 +268,16 @@ class TestChain_Search_CodeGen_CSV:
         stub_llm = _StubCodeGenLLM([generated_code])
         search_tool = WebSearchTool(backend="mock")
         codegen_tool = AICodeGenTool(llm=stub_llm, output_dir=tmp_path)
+        runner_tool = CodeRunnerTool()
 
         with patch.object(search_tool, "_search", return_value=_mock_search_results(2)):
             source = (
                 'define Task as "CSV export".\n'
                 "ensure retrieve web_information about python news.\n"
-                "ensure generate python code for writing output.csv."
+                "ensure generate python code for writing output.csv.\n"
+                "ensure run python code."
             )
-            _run_pipeline(source, [search_tool, codegen_tool], llm=stub_llm)
+            _run_pipeline(source, [search_tool, codegen_tool, runner_tool], llm=stub_llm)
 
         assert csv_path.exists(), f"CSV not found at {csv_path}"
         rows = list(csv.DictReader(csv_path.open()))
@@ -273,7 +286,7 @@ class TestChain_Search_CodeGen_CSV:
         assert rows[1]["url"] == "http://example.com/2"
 
     def test_graph_has_codegen_entity_after_run(self, tmp_path: Path):
-        """WorkflowGraph has a codegen result entity after AICodeGenTool executes."""
+        """WorkflowGraph has a codegen result entity (saved_to) after AICodeGenTool runs."""
         csv_path = tmp_path / "result.csv"
         generated_code = textwrap.dedent(f"""\
             with open({str(csv_path)!r}, "w") as f:
@@ -283,14 +296,16 @@ class TestChain_Search_CodeGen_CSV:
         stub_llm = _StubCodeGenLLM([generated_code])
         search_tool = WebSearchTool(backend="mock")
         codegen_tool = AICodeGenTool(llm=stub_llm, output_dir=tmp_path)
+        runner_tool = CodeRunnerTool()
 
         with patch.object(search_tool, "_search", return_value=_mock_search_results(1)):
             source = (
                 'define Task as "result check".\n'
                 "ensure retrieve web_information about climate news.\n"
-                "ensure generate python code for writing result.csv."
+                "ensure generate python code for writing result.csv.\n"
+                "ensure run python code."
             )
-            entities = _run_pipeline(source, [search_tool, codegen_tool], llm=stub_llm)
+            entities = _run_pipeline(source, [search_tool, codegen_tool, runner_tool], llm=stub_llm)
 
         # AICodeGenTool writes a result entity with 'saved_to' attribute
         codegen_entities = {
@@ -310,18 +325,19 @@ class TestChain_Search_CodeGen_CSV:
 
 class TestChain_Search_CodeGen_FileReader_FileSave:
     """
-    Full 4-tool chain:
+    Full 5-tool chain:
       1. WebSearchTool  — finds articles (mocked)
-      2. AICodeGenTool  — generates code that writes a text file
-      3. FileReaderTool — reads that file back into the graph
-      4. FileSaveTool   — writes a report using the read content
+      2. AICodeGenTool  — generates code that writes a text file (save only)
+      3. CodeRunnerTool — executes the saved script, producing the text file
+      4. FileReaderTool — reads that file back into the graph
+      5. FileSaveTool   — writes a report using the read content
 
-    This is the pattern: search → process → persist → read back → save report.
+    This is the pattern: search → codegen → run → read back → save report.
     """
 
     def _build_tools(self, tmp_path: Path, data_file: Path, report_file: Path):
-        """Build the 4-tool list with deterministic stubs."""
-        # AICodeGenTool writes the data file when its generated code runs
+        """Build the 5-tool list with deterministic stubs."""
+        # AICodeGenTool saves the script; CodeRunnerTool runs it to write data_file
         write_code = textwrap.dedent(f"""\
             with open({str(data_file)!r}, "w") as f:
                 f.write("title: Article 1\\nurl: https://example.com/1\\n")
@@ -330,12 +346,13 @@ class TestChain_Search_CodeGen_FileReader_FileSave:
         stub_llm = _StubCodeGenLLM([write_code])
         search_tool = WebSearchTool(backend="mock")
         codegen_tool = AICodeGenTool(llm=stub_llm, output_dir=tmp_path)
+        runner_tool = CodeRunnerTool()
         reader_tool = FileReaderTool()
         save_tool = FileSaveTool()
-        return [search_tool, codegen_tool, reader_tool, save_tool], stub_llm
+        return [search_tool, codegen_tool, runner_tool, reader_tool, save_tool], stub_llm
 
     def test_data_file_written_by_codegen(self, tmp_path: Path):
-        """AICodeGenTool's code execution creates the intermediate data file."""
+        """AICodeGenTool saves the script; CodeRunnerTool executes it to create the intermediate data file."""
         data_file = tmp_path / "data.txt"
         report_file = tmp_path / "report.txt"
         tools, stub_llm = self._build_tools(tmp_path, data_file, report_file)
@@ -343,15 +360,16 @@ class TestChain_Search_CodeGen_FileReader_FileSave:
 
         with patch.object(search_tool, "_search", return_value=_mock_search_results(2)):
             source = (
-                'define Task as "4-tool chain".\n'
+                'define Task as "5-tool chain".\n'
                 f'Task has data_file of "{data_file}".\n'
                 f'Task has report_file of "{report_file}".\n'
                 "ensure retrieve web_information about tech industry news.\n"
                 f"ensure generate python code for writing collected data to {data_file.name}.\n"
+                "ensure run python code.\n"
                 f'ensure read file at path "{data_file}".\n'
                 f'ensure save file with report content to "{report_file}".'
             )
-            # Run only the first two goals — just verify data_file is created
+            # Run all goals — verify data_file is created by CodeRunnerTool
             ast = RLParser().parse(source)
             bus = EventBus()
             orch = Orchestrator(
@@ -880,10 +898,10 @@ class TestChain_Search_CodeGen_ExplicitRun:
 
     def test_search_results_available_when_codegen_writes_script(self, tmp_path: Path):
         """
-        3-goal pipeline: search → codegen (writes file) → codegen result in graph.
+        3-goal pipeline: search → codegen (saves script) → run (writes file).
 
-        Verifies that the script written by AICodeGenTool (via the stub LLM)
-        actually embeds search data from the graph into its output file.
+        Verifies that the script saved by AICodeGenTool is executed by
+        CodeRunnerTool, and the output file actually appears on disk.
         """
         output_file = tmp_path / "search_export.txt"
 
@@ -901,14 +919,16 @@ class TestChain_Search_CodeGen_ExplicitRun:
         stub_llm = _StubCodeGenLLM([generated_code])
         search_tool = WebSearchTool(backend="mock")
         codegen_tool = AICodeGenTool(llm=stub_llm, output_dir=tmp_path)
+        runner_tool = CodeRunnerTool()
 
         with patch.object(search_tool, "_search", return_value=_mock_search_results(3)):
             source = (
                 'define Task as "search and export".\n'
                 "ensure retrieve web_information about latest AI research.\n"
-                f"ensure generate python code for writing search_export.txt with results."
+                "ensure generate python code for writing search_export.txt with results.\n"
+                "ensure run python code."
             )
-            _run_pipeline(source, [search_tool, codegen_tool], llm=stub_llm)
+            _run_pipeline(source, [search_tool, codegen_tool, runner_tool], llm=stub_llm)
 
         assert output_file.exists(), f"Export file not created: {output_file}"
         text = output_file.read_text()
@@ -925,31 +945,32 @@ class TestChain_Search_CodeGen_ExplicitRun:
 
 class TestChain_Full_Five_Tools:
     """
-    The complete chain described in the issue:
+    The complete chain:
 
       WebSearchTool   →  finds articles (mocked)
-      AICodeGenTool   →  generates code that computes/aggregates data
-      CodeRunnerTool  →  executes that code (internal to AICodeGenTool)
+      AICodeGenTool   →  generates and saves a Python script (no execution)
+      CodeRunnerTool  →  executes the saved script
       FileSaveTool    →  saves a report string as a file
       FileReaderTool  →  reads the report back for final verification
 
-    Because AICodeGenTool already calls CodeRunnerTool internally (for
-    non-interactive code), the orchestrator-level chain is:
+    AICodeGenTool and CodeRunnerTool are always separate orchestrator goals.
+    The orchestrator-level chain is:
 
-      WebSearchTool → AICodeGenTool (runs code inside) → FileSaveTool → FileReaderTool
+      WebSearchTool → AICodeGenTool (saves script) → CodeRunnerTool (runs it)
+      → FileSaveTool → FileReaderTool
 
-    We test the full 4-goal version where FileSaveTool receives the code
-    output and FileReaderTool reads it back.
+    We test the full pipeline where the code writes a file, FileSaveTool
+    receives the code output, and FileReaderTool reads it back.
     """
 
     def test_full_chain_file_exists_after_pipeline(self, tmp_path: Path):
         """
-        Full pipeline produces a file on disk whose content originates from
-        the code executed inside AICodeGenTool.
+        Full pipeline: AICodeGenTool saves the script, CodeRunnerTool executes
+        it, and the report file appears on disk.
         """
         report_file = tmp_path / "final_report.txt"
 
-        # AICodeGenTool generates code that writes the report file
+        # Stub LLM generates code that writes the report file
         write_report_code = textwrap.dedent(f"""\
             content = (
                 "=== AI News Report ===\\n"
@@ -965,14 +986,18 @@ class TestChain_Full_Five_Tools:
         stub_llm = _StubCodeGenLLM([write_report_code])
         search_tool = WebSearchTool(backend="mock")
         codegen_tool = AICodeGenTool(llm=stub_llm, output_dir=tmp_path)
+        runner_tool = CodeRunnerTool()
 
         with patch.object(search_tool, "_search", return_value=_mock_search_results(3)):
             source = (
                 'define Task as "full 5-tool chain".\n'
                 "ensure retrieve web_information about AI research breakthroughs.\n"
-                f"ensure generate python code for writing final_report.txt from the data."
+                "ensure generate python code for writing final_report.txt from the data.\n"
+                "ensure run python code."
             )
-            result_entities = _run_pipeline(source, [search_tool, codegen_tool], llm=stub_llm)
+            result_entities = _run_pipeline(
+                source, [search_tool, codegen_tool, runner_tool], llm=stub_llm
+            )
 
         assert report_file.exists(), f"Report file not created: {report_file}"
         report_text = report_file.read_text()

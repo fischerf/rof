@@ -64,10 +64,6 @@ class TestParsedResponseDefaults:
         r = ParsedResponse(raw_content="")
         assert r.predicate_deltas == {}
 
-    def test_tool_intent_default_none(self):
-        r = ParsedResponse(raw_content="")
-        assert r.tool_intent is None
-
     def test_is_valid_rl_default_false(self):
         r = ParsedResponse(raw_content="")
         assert r.is_valid_rl is False
@@ -414,104 +410,7 @@ class TestThinkTagStripping:
 
 
 # ===========================================================================
-# Section 8 – Tool intent detection: explicit RL triggers
-# ===========================================================================
-
-
-class TestExplicitToolIntentDetection:
-    def test_ensure_retrieve_web_detects_web_search(self):
-        content = "ensure retrieve web_information about current events."
-        r = _parse(content, output_mode="rl")
-        assert r.tool_intent == "WebSearchTool"
-
-    def test_ensure_query_database_detects_database(self):
-        content = "ensure query database for user records."
-        r = _parse(content, output_mode="rl")
-        assert r.tool_intent == "DatabaseTool"
-
-    def test_ensure_run_code_detects_code_runner(self):
-        content = "ensure run code to process the data."
-        r = _parse(content, output_mode="rl")
-        assert r.tool_intent == "CodeRunnerTool"
-
-    def test_ensure_read_file_detects_file_reader(self):
-        content = "ensure read file from the storage."
-        r = _parse(content, output_mode="rl")
-        assert r.tool_intent == "FileReaderTool"
-
-    def test_ensure_validate_output_detects_validator(self):
-        content = "ensure validate output against schema."
-        r = _parse(content, output_mode="rl")
-        assert r.tool_intent == "ValidatorTool"
-
-    def test_ensure_pause_for_human_detects_human_loop(self):
-        content = "ensure pause for human approval."
-        r = _parse(content, output_mode="rl")
-        assert r.tool_intent == "HumanInLoopTool"
-
-    def test_no_ensure_trigger_returns_none_intent_for_plain_prose(self):
-        content = "The analysis is complete. No further action needed."
-        r = _parse(content, output_mode="rl")
-        assert r.tool_intent is None
-
-
-# ===========================================================================
-# Section 9 – Tool intent detection: natural language patterns
-# ===========================================================================
-
-
-class TestNaturalLanguageToolIntentDetection:
-    def test_nl_search_web_detects_web_search(self):
-        content = "I will search the web for the latest information on this topic."
-        r = _parse(content, output_mode="rl")
-        assert r.tool_intent == "WebSearchTool"
-
-    def test_nl_retrieve_online_detects_web_search(self):
-        content = "Let me retrieve this data from the internet."
-        r = _parse(content, output_mode="rl")
-        assert r.tool_intent == "WebSearchTool"
-
-    def test_nl_query_database_detects_database(self):
-        # The RAGTool pattern also matches "query" + "database", and it
-        # appears earlier in _TOOL_INTENT_PATTERNS than DatabaseTool.
-        # Use a phrase that uniquely targets DatabaseTool via "read" + "sql".
-        content = "I need to read the SQL table to get user records."
-        r = _parse(content, output_mode="rl")
-        assert r.tool_intent == "DatabaseTool"
-
-    def test_nl_execute_api_detects_api_call(self):
-        content = "I will execute an API call to the REST endpoint."
-        r = _parse(content, output_mode="rl")
-        assert r.tool_intent == "APICallTool"
-
-    def test_nl_run_python_detects_code_runner(self):
-        content = "I will run a Python script to compute the result."
-        r = _parse(content, output_mode="rl")
-        assert r.tool_intent == "CodeRunnerTool"
-
-    def test_nl_read_csv_file_detects_file_reader(self):
-        content = "I need to read the CSV file to extract data."
-        r = _parse(content, output_mode="rl")
-        assert r.tool_intent == "FileReaderTool"
-
-    def test_nl_ask_human_detects_human_loop(self):
-        content = "I should pause and ask the human operator for confirmation."
-        r = _parse(content, output_mode="rl")
-        assert r.tool_intent == "HumanInLoopTool"
-
-    def test_nl_validate_schema_detects_validator(self):
-        content = "I will validate the output against the expected schema."
-        r = _parse(content, output_mode="rl")
-        assert r.tool_intent == "ValidatorTool"
-
-    def test_nl_search_rag_database_detects_rag(self):
-        content = "I will search the vector database for relevant documents."
-        r = _parse(content, output_mode="rl")
-        assert r.tool_intent == "RAGTool"
-
-
-# ===========================================================================
-# Section 10 – Anthropic tool_use shortcut (tool_calls parameter)
+# Section 8 – Anthropic tool_use shortcut (tool_calls parameter)
 # ===========================================================================
 
 

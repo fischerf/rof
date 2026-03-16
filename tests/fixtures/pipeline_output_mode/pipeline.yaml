@@ -39,6 +39,11 @@
 #   rof pipeline run tests/fixtures/pipeline_output_mode/pipeline.yaml \
 #       --provider ollama --model qwen3.5:9b \
 #       --json > tests/fixtures/pipeline_output_mode/output/result.json
+#
+# ── Custom Providers
+#    some custom providers also don't support RL or/and JSON
+#    switch the first stage to "output_mode: json" for a try,
+#    but don't expect good results here
 
 # ── LLM provider (all optional — CLI flags and env vars take precedence) ──
 # provider: openai          # openai | anthropic | gemini | ollama

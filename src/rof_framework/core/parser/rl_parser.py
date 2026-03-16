@@ -27,6 +27,7 @@ __all__ = [
     "DefinitionParser",
     "PredicateParser",
     "AttributeParser",
+    "AttributeIsParser",
     "RelationParser",
     "ConditionParser",
     "GoalParser",
@@ -266,6 +267,91 @@ class AggregateParser(StatementParser):
         )
 
 
+class AttributeIsParser(StatementParser):
+    """
+    Parses LLM-emitted ``EntityName attribute is value.`` statements::
+
+        ApprovalDecision outcome is "approved".
+        Customer segment is "HighValue".
+        LoanRequest status is "eligible".
+
+    This is a common LLM shorthand that conflates the attribute name with
+    the ``is`` verb rather than using the canonical ``has <attr> of <val>``
+    form.  It is mapped to an :class:`Attribute` node so the state update
+    reaches the graph.
+
+    Pattern:  ``<Entity> <attribute> is <value>.``
+    where <value> may be a quoted string or an unquoted word/number.
+
+    Must be registered *before* :class:`PredicateParser` (which would
+    consume ``Entity is value.`` lines) and *after* :class:`AttributeParser`
+    (which handles the canonical ``has … of`` form).
+    """
+
+    # Matches: Word Word is "quoted" or Word Word is unquoted_word .
+    # Group 1 = entity, Group 2 = attribute name, Group 3 = raw value
+    _RE = re.compile(
+        r'^(\w+)\s+(\w+)\s+is\s+"?([^".\n]+)"?\s*\.$',
+        re.IGNORECASE,
+    )
+
+    # Words that should NOT be treated as attribute names here — they are
+    # handled by more specific parsers or are keywords.
+    _KEYWORD_ATTRS = frozenset(
+        {
+            "define",
+            "relate",
+            "if",
+            "ensure",
+            "route",
+            "execute",
+            "assess",
+            "aggregate",
+            "determine",
+            "creditworthy",
+            "eligible",
+        }
+    )
+
+    def matches(self, line: str) -> bool:
+        if line.lower().startswith(
+            (
+                "define",
+                "relate",
+                "if ",
+                "ensure",
+                "route",
+                "execute",
+                "assess",
+                "aggregate",
+                "determine",
+            )
+        ):
+            return False
+        m = self._RE.match(line)
+        if not m:
+            return False
+        attr_word = m.group(2).lower()
+        return attr_word not in self._KEYWORD_ATTRS
+
+    def parse(self, line: str, lineno: int) -> Attribute:
+        m = self._RE.match(line)
+        if not m:
+            raise ParseError(f"Invalid AttributeIs-Statement: {line!r}", lineno)
+        entity = m.group(1)
+        attr_name = m.group(2)
+        raw = m.group(3).strip()
+        value: Any = raw
+        try:
+            value = int(raw)
+        except ValueError:
+            try:
+                value = float(raw)
+            except ValueError:
+                pass
+        return Attribute(source_line=lineno, entity=entity, name=attr_name, value=value)
+
+
 class DetermineParser(StatementParser):
     """
     Parses ``determine <Entity> label as "<value>".`` statements::
@@ -304,7 +390,7 @@ class RLParser:
         self._parsers: list[StatementParser] = [
             RouteGoalParser(),  # before DefinitionParser – starts with "route"
             DefinitionParser(),
-            AttributeParser(),  # vor PredicateParser (hat "has")
+            AttributeParser(),  # vor PredicateParser (hat "has … of")
             RelationParser(),
             AggregateParser(),  # before ConditionParser – starts with "aggregate"
             ConditionParser(),
@@ -312,7 +398,8 @@ class RLParser:
             ExecuteParser(),  # before GoalParser/PredicateParser – starts with "execute"
             AssessParser(),  # before GoalParser/PredicateParser – starts with "assess"
             GoalParser(),
-            PredicateParser(),  # zuletzt: generisch
+            AttributeIsParser(),  # before PredicateParser – "Entity attr is value."
+            PredicateParser(),  # zuletzt: generisch – "Entity is predicate."
         ]
 
     def register(self, parser: StatementParser, position: int = -1) -> None:
