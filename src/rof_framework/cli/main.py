@@ -150,6 +150,88 @@ def _import_llm() -> Any:
         sys.exit(2)
 
 
+# ─── Generic provider registry (rof_providers) ───────────────────────────────
+#
+# The framework contains NO hardcoded provider names, class names, or env-var
+# names for generic providers.  Everything is discovered at runtime from the
+# ``PROVIDER_REGISTRY`` dict published by the ``rof_providers`` package itself.
+#
+# Each entry in that registry is expected to have the shape:
+#   {
+#     "cls"          : <provider class>,
+#     "label"        : "Human-readable name",
+#     "description"  : "One-liner for help text",
+#     "api_key_kwarg": "api_key",   # constructor kwarg name, or None
+#     "env_key"      : "SOME_API_KEY",  # primary env var, or None
+#     "env_fallback" : [],          # additional env vars to check
+#   }
+
+
+def _load_generic_providers() -> dict[str, dict[str, Any]]:
+    """Return the ``PROVIDER_REGISTRY`` from ``rof_providers``, or ``{}`` when
+    the package is not installed.
+
+    The import is attempted lazily so that the CLI remains fully functional
+    even without ``rof_providers`` on the path.  The registry is owned entirely
+    by that package — ``rof_framework`` never hardcodes provider names here.
+    """
+    try:
+        import rof_providers as _rp
+    except ImportError:
+        return {}
+
+    registry: dict[str, dict[str, Any]] = getattr(_rp, "PROVIDER_REGISTRY", {})
+    # Guard: only expose entries whose provider class is actually present.
+    return {name: spec for name, spec in registry.items() if spec.get("cls") is not None}
+
+
+def _make_generic_provider(provider_name: str, args: argparse.Namespace) -> Any:
+    """Instantiate a generic provider from ``rof_providers``.
+
+    All provider-specific details (class, env-var names, constructor kwargs)
+    are read from the ``PROVIDER_REGISTRY`` published by ``rof_providers``.
+    ``rof_framework`` itself contains no knowledge of individual providers.
+
+    Parameters
+    ----------
+    provider_name:
+        Lowercase CLI name — must be a key in ``rof_providers.PROVIDER_REGISTRY``.
+    args:
+        Parsed CLI args; ``args.api_key`` and ``args.model`` are consulted.
+
+    Returns
+    -------
+    An ``LLMProvider`` instance.
+    """
+    registry = _load_generic_providers()
+    spec = registry[provider_name]
+
+    cls = spec["cls"]
+    api_key_kwarg: str | None = spec.get("api_key_kwarg")
+    env_key: str | None = spec.get("env_key")
+    env_fallbacks: list[str] = spec.get("env_fallback", [])
+
+    # Resolve API key: CLI flag → ROF_API_KEY → provider env var → fallbacks
+    resolved_key: str = getattr(args, "api_key", None) or os.environ.get("ROF_API_KEY", "")
+    if not resolved_key and env_key:
+        resolved_key = os.environ.get(env_key, "")
+    if not resolved_key:
+        for fb in env_fallbacks:
+            resolved_key = os.environ.get(fb, "")
+            if resolved_key:
+                break
+
+    model: str = getattr(args, "model", None) or os.environ.get("ROF_MODEL", "")
+
+    kwargs: dict[str, Any] = {}
+    if resolved_key and api_key_kwarg:
+        kwargs[api_key_kwarg] = resolved_key
+    if model:
+        kwargs["model"] = model
+
+    return cls(**kwargs)
+
+
 # ─── Linter ──────────────────────────────────────────────────────────────────
 # Severity, LintIssue, and Linter live in rof_core; import them here so that
 # cmd_lint and any other CLI code can use them directly.
@@ -175,6 +257,10 @@ def _make_provider(args: argparse.Namespace) -> Any:
     """
     Resolve provider, model, and API key from CLI args → env vars → SDK detection.
     Returns an LLMProvider instance.
+
+    Built-in providers (openai, anthropic, gemini, ollama) are tried first.
+    If the requested name matches a generic provider registered in
+    ``rof_providers``, that provider is lazy-loaded and instantiated instead.
     """
     llm = _import_llm()
 
@@ -183,6 +269,9 @@ def _make_provider(args: argparse.Namespace) -> Any:
     api_key = getattr(args, "api_key", None) or os.environ.get("ROF_API_KEY", "")
 
     model = getattr(args, "model", None) or os.environ.get("ROF_MODEL", "")
+
+    # Discover generic providers early so they can participate in auto-detection.
+    generic_providers = _load_generic_providers()
 
     # ── Auto-detect provider from installed SDKs ──────────────────────────
     if not provider_name:
@@ -199,13 +288,26 @@ def _make_provider(args: argparse.Namespace) -> Any:
             except ImportError:
                 pass
 
+    # ── Auto-detect from generic providers (rof_providers) ───────────────
+    if not provider_name and generic_providers:
+        # Pick the first available generic provider alphabetically so the
+        # selection is deterministic across Python versions.
+        provider_name = sorted(generic_providers.keys())[0]
+
     if not provider_name:
+        generic_names = sorted(generic_providers.keys())
         _err("No LLM provider found.")
-        _err("  Set ROF_PROVIDER (openai / anthropic / gemini / ollama)")
+        _err(
+            "  Set ROF_PROVIDER (openai / anthropic / gemini / ollama"
+            + ((" / " + " / ".join(generic_names)) if generic_names else "")
+            + ")"
+        )
         _err("  and ROF_API_KEY, or install one of:")
         _err("    pip install openai          # OpenAI / GPT")
         _err("    pip install anthropic        # Claude")
         _err("    pip install google-generativeai  # Gemini")
+        if not generic_names:
+            _err("    pip install rof-providers   # additional generic providers")
         sys.exit(2)
 
     # ── Construct provider ────────────────────────────────────────────────
@@ -251,8 +353,19 @@ def _make_provider(args: argparse.Namespace) -> Any:
             timeout=_timeout,
         )
 
+    # ── Generic providers from rof_providers ─────────────────────────────
+    if provider_name in generic_providers:
+        try:
+            return _make_generic_provider(provider_name, args)
+        except Exception as exc:
+            _err(f"Failed to initialise generic provider '{provider_name}': {exc}")
+            sys.exit(2)
+
+    known = ["openai", "anthropic", "gemini", "ollama"] + sorted(generic_providers.keys())
     _err(f"Unknown provider: '{provider_name}'")
-    _err("  Supported: openai, anthropic, gemini, ollama")
+    _err(f"  Supported: {', '.join(known)}")
+    if not generic_providers:
+        _err("  Additional providers may be available via: pip install rof-providers")
     sys.exit(2)
 
 
@@ -277,6 +390,18 @@ def cmd_version(args: argparse.Namespace) -> int:
             except ImportError:
                 deps[name] = "not installed"
 
+        # Discover generic providers and record their availability.
+        generic_providers = _load_generic_providers()
+        generic_info: dict[str, str] = {}
+        try:
+            import rof_providers as _rp
+
+            rp_ver: str = getattr(_rp, "__version__", "installed")
+            for name in generic_providers:
+                generic_info[name] = rp_ver
+        except ImportError:
+            pass
+
         print(
             json.dumps(
                 {
@@ -284,6 +409,7 @@ def cmd_version(args: argparse.Namespace) -> int:
                     "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
                     "rof_core": "ok",
                     "dependencies": deps,
+                    "generic_providers": generic_info,
                 },
                 indent=2,
             )
@@ -307,6 +433,25 @@ def cmd_version(args: argparse.Namespace) -> int:
             _ok(f"{label}  {dim(ver)}")
         except ImportError:
             _info(f"{label}  {dim('not installed')}")
+
+    _section("Generic providers  (rof_providers)")
+    generic_providers = _load_generic_providers()
+    try:
+        import rof_providers as _rp
+
+        rp_ver = getattr(_rp, "__version__", "?")
+        _ok(f"rof_providers  {dim(rp_ver)}")
+        if generic_providers:
+            for name, spec in generic_providers.items():
+                label: str = spec.get("label", spec["cls"].__name__)
+                _ok(f"  {label}  {dim('(--provider ' + name + ')')}")
+        else:
+            _info("  no providers found in rof_providers.PROVIDER_REGISTRY")
+    except ImportError:
+        _info(
+            f"rof_providers  {dim('not installed')}  "
+            f"{dim('(pip install rof-providers for additional generic providers)')}"
+        )
 
     _section("Core modules")
     for label, mod in [
@@ -1047,9 +1192,15 @@ def cmd_pipeline_run(args: argparse.Namespace) -> int:
     # ── Pipeline tools + LLMPlayerTool ───────────────────────────────────
     pipeline_tools: list[Any] = []
     try:
-        from rof_framework.tools import FileSaveTool, LLMPlayerTool, LuaRunTool  # type: ignore
+        from rof_framework.tools import (  # type: ignore
+            FileSaveTool,
+            LLMPlayerTool,
+            LuaRunTool,
+            WebSearchTool,
+        )
 
         pipeline_tools = [
+            WebSearchTool(),
             FileSaveTool(),
             LuaRunTool(),
             LLMPlayerTool(llm=provider),
@@ -1466,12 +1617,23 @@ def cmd_pipeline_debug(args: argparse.Namespace) -> int:
 
 def _provider_args(p: argparse.ArgumentParser) -> None:
     """Add shared LLM provider flags to a subcommand parser."""
+    # Build the dynamic part of the help string from whatever generic providers
+    # are currently available so the user sees accurate choices.
+    generic_names = sorted(_load_generic_providers().keys())
+    generic_hint = (
+        (" | " + " | ".join(generic_names))
+        if generic_names
+        else "  (install rof-providers for additional providers)"
+    )
     g = p.add_argument_group("LLM provider")
     g.add_argument(
         "--provider",
         metavar="NAME",
-        help="openai | anthropic | gemini | ollama "
-        "(default: auto-detect from installed SDKs or ROF_PROVIDER)",
+        help=(
+            "openai | anthropic | gemini | ollama"
+            + generic_hint
+            + " (default: auto-detect from installed SDKs or ROF_PROVIDER)"
+        ),
     )
     g.add_argument(
         "--model", metavar="NAME", help="Model name (default: per-provider default or ROF_MODEL)"
@@ -1519,13 +1681,21 @@ def build_parser() -> argparse.ArgumentParser:
               rof pipeline debug pipeline.yaml --seed-snapshot snap.json --provider anthropic --step
 
             Environment variables:
-              ROF_PROVIDER   openai | anthropic | gemini | ollama
+              ROF_PROVIDER   openai | anthropic | gemini | ollama | <generic>
               ROF_API_KEY    API key (overridden by provider-specific vars)
               ROF_MODEL      Model name
               ROF_BASE_URL   Base URL for Ollama / vLLM (default: http://localhost:11434)
               OPENAI_API_KEY
               ANTHROPIC_API_KEY
               GOOGLE_API_KEY
+
+            Generic providers (rof_providers package):
+              Generic providers are optional extensions that live outside rof_framework
+              and are lazy-loaded only when requested.  Install the package to enable them:
+
+                pip install rof-providers
+
+              Run 'rof version' to see which generic providers are currently available.
         """),
     )
     parser.add_argument("--version", action="version", version=f"rof {__version__}")
