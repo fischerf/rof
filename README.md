@@ -542,14 +542,13 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   │   snapshot stays in a single, uniform RelateLang format.
   │   → attribute_deltas  { "Customer": { "segment": "HighValue" } }
   │   → predicate_deltas  { "Customer": ["premium"] }
-  │   → tool_intent       "WebSearchTool"  (if detected)
   │   → is_valid_rl       True / False
   │   → warnings          list of non-fatal parse notes
   │
   ParsedResponse
       Structured result of ResponseParser.parse(content, output_mode):
         raw_content, rl_statements, attribute_deltas, predicate_deltas,
-        tool_intent, tool_args, is_valid_rl, warnings
+        is_valid_rl, warnings
 ```
 
 ### rof-tools
