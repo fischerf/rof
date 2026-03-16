@@ -1,0 +1,1 @@
+NOTE: You can run the pipeline.yaml with the ROF CLI, you need the additional Tools from run_factcheck.py for correct results!

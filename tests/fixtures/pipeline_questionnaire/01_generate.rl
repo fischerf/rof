@@ -12,7 +12,7 @@
 
 define Script as "A Lua script file to be saved to disk".
 
-Script has file_path of "/tmp/questionnaire.lua".
-Script has content of "-- generated Lua script".
+Script has file_path of "questionnaire.lua".
+Script has content of "print('Hello World!')".
 
 ensure save file.

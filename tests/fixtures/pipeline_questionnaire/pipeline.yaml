@@ -19,12 +19,14 @@
 stages:
   - name: generate
     rl_file: 01_generate.rl
+    output_mode: json
     description: >
       FileSaveTool saves the Lua script supplied in the snapshot to /tmp/
       and writes the path into the snapshot.
 
   - name: interact
     rl_file: 02_interact.rl
+    output_mode: json
     description: >
       LuaRunTool executes the saved Lua script with full terminal inheritance.
       The human answers questions live in the CLI. Answers are captured from
@@ -32,6 +34,7 @@ stages:
 
   - name: evaluate
     rl_file: 03_evaluate.rl
+    output_mode: json
     description: >
       The LLM receives the full answer set and produces a structured evaluation:
       score (0-100), level, strengths, knowledge gaps, and learning recommendations.

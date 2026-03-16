@@ -23,28 +23,30 @@
 
 # ── Pipeline stages ───────────────────────────────────────────────────────
 stages:
-
   - name: gather
     rl_file: 01_gather.rl
+    output_mode: json
     description: >
       Collect and validate all loan application inputs:
       applicant profile, loan request details, and credit history.
 
   - name: analyse
     rl_file: 02_analyse.rl
+    output_mode: json
     description: >
       Compute risk score, evaluate creditworthiness, and assess
       repayment feasibility using data from the gather stage.
 
   - name: decide
     rl_file: 03_decide.rl
+    output_mode: json
     description: >
       Apply approval business rules and produce a final decision
       with interest rate and monthly payment calculation.
 
 # ── Pipeline-level configuration ─────────────────────────────────────────
 config:
-  on_failure:             halt      # halt | continue | retry
-  retry_count:            2         # retries before giving up (OnFailure.RETRY)
-  inject_prior_context:   true      # pass accumulated snapshot into each stage
-  max_snapshot_entities:  50        # cap to avoid context window overflow
+  on_failure: halt # halt | continue | retry
+  retry_count: 2 # retries before giving up (OnFailure.RETRY)
+  inject_prior_context: true # pass accumulated snapshot into each stage
+  max_snapshot_entities: 50 # cap to avoid context window overflow

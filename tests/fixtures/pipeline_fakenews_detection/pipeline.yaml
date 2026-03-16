@@ -20,26 +20,32 @@
 stages:
   - name: extract
     rl_file: 01_extract.rl
+    output_mode: json
     description: "Extract factual claims and source metadata from the article"
 
   - name: verify_source
     rl_file: 02_verify_source.rl
+    output_mode: json
     description: "Look up publisher credibility and author history"
 
   - name: cross_reference
     rl_file: 03_cross_reference.rl
+    output_mode: json
     description: "Cross-reference extracted claims against the fact database"
 
   - name: bias_analysis
     rl_file: 04_bias_analysis.rl
+    output_mode: json
     description: "Detect political bias, emotional language, and clickbait signals"
 
   - name: decide
     rl_file: 05_decide.rl
+    output_mode: json
     description: "Aggregate all signals into a final credibility verdict"
 
   - name: report
     rl_file: 06_report.rl
+    output_mode: json
     description: "Generate the human-readable fact-check report"
 
 config:

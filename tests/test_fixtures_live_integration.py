@@ -931,13 +931,30 @@ class TestPipelineYamlLiveRun:
 
     @staticmethod
     def _build_live_pipeline(yaml_path: Path, llm):
-        """Build a Pipeline from a YAML file with the given live LLM."""
+        """Build a Pipeline from a YAML file with the given live LLM.
+
+        Mirrors what cmd_pipeline_run() in the CLI does: reads output_mode
+        from each stage entry and passes a per-stage OrchestratorConfig when
+        the mode is explicitly set (i.e. not "auto").
+        """
         raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
         base_dir = yaml_path.parent
 
         builder = PipelineBuilder(llm=llm)
 
         for s in raw.get("stages", []):
+            stage_output_mode = s.get("output_mode", "auto")
+
+            # Build a per-stage OrchestratorConfig only when output_mode is
+            # explicitly overridden.  "auto" means let the provider decide.
+            stage_orch_cfg = None
+            if stage_output_mode != "auto":
+                stage_orch_cfg = OrchestratorConfig(
+                    auto_save_state=False,
+                    pause_on_error=False,
+                    output_mode=stage_output_mode,
+                )
+
             rl_file = s.get("rl_file", "")
             if rl_file:
                 resolved = str(base_dir / rl_file)
@@ -945,6 +962,7 @@ class TestPipelineYamlLiveRun:
                     name=s["name"],
                     rl_file=resolved,
                     description=s.get("description", ""),
+                    orch_config=stage_orch_cfg,
                 )
             else:
                 rl_source = s.get("rl_source", "")
@@ -953,6 +971,7 @@ class TestPipelineYamlLiveRun:
                         name=s["name"],
                         rl_source=rl_source,
                         description=s.get("description", ""),
+                        orch_config=stage_orch_cfg,
                     )
 
         cfg_raw = raw.get("config", {})
