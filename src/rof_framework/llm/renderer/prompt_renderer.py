@@ -49,6 +49,12 @@ Rules:
 - Leave arrays empty [] if nothing applies to the current goal.
 - `reasoning` is your scratchpad — write your chain-of-thought here.
 - Keep entity names exactly as they appear in the context.
+- CRITICAL — predicates express DECISIONS, not lists of options:
+    WRONG: [{"entity":"X","value":"low"},{"entity":"X","value":"medium"},{"entity":"X","value":"high"}]
+    RIGHT: [{"entity":"X","value":"low"}]
+  Pick exactly ONE predicate value per entity per decision. Never enumerate all possible options.
+- Do NOT repeat attributes that are already present in the context unless the goal explicitly
+  asks you to update them. Only output NEW or CHANGED values.
 """
 
 
