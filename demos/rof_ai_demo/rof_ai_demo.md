@@ -645,7 +645,7 @@ pip install lupa               # Lua execution in-process (fallback: lua binary)
 # rof_routing ships with rof_framework — no separate install needed
 # when rof_framework is installed from source
 
-# Optional Fujitsu provider
+# Optional providers
 pip install rof-providers      # optional generic providers (e.g. rof_providers.PROVIDER_REGISTRY)
 
 # Knowledge base (ChromaDB persistent backend)
