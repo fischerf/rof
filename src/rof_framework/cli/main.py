@@ -1664,7 +1664,7 @@ def _provider_args(p: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rof",
-        description="ROF — RelateLang Orchestration Framework CLI",
+        description=f"ROF — RelateLang Orchestration Framework CLI  v{__version__}",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
             Examples:
