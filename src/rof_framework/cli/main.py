@@ -585,6 +585,227 @@ def cmd_test(args: argparse.Namespace) -> int:
     return 1
 
 
+# ─── Command: generate ───────────────────────────────────────────────────────
+
+_GENERATE_SYSTEM_PROMPT = """\
+You are an expert RelateLang (.rl) workflow author.
+RelateLang is a declarative domain-specific language for describing business-logic workflows \
+that an LLM orchestrator will execute step by step.
+
+OUTPUT RULES
+------------
+- Respond with ONLY valid RelateLang source. No markdown fences, no prose, no comments \
+unless they are // line comments inside the .rl syntax.
+- Every statement must end with a full-stop period.
+- Use only the constructs listed below. Do not invent new keywords.
+
+LANGUAGE CONSTRUCTS
+-------------------
+1. Entity definition (required before use):
+       define <Entity> as "<human description>".
+
+2. Attribute assignment (initial data):
+       <Entity> has <attribute> of <value>.
+   - String values must be double-quoted: Customer has name of "Jane".
+   - Numeric values are unquoted:         Customer has score of 740.
+   - Boolean values are unquoted:         Order has confirmed of true.
+
+3. Predicate / state:
+       <Entity> is "<predicate>".
+
+4. Relation between two entities:
+       relate <Entity1> and <Entity2> as "<relation_type>".
+
+5. Conditional rule (fires when the orchestrator evaluates the graph):
+       if <Entity> has <attribute> <op> <value> [and <Entity> has <attribute> <op> <value>],
+           then ensure <action>.
+   - Operators: > < >= <= == !=
+   - Multiple conditions joined with "and"
+   - The action is any goal expression (see ensure below)
+   - Conditions are flexible natural expressions; the following forms are all valid:
+       a) Same-entity attribute comparison:
+              if Order has total > 1000 and status == "pending",
+                  then ensure Order is high_value.
+       b) Cross-entity property access with dot notation:
+              if Transaction.location != UserProfile.home_location,
+                  then ensure Transaction is suspicious.
+       c) Multi-line condition (wrap long "and" chains across lines):
+              if Transaction has amount > 5000 and
+                 Transaction.location != UserProfile.home_location,
+                  then ensure RiskLevel is "high".
+
+6. Goal (what the orchestrator must achieve — drives LLM calls):
+       ensure <verb> <Entity> <aspect>.
+       ensure <Entity> is <predicate>.
+   - Each goal maps to one LLM call; order matters.
+   - Prefer concrete, specific goal expressions over vague ones.
+
+STYLE GUIDELINES
+----------------
+- Define every entity before attributing or relating it.
+- Place attributes immediately after their entity's definition block.
+- Place conditions before goals.
+- Name entities in PascalCase (Customer, LoanRequest, ApprovalDecision).
+- Name attributes in snake_case (annual_income, debt_to_income).
+- Include 2–5 goals that together fully resolve the workflow intent.
+- Add realistic placeholder attribute values so the file is immediately runnable.
+- Keep the file self-contained: no imports, no external references.
+
+EXAMPLE OUTPUT (customer segmentation — for style reference only, do not copy verbatim):
+------------------------------------------------------------------------------------------
+// customer_segmentation.rl
+define Customer as "A person who purchases products from the store".
+define HighValue as "Customer segment requiring premium support and offers".
+
+Customer has total_purchases of 15000.
+Customer has account_age_days of 400.
+Customer has support_tickets of 2.
+
+if Customer has total_purchases > 10000 and account_age_days > 365,
+    then ensure Customer is HighValue.
+
+ensure determine Customer segment.
+ensure recommend Customer support_tier.
+ensure generate Customer outreach_message.
+------------------------------------------------------------------------------------------
+
+EXAMPLE OUTPUT (fraud detection — cross-entity conditions, for style reference only):
+------------------------------------------------------------------------------------------
+// fraud_detection.rl
+define Transaction as "A financial operation initiated by a user".
+define UserProfile as "Historical behaviour and location data for a user".
+define RiskLevel as "The assessed fraud risk for a transaction".
+
+Transaction has amount of 2500.
+Transaction has location of "Moscow".
+Transaction has merchant_category of "jewelry".
+
+UserProfile has home_location of "London".
+UserProfile has typical_amount of 200.
+
+relate Transaction and UserProfile as "initiated by".
+
+if Transaction has amount > 1000 and Transaction.location != UserProfile.home_location,
+    then ensure RiskLevel is "high".
+
+ensure evaluate Transaction for fraud_risk.
+ensure generate RiskLevel explanation.
+ensure recommend Transaction action.
+------------------------------------------------------------------------------------------
+
+Now generate a complete, valid, immediately-lintable .rl workflow file for the description \
+the user provides. Output only the .rl source.\
+"""
+
+
+def cmd_generate(args: argparse.Namespace) -> int:
+    description: str = args.description
+    out_path: str | None = getattr(args, "output", None)
+    as_json: bool = getattr(args, "json", False)
+    no_lint: bool = getattr(args, "no_lint", False)
+
+    # ── Call the LLM ──────────────────────────────────────────────────────
+    core = _import_core()
+    provider = _make_provider(args)
+
+    if not as_json:
+        prov_name = type(provider).__name__.replace("Provider", "")
+        _banner(f"ROF Generate  [{dim(prov_name)}]")
+        print(f"  {dim('Description:')} {description}")
+        print()
+
+    request = core.LLMRequest(
+        prompt=description,
+        system=_GENERATE_SYSTEM_PROMPT,
+        max_tokens=2048,
+        temperature=0.2,
+        output_mode="raw",  # free-form — the response IS the .rl source
+    )
+
+    try:
+        response = provider.complete(request)
+    except Exception as exc:
+        if as_json:
+            print(json.dumps({"success": False, "error": str(exc)}))
+        else:
+            _err(f"LLM call failed: {exc}")
+        return 1
+
+    rl_source: str = response.content.strip()
+
+    # Strip accidental markdown fences that some models emit despite instructions
+    if rl_source.startswith("```"):
+        lines = rl_source.splitlines()
+        # drop opening fence line and closing fence line if present
+        inner = lines[1:]
+        if inner and inner[-1].strip().startswith("```"):
+            inner = inner[:-1]
+        rl_source = "\n".join(inner).strip()
+
+    # ── Optional lint pass ────────────────────────────────────────────────
+    lint_issues: list[dict] = []
+    lint_passed: bool = True
+    if not no_lint:
+        issues = Linter().lint(rl_source)
+        errors = [i for i in issues if i.severity == Severity.ERROR]
+        warnings = [i for i in issues if i.severity == Severity.WARNING]
+        lint_passed = len(errors) == 0
+        lint_issues = [i.to_dict() for i in issues]
+
+        if not as_json:
+            if errors:
+                _section("Lint errors in generated output")
+                for issue in errors:
+                    print(_fmt_issue(issue))
+            elif warnings:
+                _section(f"Lint warnings ({len(warnings)})")
+                for issue in warnings:
+                    print(_fmt_issue(issue))
+
+    # ── Write output file ─────────────────────────────────────────────────
+    written_path: str | None = None
+    if out_path:
+        out_file = Path(out_path)
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text(rl_source, encoding="utf-8")
+        written_path = str(out_file)
+        if not as_json:
+            _ok(f"Written to {bold(written_path)}")
+            print()
+
+    # ── Output ────────────────────────────────────────────────────────────
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "success": lint_passed,
+                    "source": rl_source,
+                    "lint": {
+                        "passed": lint_passed,
+                        "issues": lint_issues,
+                    },
+                    "written_to": written_path,
+                },
+                indent=2,
+            )
+        )
+    else:
+        _section("Generated .rl source")
+        for line in rl_source.splitlines():
+            print(f"  {line}")
+        print()
+        if not no_lint:
+            if lint_passed:
+                _ok(green("Lint passed — output is valid RelateLang."))
+            else:
+                _warn("Lint found errors in the generated output.")
+                _info("You can re-run with --no-lint to suppress the check,")
+                _info("or edit the file and run: rof lint <file.rl>")
+        print()
+
+    return 0 if lint_passed else 1
+
+
 # ─── Command: lint ────────────────────────────────────────────────────────────
 
 
@@ -1780,6 +2001,8 @@ def build_parser() -> argparse.ArgumentParser:
               rof pipeline run pipeline.yaml --verbose
               rof pipeline debug pipeline.yaml
               rof pipeline debug pipeline.yaml --step
+              rof generate "loan approval workflow for a bank" --output loan.rl
+              rof generate "customer churn prediction" --provider anthropic
               rof test customer_segmentation.rl.test
               rof test tests/fixtures/ --tag smoke --json
               rof test suite.rl.test --fail-fast --verbose
@@ -1948,6 +2171,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _provider_args(p_pip_dbg)
 
+    # ── generate ──────────────────────────────────────────────────────────
+    p_gen = sub.add_parser(
+        "generate",
+        help="Generate a .rl workflow file from a natural-language description",
+    )
+    p_gen.add_argument(
+        "description",
+        metavar="DESCRIPTION",
+        help="Natural-language description of the workflow to generate",
+    )
+    p_gen.add_argument(
+        "--output",
+        "-o",
+        metavar="FILE.rl",
+        help="Write the generated .rl source to this file (default: print to stdout)",
+    )
+    p_gen.add_argument(
+        "--no-lint",
+        action="store_true",
+        help="Skip the automatic lint pass on the generated output",
+    )
+    p_gen.add_argument(
+        "--json",
+        action="store_true",
+        help="Output result as JSON (source + lint issues)",
+    )
+    _provider_args(p_gen)
+
     # ── test ──────────────────────────────────────────────────────────────
     p_test = sub.add_parser("test", help="Run .rl.test prompt unit test files")
     p_test.add_argument(
@@ -2033,6 +2284,7 @@ def main(argv: list[str] | None = None) -> int:
         "debug": cmd_debug,
         "version": cmd_version,
         "test": cmd_test,
+        "generate": cmd_generate,
     }
 
     if args.command == "pipeline":
