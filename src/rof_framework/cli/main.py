@@ -698,58 +698,28 @@ the user provides. Output only the .rl source.\
 """
 
 
-def _extract_token_usage(raw: dict) -> dict[str, int | None]:
-    """
-    Extract token counts from the provider-specific raw response dict.
-
-    Key paths per provider
-    ----------------------
-    OpenAI / AzureOpenAI / Ollama-openai-compat:
-        raw["usage"]["prompt_tokens"]      → input
-        raw["usage"]["completion_tokens"]  → output
-        raw["usage"]["total_tokens"]       → total
-
-    Anthropic:
-        raw["usage"]["input_tokens"]       → input
-        raw["usage"]["output_tokens"]      → output
-
-    Ollama native (/api/chat httpx path):
-        raw["prompt_eval_count"]           → input
-        raw["eval_count"]                  → output
-
-    Gemini:
-        raw["candidates"][0]["..."]  — usage not surfaced in candidates dict;
-        usageMetadata is not included in the raw we store → all None.
-
-    Returns a dict with keys "input", "output", "total" (any may be None).
-    """
-    usage = raw.get("usage", {}) or {}
-
-    # OpenAI / Ollama openai-compat shape
-    if "prompt_tokens" in usage:
-        inp = usage.get("prompt_tokens")
-        out = usage.get("completion_tokens")
-        tot = usage.get("total_tokens") or ((inp or 0) + (out or 0)) or None
-        return {"input": inp, "output": out, "total": tot}
-
-    # Anthropic shape
-    if "input_tokens" in usage:
-        inp = usage.get("input_tokens")
-        out = usage.get("output_tokens")
-        tot = ((inp or 0) + (out or 0)) or None
-        return {"input": inp, "output": out, "total": tot}
-
-    # Ollama native /api/chat shape (top-level keys)
-    if "prompt_eval_count" in raw or "eval_count" in raw:
-        inp = raw.get("prompt_eval_count")
-        out = raw.get("eval_count")
-        tot = ((inp or 0) + (out or 0)) or None
-        return {"input": inp, "output": out, "total": tot}
-
-    return {"input": None, "output": None, "total": None}
+def _print_stats(acc: Any) -> None:
+    """Print a Stats section from a UsageAccumulator (human output only)."""
+    _section("Stats")
+    calls_label = f"{acc.call_count} LLM call{'s' if acc.call_count != 1 else ''}"
+    print(f"  {dim('Calls        ')}  {calls_label}")
+    print(f"  {dim('Time         ')}  {bold(f'{acc.elapsed_s}s')}")
+    if acc.input_tokens is not None:
+        print(f"  {dim('Tokens in    ')}  {acc.input_tokens}")
+    if acc.output_tokens is not None:
+        print(f"  {dim('Tokens out   ')}  {acc.output_tokens}")
+    if acc.total_tokens is not None:
+        print(f"  {dim('Tokens total ')}  {acc.total_tokens}")
+    if acc.tokens_per_min is not None:
+        print(f"  {dim('Tokens/min   ')}  {bold(str(acc.tokens_per_min))}")
+    elif acc.output_tokens is None:
+        print(f"  {dim('Tokens       ')}  {dim('not reported by this provider')}")
+    print()
 
 
 def cmd_generate(args: argparse.Namespace) -> int:
+    from rof_framework.llm.tracking import TrackingProvider, UsageAccumulator
+
     description: str = args.description
     out_path: str | None = getattr(args, "output", None)
     as_json: bool = getattr(args, "json", False)
@@ -757,10 +727,11 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
     # ── Call the LLM ──────────────────────────────────────────────────────
     core = _import_core()
-    provider = _make_provider(args)
+    tracker = UsageAccumulator()
+    provider = TrackingProvider(_make_provider(args), tracker)
 
     if not as_json:
-        prov_name = type(provider).__name__.replace("Provider", "")
+        prov_name = type(provider._provider).__name__.replace("Provider", "")
         _banner(f"ROF Generate  [{dim(prov_name)}]")
         print(f"  {dim('Description:')} {description}")
         print()
@@ -773,7 +744,6 @@ def cmd_generate(args: argparse.Namespace) -> int:
         output_mode="raw",  # free-form — the response IS the .rl source
     )
 
-    t_start = time.perf_counter()
     try:
         response = provider.complete(request)
     except Exception as exc:
@@ -782,13 +752,6 @@ def cmd_generate(args: argparse.Namespace) -> int:
         else:
             _err(f"LLM call failed: {exc}")
         return 1
-    elapsed_s = round(time.perf_counter() - t_start, 3)
-
-    # ── Token usage ───────────────────────────────────────────────────────
-    tokens = _extract_token_usage(response.raw)
-    tok_per_min: float | None = None
-    if tokens["output"] and elapsed_s > 0:
-        tok_per_min = round(tokens["output"] / elapsed_s * 60, 1)
 
     rl_source: str = response.content.strip()
 
@@ -844,13 +807,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
                         "issues": lint_issues,
                     },
                     "written_to": written_path,
-                    "stats": {
-                        "elapsed_s": elapsed_s,
-                        "tokens_input": tokens["input"],
-                        "tokens_output": tokens["output"],
-                        "tokens_total": tokens["total"],
-                        "tokens_per_min": tok_per_min,
-                    },
+                    "stats": tracker.to_dict(),
                 },
                 indent=2,
             )
@@ -868,19 +825,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
                 _info("You can re-run with --no-lint to suppress the check,")
                 _info("or edit the file and run: rof lint <file.rl>")
         print()
-        _section("Stats")
-        print(f"  {dim('Time         ')}  {bold(f'{elapsed_s}s')}")
-        if tokens["input"] is not None:
-            print(f"  {dim('Tokens in    ')}  {tokens['input']}")
-        if tokens["output"] is not None:
-            print(f"  {dim('Tokens out   ')}  {tokens['output']}")
-        if tokens["total"] is not None:
-            print(f"  {dim('Tokens total ')}  {tokens['total']}")
-        if tok_per_min is not None:
-            print(f"  {dim('Tokens/min   ')}  {bold(str(tok_per_min))}")
-        elif tokens["output"] is None:
-            print(f"  {dim('Tokens       ')}  {dim('not reported by this provider')}")
-        print()
+        _print_stats(tracker)
 
     return 0 if lint_passed else 1
 
@@ -1182,10 +1127,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         _err(f"Parse error: {exc}")
         return 1
 
-    provider = _make_provider(args)
+    from rof_framework.llm.tracking import TrackingProvider, UsageAccumulator
+
+    tracker = UsageAccumulator()
+    provider = TrackingProvider(_make_provider(args), tracker)
 
     if not as_json:
-        prov_name = type(provider).__name__.replace("Provider", "")
+        prov_name = type(provider._provider).__name__.replace("Provider", "")
         _banner(f"ROF Run  →  {rl_file.name}  [{dim(prov_name)}]")
         print(f"  Goals to execute: {bold(str(len(ast.goals)))}")
         print()
@@ -1324,6 +1272,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "elapsed_s": elapsed,
             "steps": len(result.steps),
             "snapshot": result.snapshot,
+            "stats": tracker.to_dict(),
         }
         if result.error:
             out["error"] = result.error
@@ -1367,6 +1316,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 print(f"    {dim('result:')} {dim(snippet)}")
 
     print()
+    _print_stats(tracker)
     return 0 if result.success else 1
 
 
@@ -1397,11 +1347,14 @@ def cmd_debug(args: argparse.Namespace) -> int:
         return 1
 
     ast = core.RLParser().parse(source)
-    provider = _make_provider(args)
+    from rof_framework.llm.tracking import TrackingProvider, UsageAccumulator
+
+    tracker = UsageAccumulator()
+    provider = TrackingProvider(_make_provider(args), tracker)
 
     if not as_json:
         _banner(f"ROF Debug  →  {rl_file.name}")
-        print(f"  Provider : {type(provider).__name__}")
+        print(f"  Provider : {type(provider._provider).__name__}")
         print(f"  Goals    : {len(ast.goals)}")
         if step:
             print(f"  Mode     : {yellow('step-through')}  (press Enter after each step)")
@@ -1514,6 +1467,7 @@ def cmd_debug(args: argparse.Namespace) -> int:
                     "elapsed_s": elapsed,
                     "trace": debug_log,
                     "snapshot": result.snapshot,
+                    "stats": tracker.to_dict(),
                 },
                 indent=2,
             )
@@ -1523,6 +1477,7 @@ def cmd_debug(args: argparse.Namespace) -> int:
     status = green("SUCCESS") if result.success else red("FAILED")
     print(f"  {bold(status)}  {dim(f'run_id={result.run_id[:12]}...')}  {elapsed}s")
     print()
+    _print_stats(tracker)
     return 0 if result.success else 1
 
 

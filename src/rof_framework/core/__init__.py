@@ -16,7 +16,7 @@ from .conditions.condition_evaluator import ConditionEvaluator
 from .context.context_injector import ContextInjector, ContextProvider
 from .events.event_bus import Event, EventBus, EventHandler
 from .graph.workflow_graph import EntityState, GoalState, GoalStatus, WorkflowGraph
-from .interfaces.llm_provider import LLMProvider, LLMRequest, LLMResponse
+from .interfaces.llm_provider import LLMProvider, LLMRequest, LLMResponse, UsageInfo
 from .interfaces.tool_provider import ToolProvider, ToolRequest, ToolResponse
 from .lint.linter import Linter, LintIssue, Severity
 from .orchestrator.orchestrator import Orchestrator, OrchestratorConfig, RunResult, StepResult
@@ -87,6 +87,7 @@ __all__ = [
     "LLMRequest",
     "LLMResponse",
     "LLMProvider",
+    "UsageInfo",
     "ToolRequest",
     "ToolResponse",
     "ToolProvider",
