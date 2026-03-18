@@ -485,6 +485,106 @@ def cmd_version(args: argparse.Namespace) -> int:
     return 0
 
 
+# ─── Command: test ────────────────────────────────────────────────────────────
+
+
+def cmd_test(args: argparse.Namespace) -> int:
+    from rof_framework.testing import TestRunner, TestRunnerConfig
+
+    as_json = getattr(args, "json", False)
+
+    # ── Resolve files ─────────────────────────────────────────────────────
+    raw_paths: list[str] = args.files
+    test_files: list[Path] = []
+    for raw in raw_paths:
+        p = Path(raw)
+        if p.is_dir():
+            found = sorted(p.rglob("*.rl.test"))
+            test_files.extend(found)
+        elif p.exists():
+            # Catch the common mistake of passing a .rl workflow file instead
+            # of its companion .rl.test suite file.
+            if p.suffix.lower() == ".rl" or str(p).lower().endswith(".relatelang"):
+                companion = p.with_name(p.name + ".test")
+                hint = (
+                    f"  Did you mean: {companion}"
+                    if companion.exists()
+                    else f"  Test suite files use the '.rl.test' extension (e.g. {p.stem}.rl.test)"
+                )
+                _err(f"'{p}' is a workflow spec (.rl), not a test suite file.\n{hint}")
+                return 2
+            test_files.append(p)
+        else:
+            _err(f"File or directory not found: {p}")
+            return 2
+
+    if not test_files:
+        _warn("No .rl.test files found.")
+        return 3
+
+    # ── Build config ──────────────────────────────────────────────────────
+    config = TestRunnerConfig(
+        stop_on_first_failure=getattr(args, "fail_fast", False),
+        tag_filter=getattr(args, "tag", None) or [],
+        verbose=getattr(args, "verbose", False),
+        output_mode_override=getattr(args, "output_mode", "") or "",
+    )
+    runner = TestRunner(config)
+
+    # ── Run each file ─────────────────────────────────────────────────────
+    all_results = []
+    for tf_path in test_files:
+        result = runner.run_file(str(tf_path))
+        all_results.append(result)
+
+    # ── Output ────────────────────────────────────────────────────────────
+    if as_json:
+        aggregate = {
+            "files": [r.to_dict() for r in all_results],
+            "summary": {
+                "total_files": len(all_results),
+                "total_cases": sum(r.total for r in all_results),
+                "passed": sum(r.passed for r in all_results),
+                "failed": sum(r.failed for r in all_results),
+                "skipped": sum(r.skipped for r in all_results),
+                "all_passed": all(r.all_passed for r in all_results),
+            },
+        }
+        print(json.dumps(aggregate, indent=2))
+    else:
+        _banner("ROF Test")
+        for result in all_results:
+            print(result.summary())
+        print()
+        total_cases = sum(r.total for r in all_results)
+        total_passed = sum(r.passed for r in all_results)
+        total_failed = sum(r.failed for r in all_results)
+        total_skipped = sum(r.skipped for r in all_results)
+        overall_ok = all(r.all_passed for r in all_results)
+
+        parts = []
+        if total_failed:
+            parts.append(red(f"{total_failed} failed"))
+        if total_passed:
+            parts.append(green(f"{total_passed} passed"))
+        if total_skipped:
+            parts.append(dim(f"{total_skipped} skipped"))
+        parts.append(dim(f"{len(all_results)} file{'s' if len(all_results) != 1 else ''}"))
+        parts.append(dim(f"{total_cases} test{'s' if total_cases != 1 else ''}"))
+
+        label = "  " + "  ".join(parts)
+        if overall_ok:
+            print(label + "  " + green("✓ all tests passed"))
+        else:
+            print(label + "  " + red("✗ tests failed"))
+        print()
+
+    # ── Exit code ─────────────────────────────────────────────────────────
+    if all(r.all_passed for r in all_results):
+        return 0
+    return 1
+
+
 # ─── Command: lint ────────────────────────────────────────────────────────────
 
 
@@ -1680,6 +1780,9 @@ def build_parser() -> argparse.ArgumentParser:
               rof pipeline run pipeline.yaml --verbose
               rof pipeline debug pipeline.yaml
               rof pipeline debug pipeline.yaml --step
+              rof test customer_segmentation.rl.test
+              rof test tests/fixtures/ --tag smoke --json
+              rof test suite.rl.test --fail-fast --verbose
               rof version
 
             Snapshot seeding (replay / resume a prior run):
@@ -1845,6 +1948,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _provider_args(p_pip_dbg)
 
+    # ── test ──────────────────────────────────────────────────────────────
+    p_test = sub.add_parser("test", help="Run .rl.test prompt unit test files")
+    p_test.add_argument(
+        "files",
+        metavar="FILE_OR_DIR",
+        nargs="+",
+        help="One or more .rl.test files or directories to scan",
+    )
+    p_test.add_argument(
+        "--tag",
+        metavar="TAG",
+        action="append",
+        help="Only run test cases with this tag (repeatable)",
+    )
+    p_test.add_argument(
+        "--fail-fast",
+        "-x",
+        action="store_true",
+        help="Stop after first failing test case",
+    )
+    p_test.add_argument(
+        "--json",
+        action="store_true",
+        help="Output results as JSON",
+    )
+    p_test.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Print each assertion result",
+    )
+    p_test.add_argument(
+        "--output-mode",
+        dest="output_mode",
+        choices=["", "auto", "json", "rl"],
+        default="",
+        help="Override output_mode for all test cases",
+    )
+
     # ── version ───────────────────────────────────────────────────────────
     p_ver = sub.add_parser("version", help="Show version and dependency info")
     p_ver.add_argument("--json", action="store_true")
@@ -1890,6 +2032,7 @@ def main(argv: list[str] | None = None) -> int:
         "run": cmd_run,
         "debug": cmd_debug,
         "version": cmd_version,
+        "test": cmd_test,
     }
 
     if args.command == "pipeline":

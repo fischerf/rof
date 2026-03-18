@@ -1,0 +1,365 @@
+// loan_approval.rl.test
+// Unit tests for the loan_approval.rl workflow.
+//
+// Covers:
+//   - Deterministic if/then condition evaluation (creditworthy, eligible)
+//   - relate statements visible in context
+//   - Multi-goal orchestrator runs (3 goals)
+//   - Numeric attribute comparison assertions
+//   - Goal-status assertions
+//   - Run-level success/failure assertions
+//   - Edge cases: rejected applicant, boundary credit score
+//
+// Run with:
+//   rof test tests/fixtures/testing/loan_approval.rl.test
+//
+// Or programmatically:
+//   from rof_framework.testing import TestRunner
+//   result = TestRunner().run_file("tests/fixtures/testing/loan_approval.rl.test")
+//   print(result.summary())
+
+workflow: tests/fixtures/loan_approval.rl
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Happy path: creditworthy applicant, eligible loan — all goals achieved
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "Creditworthy applicant with eligible loan is approved"
+    // The static .rl file already has score=740, dti=0.28, delinquencies=0,
+    // amount=20000. Both if/then conditions fire before any LLM call:
+    //   Applicant is creditworthy   (score > 700 AND dti < 0.4)
+    //   LoanRequest is eligible     (creditworthy AND amount < 50000)
+    // No given overrides needed — we test the base case.
+
+    // Goal 1: assess Applicant creditworthiness
+    respond with 'CreditProfile has assessment of "strong".'
+    // Goal 2: determine ApprovalDecision outcome
+    respond with 'ApprovalDecision has outcome of "approved".'
+    // Goal 3: calculate LoanRequest monthly_payment
+    respond with 'LoanRequest has monthly_payment of 622.'
+
+    // ── Entity existence ─────────────────────────────────────────────────
+    expect entity "Applicant" exists.
+    expect entity "LoanRequest" exists.
+    expect entity "CreditProfile" exists.
+    expect entity "ApprovalDecision" exists.
+    expect entity "GhostEntity" does not exist.
+
+    // ── Condition-derived predicates (fired deterministically) ───────────
+    expect Applicant is "creditworthy".
+    expect LoanRequest is "eligible".
+
+    // ── LLM-written attribute assertions ─────────────────────────────────
+    expect attribute CreditProfile.assessment equals "strong".
+    expect attribute ApprovalDecision.outcome equals "approved".
+    expect attribute LoanRequest.monthly_payment equals 622.
+    expect attribute LoanRequest.monthly_payment > 0.
+    expect attribute LoanRequest.monthly_payment < 1000.
+
+    // ── Seed attribute pass-through ──────────────────────────────────────
+    expect attribute Applicant.annual_income equals 72000.
+    expect attribute Applicant.employment_years equals 5.
+    expect attribute CreditProfile.score equals 740.
+    expect attribute CreditProfile.debt_to_income equals 0.28.
+    expect attribute CreditProfile.delinquencies equals 0.
+    expect attribute LoanRequest.amount equals 20000.
+
+    // ── Numeric comparisons on seed attributes ───────────────────────────
+    expect attribute CreditProfile.score > 700.
+    expect attribute CreditProfile.score >= 740.
+    expect attribute CreditProfile.debt_to_income < 0.4.
+    expect attribute CreditProfile.debt_to_income <= 0.28.
+    expect attribute LoanRequest.amount < 50000.
+    expect attribute Applicant.annual_income > 50000.
+
+    // ── Goal status ──────────────────────────────────────────────────────
+    expect goal "assess Applicant creditworthiness" is achieved.
+    expect goal "determine ApprovalDecision outcome" is achieved.
+    expect goal "calculate LoanRequest monthly_payment" is achieved.
+
+    // ── Run result ───────────────────────────────────────────────────────
+    expect run succeeds.
+end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rejected applicant: low credit score — conditions do NOT fire
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "Low credit score applicant is not creditworthy"
+    // Override credit profile to below the 700 threshold.
+    given CreditProfile has score of 580.
+    given CreditProfile has debt_to_income of 0.52.
+    given CreditProfile has delinquencies of 2.
+
+    // Condition "score > 700 AND dti < 0.4" does NOT fire.
+    // Condition "creditworthy AND amount < 50000" does NOT fire either.
+    // All three goals still run via LLM.
+    respond with 'CreditProfile has assessment of "weak".'
+    respond with 'ApprovalDecision has outcome of "rejected".'
+    respond with 'LoanRequest has monthly_payment of 0.'
+
+    // ── Predicates must NOT be set ────────────────────────────────────────
+    expect Applicant is not "creditworthy".
+    expect LoanRequest is not "eligible".
+
+    // ── LLM-written attributes ────────────────────────────────────────────
+    expect attribute CreditProfile.assessment equals "weak".
+    expect attribute ApprovalDecision.outcome equals "rejected".
+    expect attribute LoanRequest.monthly_payment equals 0.
+
+    // ── Overridden seed attributes ────────────────────────────────────────
+    expect attribute CreditProfile.score equals 580.
+    expect attribute CreditProfile.score < 700.
+    expect attribute CreditProfile.debt_to_income > 0.4.
+    expect attribute CreditProfile.delinquencies > 0.
+
+    expect run succeeds.
+end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Boundary: score exactly at 700 (condition requires > 700, not >=)
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "Score of exactly 700 does not satisfy the creditworthy condition"
+    given CreditProfile has score of 700.
+    given CreditProfile has debt_to_income of 0.30.
+    given CreditProfile has delinquencies of 0.
+
+    respond with 'CreditProfile has assessment of "borderline".'
+    respond with 'ApprovalDecision has outcome of "manual_review".'
+    respond with 'LoanRequest has monthly_payment of 0.'
+
+    // score == 700 does NOT satisfy "score > 700"
+    expect Applicant is not "creditworthy".
+    expect LoanRequest is not "eligible".
+
+    expect attribute CreditProfile.score == 700.
+    expect attribute CreditProfile.score < 701.
+    expect attribute CreditProfile.assessment equals "borderline".
+    expect attribute ApprovalDecision.outcome equals "manual_review".
+
+    expect run succeeds.
+end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Boundary: score just above 700, DTI just below 0.4 — conditions fire
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "Score of 701 with DTI 0.39 satisfies the creditworthy condition"
+    given CreditProfile has score of 701.
+    given CreditProfile has debt_to_income of 0.39.
+    given CreditProfile has delinquencies of 0.
+
+    respond with 'CreditProfile has assessment of "acceptable".'
+    respond with 'ApprovalDecision has outcome of "approved".'
+    respond with 'LoanRequest has monthly_payment of 600.'
+
+    expect Applicant is "creditworthy".
+    expect LoanRequest is "eligible".
+
+    expect attribute CreditProfile.score == 701.
+    expect attribute CreditProfile.score > 700.
+    expect attribute CreditProfile.debt_to_income < 0.4.
+    expect attribute ApprovalDecision.outcome equals "approved".
+
+    expect run succeeds.
+end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Large loan: creditworthy but loan amount >= 50000 — eligible condition fails
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "Creditworthy applicant with oversized loan is not eligible"
+    // Keep good credit score but push loan amount above the 50000 cap.
+    given CreditProfile has score of 780.
+    given CreditProfile has debt_to_income of 0.20.
+    given CreditProfile has delinquencies of 0.
+    given LoanRequest has amount of 75000.
+
+    respond with 'CreditProfile has assessment of "excellent".'
+    respond with 'ApprovalDecision has outcome of "rejected_amount".'
+    respond with 'LoanRequest has monthly_payment of 0.'
+
+    // First condition fires (score > 700 AND dti < 0.4)
+    expect Applicant is "creditworthy".
+    // Second condition does NOT fire (amount 75000 >= 50000)
+    expect LoanRequest is not "eligible".
+
+    expect attribute CreditProfile.score > 700.
+    expect attribute LoanRequest.amount > 50000.
+    expect attribute LoanRequest.amount == 75000.
+    expect attribute ApprovalDecision.outcome equals "rejected_amount".
+
+    expect run succeeds.
+end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Attribute existence checks
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "All expected attributes are present after a full run"
+    // Uses the base .rl values (no overrides needed).
+    respond with 'CreditProfile has assessment of "strong".'
+    respond with 'ApprovalDecision has outcome of "approved".'
+    respond with 'LoanRequest has monthly_payment of 622.'
+
+    // Seed attributes from .rl file
+    expect attribute Applicant.name exists.
+    expect attribute Applicant.annual_income exists.
+    expect attribute Applicant.employment_years exists.
+    expect attribute LoanRequest.amount exists.
+    expect attribute LoanRequest.term_months exists.
+    expect attribute LoanRequest.purpose exists.
+    expect attribute CreditProfile.score exists.
+    expect attribute CreditProfile.debt_to_income exists.
+    expect attribute CreditProfile.delinquencies exists.
+
+    // LLM-written attributes
+    expect attribute CreditProfile.assessment exists.
+    expect attribute ApprovalDecision.outcome exists.
+    expect attribute LoanRequest.monthly_payment exists.
+
+    expect run succeeds.
+end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inline workflow — isolated test with no file dependency
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "Inline workflow: simple loan decision with one condition"
+    workflow:
+        define Borrower as "A person requesting a loan".
+        define LoanDecision as "The approval outcome".
+
+        Borrower has credit_score of 750.
+        Borrower has income of 60000.
+
+        if Borrower has credit_score > 700,
+            then ensure Borrower is creditworthy.
+
+        ensure determine LoanDecision status.
+    end
+
+    respond with 'LoanDecision has status of "approved".'
+
+    expect Borrower is "creditworthy".
+    expect attribute LoanDecision.status equals "approved".
+    expect attribute Borrower.credit_score equals 750.
+    expect attribute Borrower.income equals 60000.
+    expect attribute Borrower.credit_score > 700.
+    expect run succeeds.
+end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Goal-map style: scripted responses keyed to specific goals
+// (demonstrates that sequential scripted responses are consumed per goal)
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "Three-goal workflow consumes responses in order"
+    // Three goals in loan_approval.rl:
+    //   1. assess Applicant creditworthiness
+    //   2. determine ApprovalDecision outcome
+    //   3. calculate LoanRequest monthly_payment
+    // Responses are consumed in that order.
+
+    respond with 'CreditProfile has assessment of "good".'
+    respond with 'ApprovalDecision has outcome of "approved".'
+    respond with 'LoanRequest has monthly_payment of 580.'
+
+    expect attribute CreditProfile.assessment equals "good".
+    expect attribute ApprovalDecision.outcome equals "approved".
+    expect attribute LoanRequest.monthly_payment equals 580.
+    expect attribute LoanRequest.monthly_payment > 500.
+    expect attribute LoanRequest.monthly_payment < 700.
+
+    expect goal "assess Applicant creditworthiness" is achieved.
+    expect goal "determine ApprovalDecision outcome" is achieved.
+    expect goal "calculate LoanRequest monthly_payment" is achieved.
+
+    expect run succeeds.
+end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// JSON mode — structured responses for the loan workflow
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "JSON-mode responses populate the graph correctly"
+    output_mode: json
+
+    // Override to a known clean state so the JSON path is predictable.
+    given CreditProfile has score of 750.
+    given CreditProfile has debt_to_income of 0.25.
+    given CreditProfile has delinquencies of 0.
+    given LoanRequest has amount of 20000.
+
+    respond with json '{"attributes": [{"entity": "CreditProfile", "name": "assessment", "value": "strong"}], "predicates": [], "reasoning": "score 750 is well above 700"}'
+    respond with json '{"attributes": [{"entity": "ApprovalDecision", "name": "outcome", "value": "approved"}], "predicates": [{"entity": "ApprovalDecision", "value": "finalised"}], "reasoning": "all checks pass"}'
+    respond with json '{"attributes": [{"entity": "LoanRequest", "name": "monthly_payment", "value": 622}], "predicates": [], "reasoning": "standard amortisation at 7% APR"}'
+
+    expect Applicant is "creditworthy".
+    expect LoanRequest is "eligible".
+    expect ApprovalDecision is "finalised".
+
+    expect attribute CreditProfile.assessment equals "strong".
+    expect attribute ApprovalDecision.outcome equals "approved".
+    expect attribute LoanRequest.monthly_payment equals 622.
+    expect attribute LoanRequest.monthly_payment > 600.
+
+    expect run succeeds.
+end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Smoke tests — tagged for fast CI runs
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "Smoke: workflow parses and conditions fire"
+    tags: smoke fast
+
+    // Uses base .rl values (score=740, dti=0.28).
+    respond with 'CreditProfile has assessment of "ok".'
+    respond with 'ApprovalDecision has outcome of "approved".'
+    respond with 'LoanRequest has monthly_payment of 600.'
+
+    expect Applicant is "creditworthy".
+    expect LoanRequest is "eligible".
+    expect run succeeds.
+end
+
+
+test "Smoke: rejected path does not set creditworthy"
+    tags: smoke fast
+
+    given CreditProfile has score of 500.
+    given CreditProfile has debt_to_income of 0.60.
+
+    respond with 'CreditProfile has assessment of "poor".'
+    respond with 'ApprovalDecision has outcome of "rejected".'
+    respond with 'LoanRequest has monthly_payment of 0.'
+
+    expect Applicant is not "creditworthy".
+    expect LoanRequest is not "eligible".
+    expect run succeeds.
+end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Skipped test placeholder
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "TODO: co-applicant income pooling logic"
+    skip "Co-applicant feature not yet modelled in loan_approval.rl"
+
+    given Applicant has co_applicant_income of 40000.
+    respond with 'ApprovalDecision has outcome of "approved".'
+    expect run succeeds.
+end

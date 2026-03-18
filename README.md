@@ -871,6 +871,7 @@ without writing any Python.
   rof inspect <file.rl>           Show AST structure
   rof run     <file.rl>           Execute workflow against a real LLM
   rof debug   <file.rl>           Step-through with full prompt/response capture
+  rof test    <file.rl.test>      Run prompt unit tests (no LLM required)
   rof pipeline run   <config.yaml>   Execute a multi-stage pipeline from YAML
   rof pipeline debug <config.yaml>   Debug a pipeline with full prompt/response trace
   rof version                     Print version and dependency info
@@ -1001,6 +1002,67 @@ without writing any Python.
     ▸ Step 2  —  …
 ```
 
+**`rof test`** — prompt unit testing (no LLM required)
+
+`rof test` runs `.rl.test` files — declarative test suites that exercise a
+workflow spec without calling a real LLM. Each test case seeds the graph with
+known inputs, drives the orchestrator with scripted mock responses, and asserts
+against the final snapshot. Tests are fully deterministic and offline.
+
+The `.rl.test` format:
+
+```
+// Point at the workflow under test
+workflow: tests/fixtures/loan_approval.rl
+
+test "Creditworthy applicant is approved"
+    // Seed the graph before the workflow runs
+    given CreditProfile has score of 740.
+    given CreditProfile has debt_to_income of 0.28.
+    given LoanRequest has amount of 20000.
+
+    // Scripted LLM responses — returned in order, one per goal
+    respond with 'Applicant is creditworthy.'
+    respond with 'LoanRequest is eligible.'
+    respond with 'ApprovalDecision has outcome of "approved".'
+
+    // Assertions against the final snapshot
+    expect Applicant is creditworthy.
+    expect attribute ApprovalDecision.outcome equals "approved".
+    expect run succeeds.
+end
+
+test "Low credit score applicant is rejected"
+    given CreditProfile has score of 580.
+    given CreditProfile has debt_to_income of 0.55.
+    respond with 'Applicant is not creditworthy.'
+    expect Applicant is not creditworthy.
+    expect run succeeds.
+end
+```
+
+```
+  Flags:
+    --tag TAG         Only run test cases tagged with TAG (repeatable)
+    --fail-fast / -x  Stop after the first failing test case
+    --verbose / -v    Print each assertion result individually
+    --json            Machine-readable output (all results + aggregate summary)
+    --output-mode     Override output_mode for every test case: auto | json | rl
+
+  Arguments:
+    FILE_OR_DIR       One or more .rl.test files, or directories scanned
+                      recursively for *.rl.test files
+
+  Exit codes:  0 = all passed  |  1 = any failed  |  2 = file error  |  3 = no tests found
+```
+
+The `.rl.test` file is separate from the `.rl` workflow file by design — the
+workflow is the subject under test; the `.rl.test` file is the test suite. One
+`.rl.test` file can reference multiple `.rl` workflows, and one workflow can be
+covered by multiple test suites.
+
+---
+
 **Provider flags** (shared by `run`, `debug`, `pipeline run`, `pipeline debug`):
 
 ```
@@ -1044,6 +1106,22 @@ pip install -e ".[pipeline]"
 rof lint    tests/fixtures/loan_approval.rl
 rof inspect tests/fixtures/loan_approval.rl
 rof run     tests/fixtures/loan_approval.rl --provider anthropic
+```
+
+**Run the prompt unit test suites (no LLM, no API key):**
+
+```bash
+# Run a single test suite
+rof test tests/fixtures/testing/loan_approval.rl.test
+
+# Run all test suites in a directory
+rof test tests/fixtures/testing/
+
+# Only run smoke-tagged cases, output as JSON
+rof test tests/fixtures/testing/ --tag smoke --json
+
+# Stop on first failure, print every assertion
+rof test tests/fixtures/testing/loan_approval.rl.test --fail-fast --verbose
 ```
 
 **Loan Approval pipeline** (`gather → analyse → decide`):
