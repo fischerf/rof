@@ -527,7 +527,7 @@ ROF_TEST_PROVIDER=my_provider ROF_TEST_API_KEY=<key> \
 | `rof_cli` | **74%** ✓ | > 75% |
 | `rof_pipeline` | ~65% | > 75% |
 | `rof_routing` | varies | > 80% (sections without optional deps skip gracefully) |
-| `rof_providers` | varies | > 80% (covered by `test_generic_providers.py` + `test_fujitsu_provider.py`) |
+| `rof_providers` | varies | > 80% (covered by `test_generic_providers.py`) |
 
 ---
 

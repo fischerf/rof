@@ -3,9 +3,9 @@
 #
 # Demonstrates the two LLM response strategies side by side:
 #   Stage 1 (extract)  — output_mode: rl
-#     Works with any model, including local Ollama. The LLM replies in
-#     plain RelateLang text. Full RLParser is attempted first; regex
-#     fallback extracts individual attribute/predicate lines from mixed
+#     Doesn't work with every model (local Ollama Qwen3.5:9b/27b doesn't work.
+#     The LLM replies in plain RelateLang text. Full RLParser is attempted first;
+#     regex fallback extracts individual attribute/predicate lines from mixed
 #     prose. RetryManager re-prompts with an RL hint on failure.
 #
 #   Stage 2 (classify) — output_mode: json
@@ -33,18 +33,13 @@
 #
 # ── Ollama (local, no API key) ────────────────────────────────────────────
 #   Ollama supports schema-constrained structured output via the `format`
-#   field (since Dec 2024), so output_mode="auto" correctly resolves to
-#   "json" for Ollama — no manual override needed.
+#   field (since Dec 2024), so output_mode="auto" should correctly resolves to
+#   "json" for Ollama.
 #
 #   rof pipeline run tests/fixtures/pipeline_output_mode/pipeline.yaml \
 #       --provider ollama --model qwen3.5:9b \
 #       --json > tests/fixtures/pipeline_output_mode/output/result.json
 #
-# ── Custom Providers
-#    some custom providers also don't support RL or/and JSON
-#    switch the first stage to "output_mode: json" for a try,
-#    but don't expect good results here
-
 # ── LLM provider (all optional — CLI flags and env vars take precedence) ──
 # provider: openai          # openai | anthropic | gemini | ollama
 # model:    gpt-4o-mini     # omit to use per-provider default

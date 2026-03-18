@@ -1,0 +1,233 @@
+// customer_segmentation.rl.test
+// Unit tests for the customer_segmentation.rl workflow.
+//
+// These tests run entirely without a real LLM — the ScriptedLLMProvider
+// returns the scripted responses in declaration order.
+//
+// Run with:
+//   rof test tests/fixtures/testing/customer_segmentation.rl.test
+//
+// Or programmatically:
+//   from rof_framework.testing import TestRunner
+//   result = TestRunner().run_file("tests/fixtures/testing/customer_segmentation.rl.test")
+//   print(result.summary())
+
+workflow: tests/fixtures/customer_segmentation.rl
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Happy-path: premium customer is classified as HighValue
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "Premium customer is classified as HighValue"
+    // Override the static values in the .rl file with test-specific seed data.
+    // These are prepended to the workflow source before parsing, so the
+    // if/then condition fires deterministically before any LLM call.
+    given Customer has total_purchases of 15000.
+    given Customer has account_age_days of 400.
+    given Customer has support_tickets of 2.
+
+    // One response per goal in the workflow.
+    // Goal 1: "determine Customer segment"
+    respond with 'Customer has segment of "HighValue".'
+    // Goal 2: "recommend Customer support tier"
+    respond with 'Customer has tier of "gold".'
+
+    // ── Entity-level assertions ──────────────────────────────────────────
+    expect entity "Customer" exists.
+    expect entity "GhostEntity" does not exist.
+
+    // ── Predicate assertions ─────────────────────────────────────────────
+    // The if/then condition in the workflow fires because
+    // total_purchases (15000) > 10000 AND account_age_days (400) > 365,
+    // so "HighValue" predicate must be set deterministically (no LLM needed).
+    expect Customer is "HighValue".
+    expect Customer is not "Standard".
+
+    // ── Attribute assertions ─────────────────────────────────────────────
+    expect attribute Customer.segment equals "HighValue".
+    expect attribute Customer.tier equals "gold".
+    expect attribute Customer.total_purchases exists.
+    expect attribute Customer.total_purchases == 15000.
+    expect attribute Customer.total_purchases > 10000.
+    expect attribute Customer.total_purchases >= 15000.
+    expect attribute Customer.account_age_days > 365.
+
+    // ── Run-level assertion ──────────────────────────────────────────────
+    expect run succeeds.
+end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Standard customer — purchases below threshold
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "Standard customer stays below HighValue threshold"
+    given Customer has total_purchases of 500.
+    given Customer has account_age_days of 200.
+    given Customer has support_tickets of 1.
+
+    // Neither goal-condition fires, so the LLM decides the segment.
+    respond with 'Customer has segment of "Standard".'
+    respond with 'Customer has tier of "basic".'
+
+    expect Customer is not "HighValue".
+    expect attribute Customer.segment equals "Standard".
+    expect attribute Customer.tier equals "basic".
+    expect attribute Customer.total_purchases < 10000.
+    expect attribute Customer.total_purchases <= 500.
+    expect run succeeds.
+end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Boundary: exactly at the threshold (10000 purchases, 365 days)
+// The condition is strict (> not >=), so this should NOT fire.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "Boundary customer at exact threshold is not HighValue"
+    given Customer has total_purchases of 10000.
+    given Customer has account_age_days of 365.
+
+    respond with 'Customer has segment of "Standard".'
+    respond with 'Customer has tier of "basic".'
+
+    // Condition requires > 10000 AND > 365, so 10000/365 does not qualify.
+    expect Customer is not "HighValue".
+    expect attribute Customer.segment equals "Standard".
+    expect attribute Customer.total_purchases == 10000.
+    expect attribute Customer.account_age_days == 365.
+    expect run succeeds.
+end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Goal assertion — verify goal expressions are recorded with correct status
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "Goals are recorded in snapshot after run"
+    given Customer has total_purchases of 15000.
+    given Customer has account_age_days of 400.
+
+    respond with 'Customer has segment of "HighValue".'
+    respond with 'Customer has tier of "gold".'
+
+    expect goal "determine Customer segment" is achieved.
+    expect goal "recommend Customer support tier" is achieved.
+    expect goal "determine Customer segment" exists.
+    expect run succeeds.
+end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Numeric attribute range assertions
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "Numeric attribute comparisons pass for high-value customer"
+    given Customer has total_purchases of 25000.
+    given Customer has account_age_days of 730.
+    given Customer has support_tickets of 0.
+
+    respond with 'Customer has segment of "HighValue".'
+    respond with 'Customer has tier of "platinum".'
+
+    expect attribute Customer.total_purchases > 20000.
+    expect attribute Customer.total_purchases >= 25000.
+    expect attribute Customer.total_purchases != 0.
+    expect attribute Customer.account_age_days > 365.
+    expect attribute Customer.account_age_days < 1000.
+    expect attribute Customer.tier equals "platinum".
+    expect run succeeds.
+end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inline workflow override — test a minimal workflow without a file reference
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "Inline workflow: entity definition and attribute goal"
+    workflow:
+        define Product as "An item for sale".
+        Product has price of 99.
+        Product has stock of 10.
+        ensure determine Product availability.
+    end
+
+    respond with 'Product has availability of "in_stock".'
+
+    expect entity "Product" exists.
+    expect attribute Product.price equals 99.
+    expect attribute Product.stock == 10.
+    expect attribute Product.availability equals "in_stock".
+    expect run succeeds.
+end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// JSON mode — scripted responses as JSON schema objects
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "JSON-mode response is parsed correctly"
+    output_mode: json
+
+    workflow:
+        define Customer as "A person who purchases products".
+        Customer has total_purchases of 15000.
+        Customer has account_age_days of 400.
+        define HighValue as "Premium customer segment".
+        if Customer has total_purchases > 10000 and account_age_days > 365,
+            then ensure Customer is HighValue.
+        ensure determine Customer segment.
+    end
+
+    respond with json '{"attributes": [{"entity": "Customer", "name": "segment", "value": "HighValue"}], "predicates": [{"entity": "Customer", "value": "HighValue"}], "reasoning": "purchases above threshold"}'
+
+    expect Customer is "HighValue".
+    expect attribute Customer.segment equals "HighValue".
+    expect run succeeds.
+end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Skipped test — demonstrates the skip directive
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "Work in progress: loyalty tier calculation"
+    skip "Loyalty tier logic not yet implemented in the workflow"
+
+    given Customer has total_purchases of 50000.
+    respond with 'Customer has loyalty_tier of "diamond".'
+    expect attribute Customer.loyalty_tier equals "diamond".
+end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tags — demonstrates tag-based filtering (run with --tag smoke)
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "Smoke: basic workflow parses and runs"
+    tags: smoke fast
+
+    given Customer has total_purchases of 15000.
+    given Customer has account_age_days of 400.
+
+    respond with 'Customer has segment of "HighValue".'
+    respond with 'Customer has tier of "gold".'
+
+    expect run succeeds.
+    expect entity "Customer" exists.
+end
+
+
+test "Smoke: standard path runs without error"
+    tags: smoke fast
+
+    given Customer has total_purchases of 100.
+    given Customer has account_age_days of 30.
+
+    respond with 'Customer has segment of "Standard".'
+    respond with 'Customer has tier of "basic".'
+
+    expect run succeeds.
+    expect entity "Customer" exists.
+end
