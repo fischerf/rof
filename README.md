@@ -549,6 +549,63 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
       Structured result of ResponseParser.parse(content, output_mode):
         raw_content, rl_statements, attribute_deltas, predicate_deltas,
         is_valid_rl, warnings
+  │
+  UsageInfo  (dataclass on LLMProvider ABC)
+  │   Normalised token counts returned by LLMProvider.extract_usage().
+  │   Custom / generic providers override this method to report their
+  │   own token counts without coupling to any specific raw dict shape.
+  │   Fields: input_tokens, output_tokens, total_tokens (auto-computed),
+  │           eval_duration_ns (Ollama), model
+  │
+  CallRecord  (frozen dataclass)
+  │   Immutable snapshot of one complete() call.
+  │   Fields: elapsed_s, input_tokens, output_tokens, total_tokens,
+  │           tokens_per_min (property), eval_duration_ns, model
+  │
+  UsageAccumulator
+  │   Mutable append-only log of CallRecord objects.
+  │   Aggregates token counts and wall-clock time across all calls.
+  │   acc.call_count, acc.elapsed_s, acc.total_tokens, acc.tokens_per_min
+  │   acc.summary()   → "3 calls  |  6.2s  |  in=1204  out=549  total=1753  |  5276 tok/min"
+  │   acc.to_dict()   → machine-readable dict including per-call breakdown
+  │   acc.reset()     → clear between pipeline stages
+  │
+  CostGuard
+  │   Budget enforcer attached to TrackingProvider.
+  │   Raises BudgetExceededError after the call that first crosses a limit.
+  │   All limits are optional — set only the ones you care about.
+  │     max_total_tokens   hard cost cap across the entire run
+  │     max_input_tokens   prompt token budget
+  │     max_output_tokens  generation token budget
+  │     max_calls          safety net when token data is unavailable (e.g. Gemini)
+  │
+  BudgetExceededError
+  │   Raised by CostGuard. Carries limit_kind, limit_value, actual_value,
+  │   and the live accumulator for inspection or logging.
+  │
+  TrackingProvider
+      Transparent LLMProvider wrapper — invisible to the Orchestrator,
+      RetryManager, and all other framework components.
+      Intercepts every complete() call, measures wall-clock time, extracts
+      token counts (via extract_usage() hook first, raw dict heuristics as
+      fallback), appends a CallRecord to the accumulator, then optionally
+      checks the CostGuard threshold.
+
+      from rof_framework.llm import (
+          TrackingProvider, UsageAccumulator, CostGuard, BudgetExceededError
+      )
+
+      tracker  = UsageAccumulator()
+      guard    = CostGuard(max_total_tokens=10_000, max_calls=25)
+      provider = TrackingProvider(base_provider, tracker, cost_guard=guard)
+
+      try:
+          result = orchestrator.run(ast)
+      except BudgetExceededError as e:
+          print(f"Halted: {e}")          # includes overage details + run stats
+          print(tracker.summary())       # final accumulated stats
+
+      # Stats are also printed automatically by rof run / rof debug / rof generate
 ```
 
 ### rof-tools
@@ -1107,6 +1164,63 @@ rof lint    tests/fixtures/loan_approval.rl
 rof inspect tests/fixtures/loan_approval.rl
 rof run     tests/fixtures/loan_approval.rl --provider anthropic
 ```
+
+**Generate a `.rl` workflow from a natural-language description:**
+
+```bash
+# Print to stdout + auto-lint the result
+rof generate "loan approval workflow for a bank" --provider anthropic
+
+# Write directly to a file
+rof generate "customer churn prediction model" \
+    --provider openai --output churn.rl
+
+# Machine-readable output (source + lint issues + token stats)
+rof generate "fraud detection system" --provider ollama --json
+
+# Skip the lint pass
+rof generate "search the web and save results to CSV" \
+    --provider anthropic --no-lint --output websearch.rl
+```
+
+`rof run`, `rof debug`, and `rof generate` all print a **Stats** section after
+each run showing wall-clock time, input/output/total tokens, and tokens/minute.
+The same data is available in the `"stats"` key when using `--json`.
+
+**Token tracking and cost guard (Python SDK):**
+
+```python
+from rof_framework.llm import (
+    AnthropicProvider,
+    TrackingProvider,
+    UsageAccumulator,
+    CostGuard,
+    BudgetExceededError,
+)
+from rof_framework.core import Orchestrator, OrchestratorConfig, RLParser
+
+base     = AnthropicProvider(api_key="sk-ant-...", model="claude-sonnet-4-5")
+tracker  = UsageAccumulator()
+guard    = CostGuard(max_total_tokens=10_000, max_calls=25)
+provider = TrackingProvider(base, tracker, cost_guard=guard)
+
+orch   = Orchestrator(llm_provider=provider)
+ast    = RLParser().parse(open("loan_approval.rl").read())
+
+try:
+    result = orch.run(ast)
+    print(tracker.summary())
+    # → 3 calls  |  6.2s  |  in=1204  out=549  total=1753  |  5276.3 tok/min
+except BudgetExceededError as e:
+    print(f"Halted: {e}")           # includes overage details + run stats
+    print(tracker.summary())        # stats up to the point of halt
+```
+
+Custom and generic providers (e.g. `FujitsuChatAIProvider`) report their token
+counts by overriding `LLMProvider.extract_usage()` — the `TrackingProvider`
+calls this hook first and falls back to built-in raw-dict heuristics for the
+four bundled providers.
+
 
 **Run the prompt unit test suites (no LLM, no API key):**
 

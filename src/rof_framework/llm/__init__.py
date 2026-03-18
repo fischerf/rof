@@ -8,6 +8,7 @@ Public API re-exports – import from here instead of the sub-modules:
     from rof_framework.llm import AnthropicProvider, create_provider
     from rof_framework.llm import TrackingProvider, UsageAccumulator, CallRecord
     from rof_framework.llm import UsageInfo
+    from rof_framework.llm import CostGuard, BudgetExceededError
 """
 
 from rof_framework.core.interfaces.llm_provider import UsageInfo
@@ -26,7 +27,13 @@ from rof_framework.llm.providers.openai_provider import AzureOpenAIProvider, Ope
 from rof_framework.llm.renderer.prompt_renderer import PromptRenderer, RendererConfig
 from rof_framework.llm.response.response_parser import ParsedResponse, ResponseParser
 from rof_framework.llm.retry.retry_manager import BackoffStrategy, RetryConfig, RetryManager
-from rof_framework.llm.tracking import CallRecord, TrackingProvider, UsageAccumulator
+from rof_framework.llm.tracking import (
+    BudgetExceededError,
+    CallRecord,
+    CostGuard,
+    TrackingProvider,
+    UsageAccumulator,
+)
 
 __all__ = [
     # Providers
@@ -57,5 +64,7 @@ __all__ = [
     "CallRecord",
     "UsageAccumulator",
     "TrackingProvider",
+    "CostGuard",
+    "BudgetExceededError",
     "UsageInfo",
 ]

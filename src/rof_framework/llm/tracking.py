@@ -23,7 +23,13 @@ Usage
 -----
 ::
 
-    from rof_framework.llm.tracking import TrackingProvider, UsageAccumulator
+    from rof_framework.llm.tracking import (
+        BudgetExceededError,
+        CallRecord,
+        CostGuard,
+        TrackingProvider,
+        UsageAccumulator,
+    )
     from rof_framework.llm import AnthropicProvider
 
     base     = AnthropicProvider(api_key="sk-ant-...", model="claude-sonnet-4-5")
@@ -67,13 +73,16 @@ Classes
 CallRecord          Immutable dataclass for one LLM call.
 UsageAccumulator    Mutable, append-only log of CallRecord objects + aggregates.
 TrackingProvider    Transparent LLMProvider wrapper that feeds UsageAccumulator.
+CostGuard           Configurable threshold enforcer — raises BudgetExceededError
+                    when token or call-count limits are breached.
+BudgetExceededError Exception raised by CostGuard when a limit is exceeded.
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from rof_framework.core.interfaces.llm_provider import (
     LLMProvider,
@@ -82,13 +91,12 @@ from rof_framework.core.interfaces.llm_provider import (
     UsageInfo,
 )
 
-if TYPE_CHECKING:
-    pass
-
 __all__ = [
     "CallRecord",
     "UsageAccumulator",
     "TrackingProvider",
+    "CostGuard",
+    "BudgetExceededError",
 ]
 
 
@@ -316,6 +324,169 @@ class UsageAccumulator:
 
 
 # ---------------------------------------------------------------------------
+# CostGuard — threshold enforcer
+# ---------------------------------------------------------------------------
+
+
+class BudgetExceededError(Exception):
+    """
+    Raised by :class:`CostGuard` when a configured token or call-count limit
+    is exceeded.
+
+    Attributes
+    ----------
+    limit_kind      Which limit was breached: "total_tokens", "input_tokens",
+                    "output_tokens", or "call_count".
+    limit_value     The configured threshold.
+    actual_value    The accumulated value that breached the threshold.
+    accumulator     The :class:`UsageAccumulator` at the moment of the breach,
+                    for inspection or logging.
+    """
+
+    def __init__(
+        self,
+        limit_kind: str,
+        limit_value: int,
+        actual_value: int,
+        accumulator: UsageAccumulator,
+    ) -> None:
+        super().__init__(
+            f"Budget exceeded: {limit_kind} limit is {limit_value:,} "
+            f"but accumulated value reached {actual_value:,}. "
+            f"Run stats: {accumulator.summary()}"
+        )
+        self.limit_kind = limit_kind
+        self.limit_value = limit_value
+        self.actual_value = actual_value
+        self.accumulator: UsageAccumulator = accumulator
+
+
+class CostGuard:
+    """
+    Configurable budget enforcer for LLM usage.
+
+    ``CostGuard`` is attached to a :class:`TrackingProvider` and is called
+    after every ``complete()`` call.  When the accumulated usage crosses any
+    configured threshold it raises :class:`BudgetExceededError`, which halts
+    the Orchestrator's execution loop cleanly.
+
+    All limits are **optional** — set only the ones you care about.  Omitting
+    a limit (leaving it as ``None``) means "no limit".
+
+    Parameters
+    ----------
+    max_total_tokens:
+        Maximum combined input + output tokens across the entire run.
+        Good for hard cost caps: e.g. ``max_total_tokens=10_000``.
+    max_input_tokens:
+        Maximum prompt tokens (controls context-size budget).
+    max_output_tokens:
+        Maximum generated tokens (controls generation budget).
+    max_calls:
+        Maximum number of LLM calls.  Useful as a safety net against
+        runaway loops when token reporting is unavailable (e.g. Gemini).
+
+    Raises
+    ------
+    BudgetExceededError
+        On the call that first crosses any limit.  The error is raised
+        *after* the call completes and the :class:`CallRecord` has been
+        appended to the accumulator, so the stats in the error message
+        reflect the actual overage.
+
+    Example
+    -------
+    ::
+
+        from rof_framework.llm import AnthropicProvider, TrackingProvider
+        from rof_framework.llm.tracking import UsageAccumulator, CostGuard
+
+        base    = AnthropicProvider(api_key="...", model="claude-sonnet-4-5")
+        tracker = UsageAccumulator()
+        guard   = CostGuard(max_total_tokens=5_000, max_calls=10)
+        provider = TrackingProvider(base, tracker, cost_guard=guard)
+
+        try:
+            result = orchestrator.run(ast)
+        except BudgetExceededError as e:
+            print(f"Halted: {e}")
+            print(f"Stats : {e.accumulator.summary()}")
+    """
+
+    def __init__(
+        self,
+        max_total_tokens: int | None = None,
+        max_input_tokens: int | None = None,
+        max_output_tokens: int | None = None,
+        max_calls: int | None = None,
+    ) -> None:
+        self.max_total_tokens = max_total_tokens
+        self.max_input_tokens = max_input_tokens
+        self.max_output_tokens = max_output_tokens
+        self.max_calls = max_calls
+
+    def check(self, accumulator: UsageAccumulator) -> None:
+        """
+        Inspect *accumulator* and raise :class:`BudgetExceededError` if any
+        limit has been exceeded.
+
+        Called automatically by :class:`TrackingProvider` after every
+        successful ``complete()`` call.  Can also be called manually at any
+        point to perform an out-of-band check.
+
+        Parameters
+        ----------
+        accumulator:
+            The live :class:`UsageAccumulator` to inspect.
+
+        Raises
+        ------
+        BudgetExceededError
+            If any configured limit is exceeded.
+        """
+        if self.max_calls is not None and accumulator.call_count > self.max_calls:
+            raise BudgetExceededError(
+                "call_count", self.max_calls, accumulator.call_count, accumulator
+            )
+
+        if (
+            self.max_total_tokens is not None
+            and accumulator.total_tokens is not None
+            and accumulator.total_tokens > self.max_total_tokens
+        ):
+            raise BudgetExceededError(
+                "total_tokens",
+                self.max_total_tokens,
+                accumulator.total_tokens,
+                accumulator,
+            )
+
+        if (
+            self.max_input_tokens is not None
+            and accumulator.input_tokens is not None
+            and accumulator.input_tokens > self.max_input_tokens
+        ):
+            raise BudgetExceededError(
+                "input_tokens",
+                self.max_input_tokens,
+                accumulator.input_tokens,
+                accumulator,
+            )
+
+        if (
+            self.max_output_tokens is not None
+            and accumulator.output_tokens is not None
+            and accumulator.output_tokens > self.max_output_tokens
+        ):
+            raise BudgetExceededError(
+                "output_tokens",
+                self.max_output_tokens,
+                accumulator.output_tokens,
+                accumulator,
+            )
+
+
+# ---------------------------------------------------------------------------
 # Token extraction helpers (provider-specific raw dict parsing)
 # ---------------------------------------------------------------------------
 
@@ -414,9 +585,11 @@ class TrackingProvider(LLMProvider):
         self,
         provider: LLMProvider,
         accumulator: UsageAccumulator | None = None,
+        cost_guard: CostGuard | None = None,
     ) -> None:
         self._provider = provider
         self._accumulator = accumulator if accumulator is not None else UsageAccumulator()
+        self._cost_guard = cost_guard
 
     @property
     def accumulator(self) -> UsageAccumulator:
@@ -457,6 +630,13 @@ class TrackingProvider(LLMProvider):
                 model=model,
             )
         )
+
+        # Check budget limits after recording — raises BudgetExceededError
+        # if any threshold is exceeded.  The record is already appended so the
+        # error message contains accurate overage stats.
+        if self._cost_guard is not None:
+            self._cost_guard.check(self._accumulator)
+
         return response
 
     def supports_tool_calling(self) -> bool:
