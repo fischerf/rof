@@ -238,6 +238,76 @@ def _make_generic_provider(provider_name: str, args: argparse.Namespace) -> Any:
 
 from rof_framework.core.lint.linter import Linter, LintIssue, Severity  # noqa: E402
 
+# ─── Audit log helper ────────────────────────────────────────────────────────
+
+
+def _setup_audit_subscriber(bus: Any, args: argparse.Namespace) -> Any | None:
+    """
+    Wire an AuditSubscriber to *bus* when ``--audit-log`` is set.
+
+    Returns the AuditSubscriber instance (caller must call .close() when done),
+    or None when audit logging is disabled or the governance module is not
+    available.
+
+    Parameters
+    ----------
+    bus:
+        The EventBus instance the orchestrator / pipeline will publish to.
+    args:
+        Parsed CLI args.  Reads ``args.audit_log`` (bool) and
+        ``args.audit_dir`` (str | None).
+    """
+    if not getattr(args, "audit_log", False):
+        return None
+
+    try:
+        from rof_framework.governance.audit import (
+            AuditConfig,
+            AuditSubscriber,
+            JsonLinesSink,
+        )
+    except ImportError:
+        _warn("rof_framework.governance.audit not available — audit logging skipped.")
+        return None
+
+    audit_dir = getattr(args, "audit_dir", None) or "./audit_logs"
+
+    sink = JsonLinesSink(
+        output_dir=audit_dir,
+        rotate_by="day",
+        shutdown_timeout_s=5.0,
+    )
+    cfg = AuditConfig(
+        sink_type="jsonlines",
+        output_dir=audit_dir,
+        exclude_events=["state.attribute_set", "state.predicate_added"],
+    )
+    subscriber = AuditSubscriber(bus=bus, sink=sink, config=cfg)
+    _ok(f"Audit log enabled  →  {dim(audit_dir)}")
+    return subscriber
+
+
+def _audit_args(p: argparse.ArgumentParser) -> None:
+    """Add shared ``--audit-log`` / ``--audit-dir`` flags to a sub-command parser."""
+    g = p.add_argument_group("Audit log")
+    g.add_argument(
+        "--audit-log",
+        action="store_true",
+        dest="audit_log",
+        help=(
+            "Enable the immutable audit log. Every EventBus event is recorded as "
+            "a structured JSON line to the audit directory."
+        ),
+    )
+    g.add_argument(
+        "--audit-dir",
+        metavar="DIR",
+        dest="audit_dir",
+        default=None,
+        help="Directory for audit JSONL files (default: ./audit_logs). "
+        "Implies --audit-log when given.",
+    )
+
 
 def _fmt_issue(issue: LintIssue) -> str:
     """Render a LintIssue with terminal colours for CLI display."""
@@ -1194,6 +1264,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     bus = core.EventBus()
     steps_log: list[dict] = []
 
+    # ── Audit log (optional) ──────────────────────────────────────────────
+    _audit_subscriber = _setup_audit_subscriber(bus, args)
+
     if not as_json:
 
         def on_step_started(e: Any) -> None:
@@ -1308,6 +1381,13 @@ def cmd_run(args: argparse.Namespace) -> int:
             _warn(f"Snapshot seeding partially failed: {exc}")
     result = orch.run(ast)
     elapsed = round(time.perf_counter() - t0, 3)
+
+    # ── Close audit subscriber (flushes + closes the sink) ────────────────
+    if _audit_subscriber is not None:
+        _audit_subscriber.close()
+        if not as_json:
+            audit_path = getattr(args, "audit_dir", None) or "./audit_logs"
+            _ok(f"Audit log written  →  {dim(audit_path)}")
 
     # ── Save snapshot ─────────────────────────────────────────────────────
     if out_snap:
@@ -1690,6 +1770,9 @@ def cmd_pipeline_run(args: argparse.Namespace) -> int:
 
     pipeline = builder.build()
 
+    # ── Audit log (optional) ──────────────────────────────────────────────
+    _audit_subscriber = _setup_audit_subscriber(pipeline.bus, args)
+
     if not as_json:
         _banner(f"ROF Pipeline  →  {config_path.name}")
         print(f"  Stages   : {len(stages_cfg)}")
@@ -1715,6 +1798,13 @@ def cmd_pipeline_run(args: argparse.Namespace) -> int:
     t0 = time.perf_counter()
     result = pipeline.run(seed_snapshot=seed_snapshot)
     elapsed = round(time.perf_counter() - t0, 3)
+
+    # ── Close audit subscriber (flushes + closes the sink) ────────────────
+    if _audit_subscriber is not None:
+        _audit_subscriber.close()
+        if not as_json:
+            audit_path = getattr(args, "audit_dir", None) or "./audit_logs"
+            _ok(f"Audit log written  →  {dim(audit_path)}")
 
     if as_json:
         print(
@@ -2081,6 +2171,8 @@ def build_parser() -> argparse.ArgumentParser:
               rof inspect customer.rl --format json
               rof run customer.rl --provider anthropic --model claude-sonnet-4-5
               rof run customer.rl --json --output-snapshot snap.json
+              rof run customer.rl --audit-log --audit-dir ./audit_logs --provider openai
+              rof pipeline run pipeline.yaml --audit-log --audit-dir ./audit_logs
               rof debug customer.rl --step
               rof debug customer.rl --max-iter 5 --provider openai
               rof pipeline run pipeline.yaml
@@ -2093,6 +2185,19 @@ def build_parser() -> argparse.ArgumentParser:
               rof test tests/fixtures/ --tag smoke --json
               rof test suite.rl.test --fail-fast --verbose
               rof version
+
+            Audit log (immutable structured JSON, ELK/Splunk/Datadog compatible):
+              # Enable audit logging for a single run:
+              rof run customer.rl --audit-log --provider anthropic
+
+              # Write audit files to a custom directory:
+              rof run customer.rl --audit-log --audit-dir /var/log/rof --provider openai
+
+              # Audit a multi-stage pipeline run:
+              rof pipeline run pipeline.yaml --audit-log --audit-dir ./audit_logs
+
+              # Each day produces one file: audit_YYYY-MM-DD.jsonl
+              # Ingest with: filebeat, fluentd, vector, or tail -f audit_*.jsonl | jq .
 
             Snapshot seeding (replay / resume a prior run):
               # Save the snapshot of any run to a file:
@@ -2186,6 +2291,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     _provider_args(p_run)
+    _audit_args(p_run)
 
     # ── debug ─────────────────────────────────────────────────────────────
     p_dbg = sub.add_parser("debug", help="Step-through execution with prompt/response")
@@ -2238,6 +2344,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Load initial snapshot from a JSON file (replay / resume a prior run)",
     )
     _provider_args(p_pip_run)
+    _audit_args(p_pip_run)
 
     p_pip_dbg = pip_sub.add_parser("debug", help="Debug a pipeline with full prompt/response trace")
     p_pip_dbg.add_argument(

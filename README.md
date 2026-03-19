@@ -271,30 +271,52 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   │                 → attribute + predicate deltas (graph delta)       │
   │                 → re-emit as RL statements → audit snapshot        │
   │  5. COMMIT ───► WorkflowGraph.apply(deltas)                        │
-  │  6. EMIT ─────► EventBus                                           │
-  │  7. SNAPSHOT ─► StateManager.save()                                │
-  └──────────┬──────────────────────────────┬───────────────────────────┘
-             │                              │
-  ┌──────────▼──────────┐       ┌───────────▼──────────────────────────┐
-  │    rof-llm          │       │    rof-tools  Tool Layer              │
-  │    LLM Gateway      │       │                                       │
-  │                     │       │  ToolRegistry  ← tags, lookup         │
-  │  AnthropicProvider  │       │  ToolRouter    ← 3 strategies         │
-  │  OpenAIProvider     │       │                                       │
-  │  GeminiProvider     │       │  WebSearchTool   ddgs/serpapi/brave   │
-  │  OllamaProvider     │       │  RAGTool         chroma/memory        │
-  │  GitHubCopilot      │       │  CodeRunnerTool  py/js/lua/sh         │
-  │  Provider           │       │  APICallTool     httpx REST           │
-  │                     │       │  DatabaseTool    sqlite/SA            │
-  │  RetryManager       │       │  FileReaderTool  pdf/csv/docx/…       │
-  │  PromptRenderer     │       │  ValidatorTool   RL schema check      │
-  │  ResponseParser     │       │  HumanInLoopTool stdin/cb/file        │
-  └─────────────────────┘       │  FileSaveTool    Lua script + save    │
-                                │  LuaRunTool      interactive Lua run  │
-                                │                                       │
-                                │  SDK: @rof_tool · LuaScriptTool       │
-                                │       JavaScriptTool                  │
-                                └───────────────────────────────────────┘
+  │  6. EMIT ─────► EventBus ──────────────────────────────────────┐   │
+  │  7. SNAPSHOT ─► StateManager.save()                            │   │
+  └──────────┬──────────────────────────────┬──────────────────────│───┘
+             │                              │                       │
+  ┌──────────▼──────────┐       ┌───────────▼──────────────────────│───┐
+  │    rof-llm          │       │    rof-tools  Tool Layer          │   │
+  │    LLM Gateway      │       │                                   │   │
+  │                     │       │  ToolRegistry  ← tags, lookup     │   │
+  │  AnthropicProvider  │       │  ToolRouter    ← 3 strategies     │   │
+  │  OpenAIProvider     │       │                                   │   │
+  │  GeminiProvider     │       │  WebSearchTool   ddgs/serpapi     │   │
+  │  OllamaProvider     │       │  RAGTool         chroma/memory    │   │
+  │  GitHubCopilot      │       │  CodeRunnerTool  py/js/lua/sh     │   │
+  │  Provider           │       │  APICallTool     httpx REST       │   │
+  │                     │       │  DatabaseTool    sqlite/SA        │   │
+  │  RetryManager       │       │  FileReaderTool  pdf/csv/docx/…   │   │
+  │  PromptRenderer     │       │  ValidatorTool   RL schema check  │   │
+  │  ResponseParser     │       │  HumanInLoopTool stdin/cb/file    │   │
+  └─────────────────────┘       │  FileSaveTool    save to disk     │   │
+                                │  LuaRunTool      interactive Lua  │   │
+                                │                                   │   │
+                                │  SDK: @rof_tool · LuaScriptTool   │   │
+                                │       JavaScriptTool              │   │
+                                └───────────────────────────────────┘   │
+                                                                         │
+  ┌──────────────────────────────────────────────────────────────────────▼──┐
+  │              rof-governance  Governance Layer                           │
+  │                                                                         │
+  │  AuditSubscriber  ← wildcard EventBus subscriber ("*")                 │
+  │    filters events (include/exclude lists)                               │
+  │    builds AuditRecord  ← schema_version · audit_id · timestamp         │
+  │                          event_name · actor · level · run_id            │
+  │                          pipeline_id · payload (verbatim)               │
+  │    enqueues to background writer thread  (non-blocking, never on the    │
+  │    EventBus publish path)                                               │
+  │                                                                         │
+  │  AuditSink (ABC)                                                        │
+  │    ├── NullSink        silent discard  (tests / dry-runs)               │
+  │    ├── StdoutSink      JSON line per record  (container log shipping)   │
+  │    └── JsonLinesSink   append-only JSONL on disk  (production default)  │
+  │          day / run / none rotation  ·  bounded queue  ·  drop counter  │
+  │          natively ingestible by ELK · Splunk · Datadog · Vector         │
+  │                                                                         │
+  │  CLI:  rof run        --audit-log [--audit-dir DIR]                     │
+  │        rof pipeline run --audit-log [--audit-dir DIR]                   │
+  └─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Pipeline progressive enrichment
@@ -321,6 +343,20 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
 ```
   src/rof_framework/
     py.typed                           PEP 561 marker
+
+    governance/                        Governance layer
+      audit/
+        models.py                      AuditRecord dataclass  (schema_version, audit_id,
+                                         timestamp, event_name, actor, level, run_id,
+                                         pipeline_id, payload)
+        config.py                      AuditConfig  (sink_type, output_dir, rotate_by,
+                                         include_events, exclude_events, max_queue_size)
+        subscriber.py                  AuditSubscriber  (EventBus → sink glue layer)
+        sinks/
+          base.py                      AuditSink ABC  (write · flush · close)
+          null_sink.py                 NullSink  (no-op, zero overhead)
+          stdout_sink.py               StdoutSink  (JSON lines to stdout)
+          jsonlines.py                 JsonLinesSink  (append-only JSONL on disk)
 
     core/                              Core framework
       ast/nodes.py                     StatementType, RLNode, WorkflowAST + all node types
@@ -388,12 +424,13 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
     cli/main.py                        CLI entry point — all commands + main()
 
     # Backward-compatibility shims (thin re-export wrappers):
-    rof_core.py     →  rof_framework.core
-    rof_llm.py      →  rof_framework.llm
-    rof_tools.py    →  rof_framework.tools
-    rof_pipeline.py →  rof_framework.pipeline
-    rof_routing.py  →  rof_framework.routing
-    rof_cli.py      →  rof_framework.cli
+    rof_core.py       →  rof_framework.core
+    rof_llm.py        →  rof_framework.llm
+    rof_tools.py      →  rof_framework.tools
+    rof_pipeline.py   →  rof_framework.pipeline
+    rof_routing.py    →  rof_framework.routing
+    rof_governance.py →  rof_framework.governance.audit
+    rof_cli.py        →  rof_framework.cli
 
   tests/fixtures/
     pipeline_load_approval/          3-stage Loan Approval pipeline
@@ -435,6 +472,151 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
 ---
 
 ## Module Reference
+
+### rof-governance
+
+```
+  AuditSubscriber
+  │   The glue layer between EventBus and AuditSink.
+  │   Subscribes to "*" (all events) so domain code never needs changes.
+  │   Filters events per AuditConfig, builds an AuditRecord, and enqueues
+  │   the serialised dict to a background writer thread — the EventBus
+  │   publish path is never blocked by I/O.
+  │
+  │   from rof_framework.governance.audit import (
+  │       AuditConfig, AuditSubscriber, JsonLinesSink
+  │   )
+  │   sink       = JsonLinesSink(output_dir="./audit_logs", rotate_by="day")
+  │   config     = AuditConfig(exclude_events=["state.attribute_set"])
+  │   subscriber = AuditSubscriber(bus=bus, sink=sink, config=config)
+  │   # ... run workflow ...
+  │   subscriber.close()   # flushes queue, closes file
+  │
+  │   Context-manager form (recommended):
+  │   with AuditSubscriber(bus=bus, sink=sink, config=config):
+  │       orchestrator.run(ast)
+  │
+  AuditRecord  (dataclass, schema_version=1)
+  │   One immutable audit log entry.  Fields:
+  │     audit_id      UUID4 — globally unique per record
+  │     timestamp     ISO-8601 UTC, millisecond precision ("…Z")
+  │     event_name    raw EventBus event name, e.g. "step.completed"
+  │     actor         inferred subsystem: orchestrator | pipeline | tool |
+  │                   llm | graph | router | unknown
+  │     level         inferred severity: INFO | WARN | ERROR
+  │     run_id        extracted from payload (top-level, for easy filtering)
+  │     pipeline_id   extracted from payload (top-level, for easy filtering)
+  │     payload       original EventBus payload dict — stored verbatim,
+  │                   coerced to JSON-safe types (bytes, objects → repr)
+  │     schema_version  integer — bump when breaking schema change is made
+  │
+  │   AuditRecord.from_event(event_name, payload)  — primary constructor
+  │   AuditRecord.to_dict()                         — JSON-serialisable dict
+  │   AuditRecord.from_dict(data)                   — re-hydrate, unknown keys
+  │                                                   silently ignored
+  │
+  AuditConfig  (dataclass)
+  │   All tuneable parameters.
+  │     sink_type          "jsonlines" | "stdout" | "null"  (default: "jsonlines")
+  │     output_dir         "./audit_logs"  (JSONL sink only)
+  │     rotate_by          "day" | "run" | "none"  (default: "day")
+  │     max_queue_size     10_000  (drop threshold — records dropped, not blocked)
+  │     shutdown_timeout_s 5.0  (drain timeout on close())
+  │     include_events     ["*"]  — whitelist; "*" means record everything
+  │     exclude_events     []     — blacklist; applied after include_events
+  │                                 e.g. ["state.attribute_set", "state.predicate_added"]
+  │     file_encoding      "utf-8"
+  │
+  │   config.should_record(event_name) → bool
+  │   AuditConfig.from_dict(data) / config.to_dict()
+  │
+  AuditSink  (ABC)
+  │   Interface every sink must implement: write(record) · flush() · close()
+  │   Context-manager protocol built in.
+  │   Subclass with three methods to build a custom sink (e.g. Kafka, S3):
+  │
+  │   class MySink(AuditSink):
+  │       def write(self, record: dict) -> None: ...
+  │       def flush(self) -> None: ...
+  │       def close(self) -> None: self._mark_closed()
+  │
+  ├── NullSink
+  │   Silent discard.  Zero overhead.  write_count property for test assertions.
+  │   Safe default when no audit configuration is provided.
+  │
+  ├── StdoutSink
+  │   One compact JSON line per record to stdout (NDJSON format).
+  │   Designed for container environments where the runtime captures stdout
+  │   and forwards it to a log aggregator (Datadog, Loki, CloudWatch, …).
+  │   StdoutSink(pretty=True) for human-readable indented output.
+  │
+  └── JsonLinesSink  (production default)
+      Append-only JSONL files on disk.  Files are NEVER opened in "w" mode.
+      A single background daemon thread owns all I/O — write() only enqueues.
+
+      Rotation modes:
+        "day"   audit_YYYY-MM-DD.jsonl  — one file per UTC calendar day
+        "run"   audit_YYYY-MM-DDTHH-MM-SS.jsonl  — one file per process start
+        "none"  audit.jsonl             — single file (external rotation)
+
+      Ingest with any log shipper:
+        Filebeat (ELK)    — input.type: log, paths: [./audit_logs/*.jsonl]
+        Fluentd / Fluent Bit — tail plugin
+        Vector            — file source
+        Datadog Agent     — autodiscovery on the output directory
+        Direct tail:      tail -f audit_logs/*.jsonl | jq .
+
+      sink.write_count  — total records successfully written
+      sink.drop_count   — total records dropped due to full queue
+      sink.current_file — Path of the currently open file
+
+  create_sink(config)
+      Factory: builds the correct AuditSink from an AuditConfig instance.
+      Raises ValueError for unknown sink_type values.
+
+  EventBus events recorded automatically (actor / level)
+  ┌───────────────────────────┬───────────────┬───────┐
+  │ event_name                │ actor         │ level │
+  ├───────────────────────────┼───────────────┼───────┤
+  │ run.started               │ orchestrator  │ INFO  │
+  │ run.completed             │ orchestrator  │ INFO  │
+  │ run.failed                │ orchestrator  │ ERROR │
+  │ step.started              │ orchestrator  │ INFO  │
+  │ step.completed            │ orchestrator  │ INFO  │
+  │ step.failed               │ orchestrator  │ ERROR │
+  │ goal.status_changed       │ graph         │ INFO  │
+  │ state.attribute_set       │ graph         │ INFO  │
+  │ state.predicate_added     │ graph         │ INFO  │
+  │ pipeline.started          │ pipeline      │ INFO  │
+  │ pipeline.completed        │ pipeline      │ INFO  │
+  │ pipeline.failed           │ pipeline      │ ERROR │
+  │ stage.started             │ pipeline      │ INFO  │
+  │ stage.completed           │ pipeline      │ INFO  │
+  │ stage.failed              │ pipeline      │ ERROR │
+  │ stage.retrying            │ pipeline      │ WARN  │
+  │ stage.skipped             │ pipeline      │ INFO  │
+  │ fanout.started            │ pipeline      │ INFO  │
+  │ fanout.completed          │ pipeline      │ INFO  │
+  │ tool.executed             │ tool          │ INFO  │
+  │ routing.decided           │ router        │ INFO  │
+  │ routing.uncertain         │ router        │ WARN  │
+  └───────────────────────────┴───────────────┴───────┘
+
+  Record schema (schema_version=1, NDJSON):
+  {
+    "schema_version": 1,
+    "audit_id":       "3f2a…",          // UUID4
+    "timestamp":      "2025-07-24T12:34:56.789Z",
+    "event_name":     "step.completed",
+    "actor":          "orchestrator",
+    "level":          "INFO",
+    "run_id":         "b1c2…",          // null when not in payload
+    "pipeline_id":    null,             // null when not in payload
+    "payload":        { … }             // verbatim EventBus payload
+  }
+```
+
+---
 
 ### rof-core
 
@@ -932,6 +1114,11 @@ without writing any Python.
   rof pipeline run   <config.yaml>   Execute a multi-stage pipeline from YAML
   rof pipeline debug <config.yaml>   Debug a pipeline with full prompt/response trace
   rof version                     Print version and dependency info
+
+  Audit log flags  (rof run  and  rof pipeline run)
+  --audit-log           Enable the immutable audit log.  Every EventBus event
+                        is recorded as a structured JSON line.
+  --audit-dir DIR       Directory for JSONL files (default: ./audit_logs).
 ```
 
 **`rof lint`** — static analysis, no LLM required
@@ -974,6 +1161,8 @@ without writing any Python.
     --max-iter N             Max orchestrator iterations (default: 25)
     --output-snapshot FILE   Save final snapshot to FILE.json
     --seed-snapshot FILE     Load initial snapshot from FILE.json
+    --audit-log              Enable the immutable audit log
+    --audit-dir DIR          Directory for audit JSONL files (default: ./audit_logs)
     + provider flags (see below)
 ```
 
@@ -1016,6 +1205,8 @@ without writing any Python.
   Flags:
     --verbose / -v   Enable DEBUG logging (parser, orchestrator, LLM events)
     --json           Output PipelineResult as JSON
+    --audit-log      Enable the immutable audit log
+    --audit-dir DIR  Directory for audit JSONL files (default: ./audit_logs)
     + provider flags (see below)
 ```
 
@@ -1138,6 +1329,21 @@ covered by multiple test suites.
   OPENAI_API_KEY
   ANTHROPIC_API_KEY
   GOOGLE_API_KEY
+```
+
+---
+
+**Audit log flags** — shared by `rof run` and `rof pipeline run`:
+
+```
+  --audit-log           Enable audit logging.  Attaches an AuditSubscriber to
+                        the EventBus before the run starts, records every event
+                        as a structured JSON line, and closes the file cleanly
+                        after the run completes.
+  --audit-dir DIR       Output directory for JSONL files.
+                        Default: ./audit_logs
+                        Files are named audit_YYYY-MM-DD.jsonl (day rotation).
+                        Each day's file is appended — never overwritten.
 ```
 
 ---
@@ -1290,4 +1496,84 @@ rof pipeline run tests/fixtures/pipeline_questionnaire/pipeline_questionnaire.ya
 ```bash
 rof pipeline debug tests/fixtures/pipeline_load_approval/pipeline.yaml \
     --provider anthropic --step
+```
+
+**Audit log — immutable structured JSON (ELK / Splunk / Datadog compatible):**
+
+```bash
+# Enable audit logging for a single workflow run:
+rof run tests/fixtures/loan_approval.rl --audit-log --provider anthropic
+
+# Write to a custom directory:
+rof run tests/fixtures/loan_approval.rl \
+    --audit-log --audit-dir /var/log/rof --provider openai
+
+# Audit a full pipeline run — one JSONL file per day:
+rof pipeline run tests/fixtures/pipeline_load_approval/pipeline.yaml \
+    --audit-log --audit-dir ./audit_logs --provider anthropic
+
+# Inspect live audit records as they are written:
+tail -f audit_logs/audit_$(date +%Y-%m-%d).jsonl | python -m json.tool
+
+# Filter for ERROR-level events only:
+cat audit_logs/audit_$(date +%Y-%m-%d).jsonl | \
+    python -c "import sys,json; [print(l) for l in sys.stdin if json.loads(l)['level']=='ERROR']"
+```
+
+**Audit log — Python SDK:**
+
+```python
+from rof_framework.core import Orchestrator, RLParser
+from rof_framework.core.events.event_bus import EventBus
+from rof_framework.governance.audit import (
+    AuditConfig,
+    AuditSubscriber,
+    JsonLinesSink,
+)
+
+bus    = EventBus()
+sink   = JsonLinesSink(output_dir="./audit_logs", rotate_by="day")
+config = AuditConfig(
+    exclude_events=["state.attribute_set", "state.predicate_added"],
+)
+
+with AuditSubscriber(bus=bus, sink=sink, config=config):
+    orch   = Orchestrator(llm_provider=llm, bus=bus)
+    result = orch.run(RLParser().parse(open("loan_approval.rl").read()))
+# on context-manager exit: queue is drained, file is flushed and closed
+
+# Each line of audit_YYYY-MM-DD.jsonl looks like:
+# {"schema_version":1,"audit_id":"…","timestamp":"2025-07-24T12:34:56.789Z",
+#  "event_name":"step.completed","actor":"orchestrator","level":"INFO",
+#  "run_id":"…","pipeline_id":null,"payload":{…}}
+```
+
+**Audit log — custom sink (e.g. forward to Kafka, S3, or a remote API):**
+
+```python
+from rof_framework.governance.audit import AuditSink, AuditSubscriber
+
+class KafkaSink(AuditSink):
+    def write(self, record: dict) -> None:
+        self._assert_open()
+        producer.send("rof-audit", value=record)   # your Kafka producer
+
+    def flush(self) -> None:
+        producer.flush()
+
+    def close(self) -> None:
+        producer.flush()
+        self._mark_closed()
+
+subscriber = AuditSubscriber(bus=bus, sink=KafkaSink())
+```
+
+**Shim import (backward-compatibility):**
+
+```python
+# Canonical path (preferred for new code):
+from rof_framework.governance.audit import AuditSubscriber, JsonLinesSink
+
+# Shim path (identical, for consistency with other rof_* shims):
+from rof_framework.rof_governance import AuditSubscriber, JsonLinesSink
 ```
