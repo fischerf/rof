@@ -635,10 +635,62 @@ LANGUAGE CONSTRUCTS
                   then ensure RiskLevel is "high".
 
 6. Goal (what the orchestrator must achieve — drives LLM calls):
-       ensure <verb> <Entity> <aspect>.
+
+   A goal is an OUTPUT CONTRACT. It must specify:
+     a) the intended task verb
+     b) the output modality (what form the result takes)
+     c) the target entity or context
+     d) optional constraints (language, tone, format, schema)
+
+   Canonical form (preferred):
+       ensure <verb> <output_type> for <Entity> [based on <context>] [with <constraints>].
+
+   Also valid (predicate assignment form):
        ensure <Entity> is <predicate>.
+
    - Each goal maps to one LLM call; order matters.
-   - Prefer concrete, specific goal expressions over vague ones.
+   - ALWAYS use a specific output verb. Recommended verbs:
+       generate, produce, return, classify, summarize, explain,
+       translate, transform, validate, compose, draft
+   - AVOID vague verbs: determine, handle, process, greet, evaluate, recommend.
+     If you must use them, make the output modality explicit via the form above.
+
+   OUTPUT MODALITY PATTERNS (use the most specific form that fits):
+
+   Natural language response:
+       ensure generate a natural language response for User in User.language.
+
+   Decision / classification:
+       ensure return a decision for Customer as "premium" or "standard".
+
+   Source code generation:
+       ensure generate Python source code for EmailValidator.
+
+   Structured output (JSON / YAML):
+       ensure generate JSON summary for Order.
+
+   Explanation / rationale:
+       ensure explain the decision for Application.
+
+   Summarization:
+       ensure summarize Report concisely.
+
+   Translation:
+       ensure translate Report into German.
+
+   Transformation:
+       ensure transform Draft into concise business language.
+
+   Constrained output:
+       ensure generate output for Entity with constraints on tone, length, or format.
+
+DESIGN RULES (Appendix A.3 — must be followed)
+---------------
+1. Always specify the output type in every goal (natural language, JSON, decision label, code, etc.).
+2. Avoid vague verbs: greet, handle, process, evaluate, determine, recommend.
+3. Prefer: generate / return / produce / explain / summarize / translate / transform / validate.
+4. Treat every `ensure` statement as an output contract — it defines what the LLM must produce.
+5. Separate reasoning (conditions / if-then rules) from outcomes (ensure goals).
 
 STYLE GUIDELINES
 ----------------
@@ -664,9 +716,9 @@ Customer has support_tickets of 2.
 if Customer has total_purchases > 10000 and account_age_days > 365,
     then ensure Customer is HighValue.
 
-ensure determine Customer segment.
-ensure recommend Customer support_tier.
-ensure generate Customer outreach_message.
+ensure classify Customer as "high_value" or "standard".
+ensure generate a natural language outreach_message for Customer.
+ensure produce JSON summary for Customer with segment and support_tier.
 ------------------------------------------------------------------------------------------
 
 EXAMPLE OUTPUT (fraud detection — cross-entity conditions, for style reference only):
@@ -688,9 +740,9 @@ relate Transaction and UserProfile as "initiated by".
 if Transaction has amount > 1000 and Transaction.location != UserProfile.home_location,
     then ensure RiskLevel is "high".
 
-ensure evaluate Transaction for fraud_risk.
-ensure generate RiskLevel explanation.
-ensure recommend Transaction action.
+ensure return a decision for Transaction based on RiskLevel as "block" or "approve".
+ensure explain the decision for Transaction based on RiskLevel.
+ensure generate a natural language action_summary for Transaction.
 ------------------------------------------------------------------------------------------
 
 Now generate a complete, valid, immediately-lintable .rl workflow file for the description \
