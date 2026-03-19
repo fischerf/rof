@@ -228,6 +228,7 @@ class TestRunWithMocks:
         )
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         code, out = run_cli(
@@ -256,6 +257,7 @@ class TestRunWithMocks:
         )
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         code, out = run_cli(
@@ -284,6 +286,7 @@ class TestRunWithMocks:
         )
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         code, out = run_cli(
@@ -309,6 +312,7 @@ class TestRunWithMocks:
         mock_provider.complete.side_effect = Exception("API Error")
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         code, out = run_cli(
@@ -355,6 +359,7 @@ class TestDebugWithMocks:
         )
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         code, out = run_cli(
@@ -380,6 +385,7 @@ class TestDebugWithMocks:
         mock_provider.complete.return_value = LLMResponse(content="Debug", raw={}, tool_calls=[])
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         code, out = run_cli(
@@ -417,6 +423,7 @@ class TestPipelineRunWithMocks:
         )
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         pipeline_config = EXAMPLES / "pipeline_load_approval" / "pipeline.yaml"
@@ -445,6 +452,7 @@ class TestPipelineRunWithMocks:
         )
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         pipeline_config = EXAMPLES / "pipeline_load_approval" / "pipeline.yaml"
@@ -496,6 +504,7 @@ class TestPipelineDebugWithMocks:
         )
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         pipeline_config = EXAMPLES / "pipeline_load_approval" / "pipeline.yaml"
@@ -923,6 +932,7 @@ class TestProviderCreation:
         )
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         code, out = run_cli(
@@ -995,6 +1005,7 @@ class TestErrorHandling:
         mock_provider.complete.side_effect = KeyboardInterrupt()
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         code, out = run_cli(
@@ -1028,6 +1039,7 @@ class TestProviderAutoDetection:
         mock_provider.complete.return_value = LLMResponse(content="Test", raw={}, tool_calls=[])
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         code, out = run_cli(
@@ -1050,6 +1062,7 @@ class TestProviderAutoDetection:
         mock_provider.complete.return_value = LLMResponse(content="Test", raw={}, tool_calls=[])
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         code, out = run_cli(
@@ -1074,6 +1087,7 @@ class TestProviderAutoDetection:
         mock_provider.complete.return_value = LLMResponse(content="Test", raw={}, tool_calls=[])
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         with patch.dict(os.environ, {"ROF_PROVIDER": "gemini", "ROF_API_KEY": "env-key"}):
@@ -1100,6 +1114,7 @@ class TestProviderAutoDetection:
         mock_provider.complete.return_value = LLMResponse(content="Test", raw={}, tool_calls=[])
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         code, out = run_cli(
@@ -1155,6 +1170,7 @@ class TestAdditionalCommandOptions:
         mock_provider.complete.return_value = LLMResponse(content="Test", raw={}, tool_calls=[])
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         # Create a temp context file
@@ -1202,6 +1218,7 @@ class TestAdditionalCommandOptions:
         mock_provider.complete.return_value = LLMResponse(content="Test", raw={}, tool_calls=[])
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         pipeline_config = EXAMPLES / "pipeline_load_approval" / "pipeline.yaml"
@@ -1236,6 +1253,7 @@ class TestToolIntegration:
         )
         mock_provider.supports_tool_calling.return_value = True
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         # Look for a tool-based workflow fixture
@@ -1267,6 +1285,7 @@ class TestToolIntegration:
         )
         mock_provider.supports_tool_calling.return_value = True
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         code, out = run_cli(
@@ -1439,6 +1458,7 @@ class TestPerformance:
         )
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         # Test with max_iter = 1
@@ -1474,6 +1494,7 @@ class TestWorkflowExecution:
         )
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         code, out = run_cli(
@@ -1509,6 +1530,7 @@ class TestWorkflowExecution:
         mock_provider.complete.side_effect = mock_complete
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         code, out = run_cli(
@@ -1569,6 +1591,7 @@ class TestVerbosityControl:
         )
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         code, out = run_cli(
@@ -1609,6 +1632,7 @@ class TestPipelineStages:
         mock_provider.complete.side_effect = mock_complete_with_failure
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         pipeline_config = EXAMPLES / "pipeline_load_approval" / "pipeline.yaml"
@@ -1637,6 +1661,7 @@ class TestPipelineStages:
         )
         mock_provider.supports_tool_calling.return_value = False
         mock_provider.context_limit = 4096
+        mock_provider.extract_usage.return_value = None
         mock_make_provider.return_value = mock_provider
 
         pipeline_config = EXAMPLES / "pipeline_load_approval" / "pipeline.yaml"
@@ -1892,6 +1917,7 @@ class TestSeedSnapshot:
         )
         mock.supports_tool_calling.return_value = False
         mock.context_limit = 8192
+        mock.extract_usage.return_value = None
         return mock
 
     @staticmethod

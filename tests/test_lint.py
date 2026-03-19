@@ -42,7 +42,9 @@ class TestE001SyntaxError:
         assert issues[0].severity == Severity.ERROR
 
     def test_valid_source_no_e001(self):
-        issues = lint('define Customer as "A buyer".\nensure determine Customer segment.')
+        issues = lint(
+            'define Customer as "A buyer".\nensure classify Customer as "active" or "inactive".'
+        )
         assert "E001" not in codes(issues)
 
     def test_syntax_error_in_fixture(self):
@@ -66,7 +68,7 @@ class TestE002DuplicateDefinition:
         src = """
         define Customer as "First".
         define Customer as "Duplicate".
-        ensure check Customer status.
+        ensure classify Customer as "active" or "inactive".
         """
         issues = lint(src)
         assert "E002" in codes(issues)
@@ -75,7 +77,7 @@ class TestE002DuplicateDefinition:
         src = """
         define Customer as "First definition, line 2".
         define Customer as "Duplicate on line 3".
-        ensure check Customer status.
+        ensure classify Customer as "active" or "inactive".
         """
         issues = lint(src)
         e002 = next(i for i in issues if i.code == "E002")
@@ -86,8 +88,8 @@ class TestE002DuplicateDefinition:
         src = """
         define Alpha as "a".
         define Beta as "b".
-        ensure check Alpha status.
-        ensure check Beta status.
+        ensure classify Alpha as "valid" or "invalid".
+        ensure classify Beta as "valid" or "invalid".
         """
         issues = lint(src)
         assert "E002" not in codes(issues)
@@ -105,7 +107,7 @@ class TestE003UndefinedConditionEntity:
         src = """
         define Customer as "buyer".
         if Ghost has score > 50, then ensure Customer is premium.
-        ensure determine Customer status.
+        ensure classify Customer as "premium" or "standard".
         """
         issues = lint(src)
         assert "E003" in codes(issues)
@@ -117,7 +119,7 @@ class TestE003UndefinedConditionEntity:
         define Customer as "buyer".
         Customer has total_purchases of 500.
         if Customer has total_purchases > 100, then ensure Customer is active.
-        ensure determine Customer status.
+        ensure classify Customer as "active" or "inactive".
         """
         issues = lint(src)
         assert "E003" not in codes(issues)
@@ -134,7 +136,7 @@ class TestE004UndefinedGoalEntity:
     def test_undefined_entity_in_goal(self):
         src = """
         define Customer as "buyer".
-        ensure determine UnknownEntity segment.
+        ensure classify UnknownEntity as "valid" or "invalid".
         """
         issues = lint(src)
         assert "E004" in codes(issues)
@@ -144,7 +146,7 @@ class TestE004UndefinedGoalEntity:
     def test_defined_entity_no_e004(self):
         src = """
         define Customer as "buyer".
-        ensure determine Customer segment.
+        ensure classify Customer as "high_value" or "standard".
         """
         issues = lint(src)
         assert "E004" not in codes(issues)
@@ -167,7 +169,7 @@ class TestW001NoGoals:
     def test_with_goals_no_w001(self):
         src = """
         define Order as "A purchase".
-        ensure process Order payment.
+        ensure return a decision for Order as "approved" or "rejected".
         """
         issues = lint(src)
         assert "W001" not in codes(issues)
@@ -186,7 +188,7 @@ class TestW002UndefinedActionEntity:
         define Customer as "buyer".
         Customer has total_purchases of 500.
         if Customer has total_purchases > 100, then ensure GhostEntity is premium.
-        ensure determine Customer status.
+        ensure classify Customer as "premium" or "standard".
         """
         issues = lint(src)
         assert "W002" in codes(issues)
@@ -208,7 +210,7 @@ class TestW003OrphanedDefinition:
         define Customer as "buyer".
         define UnusedEntity as "never referenced".
         Customer has score of 100.
-        ensure determine Customer tier.
+        ensure classify Customer as "high_value" or "standard".
         """
         issues = lint(src)
         assert "W003" in codes(issues)
@@ -219,7 +221,7 @@ class TestW003OrphanedDefinition:
         src = """
         define Customer as "buyer".
         Customer has score of 100.
-        ensure determine Customer tier.
+        ensure classify Customer as "high_value" or "standard".
         """
         issues = lint(src)
         assert "W003" not in codes(issues)
@@ -246,7 +248,7 @@ class TestI001AttributeWithoutDefinition:
     def test_attribute_without_define_info(self):
         src = """
         UndefinedEntity has score of 50.
-        ensure check UndefinedEntity status.
+        ensure classify UndefinedEntity as "valid" or "invalid".
         """
         issues = lint(src)
         i001 = [i for i in issues if i.code == "I001"]
@@ -256,7 +258,7 @@ class TestI001AttributeWithoutDefinition:
         src = """
         define Customer as "buyer".
         Customer has score of 50.
-        ensure check Customer status.
+        ensure classify Customer as "active" or "inactive".
         """
         issues = lint(src)
         assert "I001" not in codes(issues)
@@ -286,14 +288,14 @@ class TestLinterOutput:
         define Customer as "buyer".
         define Customer as "dup".
         if Ghost has x > 1, then ensure Customer is y.
-        ensure check Customer status.
+        ensure classify Customer as "active" or "inactive".
         """
         issues = lint(src)
         lines = [i.line for i in issues if i.line > 0]
         assert lines == sorted(lines)
 
     def test_issue_to_dict(self):
-        issues = lint('define Customer as "buyer"')
+        issues = lint('define Customer as "buyer"')  # missing period → E001
         d = issues[0].to_dict()
         assert "severity" in d
         assert "code" in d
@@ -301,5 +303,283 @@ class TestLinterOutput:
         assert "line" in d
 
     def test_issue_str_contains_code(self):
-        issues = lint('define Customer as "buyer"')
+        issues = lint('define Customer as "buyer"')  # missing period → E001
         assert "E001" in str(issues[0])
+
+
+# ─── W005: Vague goal verb ────────────────────────────────────────────────────
+
+
+class TestW005VagueGoalVerb:
+    def test_determine_raises_w005(self):
+        src = """
+        define Customer as "buyer".
+        ensure determine Customer segment.
+        """
+        issues = lint(src)
+        assert "W005" in codes(issues)
+        w005 = next(i for i in issues if i.code == "W005")
+        assert "determine" in w005.message
+        assert w005.severity == Severity.WARNING
+
+    def test_recommend_raises_w005(self):
+        src = """
+        define Customer as "buyer".
+        ensure recommend Customer support tier.
+        """
+        issues = lint(src)
+        assert "W005" in codes(issues)
+
+    def test_assess_raises_w005(self):
+        src = """
+        define Applicant as "a loan applicant".
+        ensure assess Applicant creditworthiness.
+        """
+        issues = lint(src)
+        assert "W005" in codes(issues)
+
+    def test_calculate_raises_w005(self):
+        src = """
+        define LoanRequest as "a loan".
+        ensure calculate LoanRequest monthly_payment.
+        """
+        issues = lint(src)
+        assert "W005" in codes(issues)
+
+    def test_check_raises_w005(self):
+        src = """
+        define Product as "an item".
+        ensure check Product availability.
+        """
+        issues = lint(src)
+        assert "W005" in codes(issues)
+
+    def test_process_raises_w005(self):
+        src = """
+        define Order as "a purchase".
+        ensure process Order payment.
+        """
+        issues = lint(src)
+        assert "W005" in codes(issues)
+
+    def test_evaluate_raises_w005(self):
+        src = """
+        define Transaction as "a financial operation".
+        ensure evaluate Transaction for fraud_risk.
+        """
+        issues = lint(src)
+        assert "W005" in codes(issues)
+
+    def test_classify_no_w005(self):
+        src = """
+        define Customer as "buyer".
+        ensure classify Customer as "high_value" or "standard".
+        """
+        issues = lint(src)
+        assert "W005" not in codes(issues)
+
+    def test_generate_no_w005(self):
+        src = """
+        define Customer as "buyer".
+        ensure generate a natural language greeting for Customer.
+        """
+        issues = lint(src)
+        assert "W005" not in codes(issues)
+
+    def test_return_no_w005(self):
+        src = """
+        define Transaction as "a financial operation".
+        ensure return a decision for Transaction as "block" or "approve".
+        """
+        issues = lint(src)
+        assert "W005" not in codes(issues)
+
+    def test_produce_no_w005(self):
+        src = """
+        define Report as "a document".
+        ensure produce a JSON summary for Report.
+        """
+        issues = lint(src)
+        assert "W005" not in codes(issues)
+
+    def test_explain_no_w005(self):
+        src = """
+        define Decision as "an outcome".
+        ensure explain the decision for Decision.
+        """
+        issues = lint(src)
+        assert "W005" not in codes(issues)
+
+    def test_summarize_no_w005(self):
+        src = """
+        define Report as "a document".
+        ensure summarize Report concisely.
+        """
+        issues = lint(src)
+        assert "W005" not in codes(issues)
+
+    def test_translate_no_w005(self):
+        src = """
+        define Document as "a text".
+        ensure translate Document into German.
+        """
+        issues = lint(src)
+        assert "W005" not in codes(issues)
+
+    def test_transform_no_w005(self):
+        src = """
+        define Draft as "a rough text".
+        ensure transform Draft into concise business language.
+        """
+        issues = lint(src)
+        assert "W005" not in codes(issues)
+
+    def test_predicate_assignment_exempt_from_w005(self):
+        # "ensure Entity is predicate" is always an explicit output contract
+        src = """
+        define Customer as "buyer".
+        Customer has score of 800.
+        if Customer has score > 700, then ensure Customer is premium.
+        ensure classify Customer as "premium" or "standard".
+        """
+        issues = lint(src)
+        assert "W005" not in codes(issues)
+
+    def test_w005_reports_correct_line(self):
+        src = 'define Customer as "buyer".\nensure determine Customer segment.\n'
+        issues = lint(src)
+        w005 = next((i for i in issues if i.code == "W005"), None)
+        assert w005 is not None
+        assert w005.line == 2
+
+    def test_lint_errors_fixture_has_w005(self):
+        # lint_errors.rl uses "ensure determine Customer tier" — a vague verb
+        issues = lint_file("lint_errors.rl")
+        assert "W005" in codes(issues)
+
+    def test_customer_segmentation_fixture_no_w005(self):
+        # After updating customer_segmentation.rl to §2.7-compliant goals,
+        # it must no longer trigger W005.
+        issues = lint_file("customer_segmentation.rl")
+        assert "W005" not in codes(issues)
+
+    def test_loan_approval_fixture_no_w005(self):
+        # After updating loan_approval.rl to §2.7-compliant goals,
+        # it must no longer trigger W005.
+        issues = lint_file("loan_approval.rl")
+        assert "W005" not in codes(issues)
+
+    def test_all_recommended_verbs_pass(self):
+        """Every verb in the §2.7.3 recommended list must not trigger W005."""
+        recommended_goals = [
+            "ensure generate a natural language response for Entity.",
+            "ensure produce a JSON summary for Entity.",
+            'ensure return a decision for Entity as "a" or "b".',
+            'ensure classify Entity as "a" or "b".',
+            "ensure summarize Entity concisely.",
+            "ensure explain the state of Entity.",
+            "ensure translate Entity into German.",
+            "ensure transform Entity into business language.",
+            "ensure validate Entity against schema.",
+            "ensure compose a report for Entity.",
+            "ensure draft a proposal for Entity.",
+        ]
+        for goal_src in recommended_goals:
+            src = f'define Entity as "a test entity".\n{goal_src}'
+            issues = lint(src)
+            w005_hits = [i for i in issues if i.code == "W005"]
+            assert w005_hits == [], (
+                f"Unexpected W005 for recommended verb in: {goal_src!r} — {w005_hits}"
+            )
+
+
+# ─── W006: Missing output modality ───────────────────────────────────────────
+
+
+class TestW006MissingOutputModality:
+    def test_bare_vague_verb_raises_w006(self):
+        # A goal with a vague verb and no modality marker should raise both
+        # W005 and W006.
+        src = """
+        define Customer as "buyer".
+        ensure determine Customer segment.
+        """
+        issues = lint(src)
+        assert "W006" in codes(issues)
+
+    def test_classify_with_as_no_w006(self):
+        # "classify X as ..." contains the ' as "' modality marker
+        src = """
+        define Customer as "buyer".
+        ensure classify Customer as "high_value" or "standard".
+        """
+        issues = lint(src)
+        assert "W006" not in codes(issues)
+
+    def test_return_decision_no_w006(self):
+        src = """
+        define Transaction as "a financial operation".
+        ensure return a decision for Transaction as "block" or "approve".
+        """
+        issues = lint(src)
+        assert "W006" not in codes(issues)
+
+    def test_generate_natural_language_no_w006(self):
+        src = """
+        define User as "a person".
+        ensure generate a natural language greeting for User.
+        """
+        issues = lint(src)
+        assert "W006" not in codes(issues)
+
+    def test_produce_json_no_w006(self):
+        src = """
+        define Report as "a document".
+        ensure produce a JSON summary for Report.
+        """
+        issues = lint(src)
+        assert "W006" not in codes(issues)
+
+    def test_explain_no_w006(self):
+        src = """
+        define Decision as "an outcome".
+        ensure explain the decision for Decision.
+        """
+        issues = lint(src)
+        assert "W006" not in codes(issues)
+
+    def test_translate_into_no_w006(self):
+        src = """
+        define Document as "a text".
+        ensure translate Document into German.
+        """
+        issues = lint(src)
+        assert "W006" not in codes(issues)
+
+    def test_predicate_assignment_exempt_from_w006(self):
+        src = """
+        define Customer as "buyer".
+        Customer has score of 800.
+        if Customer has score > 700, then ensure Customer is premium.
+        ensure classify Customer as "premium" or "standard".
+        """
+        issues = lint(src)
+        assert "W006" not in codes(issues)
+
+    def test_summarize_no_w006(self):
+        # "summarize" is a recommended verb — W006 only fires for non-recommended
+        # verbs that also lack a modality marker
+        src = """
+        define Report as "a document".
+        ensure summarize Report concisely.
+        """
+        issues = lint(src)
+        assert "W006" not in codes(issues)
+
+    def test_customer_segmentation_fixture_no_w006(self):
+        issues = lint_file("customer_segmentation.rl")
+        assert "W006" not in codes(issues)
+
+    def test_loan_approval_fixture_no_w006(self):
+        issues = lint_file("loan_approval.rl")
+        assert "W006" not in codes(issues)

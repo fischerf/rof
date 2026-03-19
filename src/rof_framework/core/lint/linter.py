@@ -46,6 +46,83 @@ class LintIssue:
         }
 
 
+# ── §2.7.3 / Appendix A.3 goal-verb analysis ──────────────────────────────
+
+# Verbs explicitly recommended by §2.7.3 and Appendix A.3 Rule 3.
+_RECOMMENDED_VERBS: frozenset[str] = frozenset(
+    {
+        "generate",
+        "produce",
+        "return",
+        "classify",
+        "summarize",
+        "summarise",
+        "explain",
+        "translate",
+        "transform",
+        "validate",
+        "compose",
+        "draft",
+    }
+)
+
+# Verbs explicitly banned by Appendix A.3 Rule 2.
+_VAGUE_VERBS: frozenset[str] = frozenset(
+    {
+        "determine",
+        "handle",
+        "process",
+        "greet",
+        "evaluate",
+        "recommend",
+        "assess",
+        "calculate",
+        "check",
+        "verify",
+        "complete",
+        "do",
+        "perform",
+        "execute",
+        "run",
+    }
+)
+
+# Keywords that indicate an output modality is stated (§2.7.2).
+# A goal containing at least one of these words satisfies W006.
+_MODALITY_MARKERS: tuple[str, ...] = (
+    # natural language
+    "natural language",
+    # decision / classification labels
+    ' as "',
+    " as '",
+    "decision for",
+    "decision as",
+    # structured output
+    "json",
+    "yaml",
+    "xml",
+    "summary for",
+    "summary of",
+    # code generation
+    "source code",
+    "python ",
+    "javascript ",
+    "typescript ",
+    "java ",
+    "sql ",
+    # explanation
+    "explain",
+    "explanation",
+    "rationale",
+    # translation / transformation
+    "into ",
+    "translate",
+    "transform",
+    # predicate assignment (always has an explicit modality)
+    " is ",
+)
+
+
 class Linter:
     """
     Static semantic analysis for .rl files.
@@ -60,6 +137,8 @@ class Linter:
     W002  Condition action references undefined entity
     W003  Orphaned definition (defined but never used)
     W004  Empty workflow (no statements at all)
+    W005  Goal uses a discouraged verb (§2.7.3 / Appendix A.3 Rule 2)
+    W006  Goal does not declare an output modality (§2.7.1 / Appendix A.3 Rule 1)
     I001  Attribute defined without prior entity definition
     """
 
@@ -214,6 +293,8 @@ class Linter:
             )
         else:
             # ── E004: Goal references undefined entity ─────────────────────
+            # ── W005: Vague goal verb ──────────────────────────────────────
+            # ── W006: Missing output modality ─────────────────────────────
             for goal in ast.goals:
                 used_entities |= _defined_in(goal.goal_expr)
                 for ref in sorted(_undefined_in(goal.goal_expr)):
@@ -228,6 +309,51 @@ class Linter:
                             line=goal.source_line,
                         )
                     )
+
+                # W005 — check whether the first word of the goal expression is
+                # a discouraged verb (Appendix A.3 Rule 2 / §2.7.3).
+                # Predicate-assignment goals ("Entity is predicate") are exempt
+                # because the output contract is explicit by structure.
+                first_word = (
+                    goal.goal_expr.strip().split()[0].lower() if goal.goal_expr.strip() else ""
+                )
+                is_predicate_assignment = bool(
+                    re.match(r"^[A-Z][A-Za-z0-9_]*\s+is\b", goal.goal_expr.strip())
+                )
+                if not is_predicate_assignment and first_word in _VAGUE_VERBS:
+                    recommended = ", ".join(sorted(_RECOMMENDED_VERBS))
+                    issues.append(
+                        LintIssue(
+                            severity=Severity.WARNING,
+                            code="W005",
+                            message=(
+                                f"Goal verb '{first_word}' is discouraged (§2.7.3 / Appendix A.3). "
+                                f"Prefer an explicit output verb such as: {recommended}."
+                            ),
+                            line=goal.source_line,
+                        )
+                    )
+
+                # W006 — check whether the goal expression carries any signal
+                # that names the output modality (§2.7.1 / §2.7.2).
+                # Predicate-assignment goals and goals that already use a
+                # recommended verb with an obvious modality marker are accepted.
+                if not is_predicate_assignment and first_word not in _RECOMMENDED_VERBS:
+                    expr_lower = goal.goal_expr.lower()
+                    has_modality = any(marker in expr_lower for marker in _MODALITY_MARKERS)
+                    if not has_modality:
+                        issues.append(
+                            LintIssue(
+                                severity=Severity.WARNING,
+                                code="W006",
+                                message=(
+                                    f"Goal '{goal.goal_expr[:60]}' does not declare an output "
+                                    f"modality (§2.7.1). Consider the form: "
+                                    f"'ensure <verb> <output_type> for <Entity> [as ...]'."
+                                ),
+                                line=goal.source_line,
+                            )
+                        )
 
         # ── W003: Orphaned definitions ─────────────────────────────────────
         # Also scan relations for usage

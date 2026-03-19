@@ -516,14 +516,32 @@ class TestFileParser:
     def _parse_expect_goal(self, rest: str, lineno: int, path: str) -> ExpectStatement:
         """
         Parse ``goal "expr" is achieved / is failed / exists``.
+
+        The goal expression may itself contain escaped quotes (``\\"``), which
+        arise when the goal string includes quoted decision labels such as::
+
+            expect goal "classify Customer as \\"high_value\\" or \\"standard\\"" is achieved.
+
+        The regexes below therefore use ``(?:[^"\\\\]|\\\\.)*`` (double-quoted
+        variant) and ``(?:[^'\\\\]|\\\\.)*`` (single-quoted variant) to consume
+        any character that is not the delimiter or a backslash, **or** any
+        two-character escape sequence ``\\.``.  After extraction the raw escape
+        sequences are decoded so the stored ``goal_expr`` matches the actual
+        string used in the workflow (e.g. ``"high_value"`` not ``\\"high_value\\"``)
         """
-        # Extract quoted goal expression
-        m = re.match(r'^goal\s+"([^"]+)"\s+(is achieved|is failed|exists)[.]?$', rest, re.I)
+        # Double-quoted form — allows \" inside the outer quotes
+        m = re.match(
+            r'^goal\s+"((?:[^"\\]|\\.)*)"\s+(is achieved|is failed|exists)[.]?$', rest, re.I
+        )
         if not m:
-            m = re.match(r"^goal\s+'([^']+)'\s+(is achieved|is failed|exists)[.]?$", rest, re.I)
+            # Single-quoted form — allows \' inside the outer quotes
+            m = re.match(
+                r"^goal\s+'((?:[^'\\]|\\.)*)'\s+(is achieved|is failed|exists)[.]?$", rest, re.I
+            )
         if not m:
             raise TestFileParseError(f"Cannot parse goal assertion: expect {rest!r}", path, lineno)
-        goal_expr = m.group(1)
+        # Decode escape sequences so \"high_value\" → "high_value"
+        goal_expr = m.group(1).replace('\\"', '"').replace("\\'", "'")
         qualifier = m.group(2).lower()
         if qualifier == "is achieved":
             kind = ExpectKind.GOAL_ACHIEVED

@@ -32,11 +32,11 @@ test "Creditworthy applicant with eligible loan is approved"
     //   LoanRequest is eligible     (creditworthy AND amount < 50000)
     // No given overrides needed — we test the base case.
 
-    // Goal 1: assess Applicant creditworthiness
+    // Goal 1: "return a creditworthiness decision for Applicant as "creditworthy" or "not_creditworthy""
     respond with 'CreditProfile has assessment of "strong".'
-    // Goal 2: determine ApprovalDecision outcome
+    // Goal 2: "return a decision for ApprovalDecision as "approved" or "rejected""
     respond with 'ApprovalDecision has outcome of "approved".'
-    // Goal 3: calculate LoanRequest monthly_payment
+    // Goal 3: "produce a monthly_payment calculation for LoanRequest"
     respond with 'LoanRequest has monthly_payment of 622.'
 
     // ── Entity existence ─────────────────────────────────────────────────
@@ -74,9 +74,9 @@ test "Creditworthy applicant with eligible loan is approved"
     expect attribute Applicant.annual_income > 50000.
 
     // ── Goal status ──────────────────────────────────────────────────────
-    expect goal "assess Applicant creditworthiness" is achieved.
-    expect goal "determine ApprovalDecision outcome" is achieved.
-    expect goal "calculate LoanRequest monthly_payment" is achieved.
+    expect goal "return a creditworthiness decision for Applicant as \"creditworthy\" or \"not_creditworthy\"" is achieved.
+    expect goal "return a decision for ApprovalDecision as \"approved\" or \"rejected\"" is achieved.
+    expect goal "produce a monthly_payment calculation for LoanRequest" is achieved.
 
     // ── Run result ───────────────────────────────────────────────────────
     expect run succeeds.
@@ -244,7 +244,7 @@ test "Inline workflow: simple loan decision with one condition"
         if Borrower has credit_score > 700,
             then ensure Borrower is creditworthy.
 
-        ensure determine LoanDecision status.
+        ensure return a decision for LoanDecision as "approved" or "rejected".
     end
 
     respond with 'LoanDecision has status of "approved".'
@@ -265,9 +265,9 @@ end
 
 test "Three-goal workflow consumes responses in order"
     // Three goals in loan_approval.rl:
-    //   1. assess Applicant creditworthiness
-    //   2. determine ApprovalDecision outcome
-    //   3. calculate LoanRequest monthly_payment
+    //   1. return a creditworthiness decision for Applicant as "creditworthy" or "not_creditworthy"
+    //   2. return a decision for ApprovalDecision as "approved" or "rejected"
+    //   3. produce a monthly_payment calculation for LoanRequest
     // Responses are consumed in that order.
 
     respond with 'CreditProfile has assessment of "good".'
@@ -280,9 +280,9 @@ test "Three-goal workflow consumes responses in order"
     expect attribute LoanRequest.monthly_payment > 500.
     expect attribute LoanRequest.monthly_payment < 700.
 
-    expect goal "assess Applicant creditworthiness" is achieved.
-    expect goal "determine ApprovalDecision outcome" is achieved.
-    expect goal "calculate LoanRequest monthly_payment" is achieved.
+    expect goal "return a creditworthiness decision for Applicant as \"creditworthy\" or \"not_creditworthy\"" is achieved.
+    expect goal "return a decision for ApprovalDecision as \"approved\" or \"rejected\"" is achieved.
+    expect goal "produce a monthly_payment calculation for LoanRequest" is achieved.
 
     expect run succeeds.
 end
