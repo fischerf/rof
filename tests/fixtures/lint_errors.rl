@@ -14,4 +14,8 @@ if UndefinedEntity has score > 50,
 if Customer has total_purchases > 5000,
     then ensure GhostEntity is premium.
 
+// W005: "determine" is a vague verb — should trigger W005
 ensure determine Customer tier.
+
+// Correct form (§2.7.3) — classify with explicit output options:
+// ensure classify Customer as "premium" or "standard".

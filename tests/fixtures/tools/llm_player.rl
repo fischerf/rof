@@ -3,6 +3,13 @@
 // Trigger phrases:
 //   "generate python code for <program>"  → AICodeGenTool (stage 1)
 //   "run interactively with llm"          → LLMPlayerTool (stage 2)
+//
+// Goal verb note (§2.7.3):
+//   "generate python code" uses the recommended verb "generate" with an explicit
+//   language and description — a complete source-code output contract per §2.7.2.
+//   "run interactively with llm" is a tool-trigger phrase (LLMPlayerTool keyword);
+//   the output modality is implicitly transformational (program execution + recording).
+//   "return Session turn_count" uses the recommended verb "return" per §2.7.3.
 
 define Program as "A small interactive Python quiz with multiple-choice questions".
 define Session as "The recorded sequence of program prompts and LLM responses".
@@ -17,4 +24,4 @@ relate Session and Program as "captures output of".
 
 ensure generate python code for a three-question multiple-choice general knowledge quiz.
 ensure run interactively with llm and record responses.
-ensure determine Session turn_count.
+ensure return Session turn_count.

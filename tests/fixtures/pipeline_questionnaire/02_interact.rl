@@ -17,6 +17,15 @@
 //      so the user interacts with the script directly in the terminal
 //   3. Returns the file_path and process return_code into the snapshot
 //
+// Goal verb note (§2.7.3 — tool-trigger exemption):
+//   "run lua script interactively" is a tool-trigger phrase registered on
+//   LuaRunTool (keyword: "run lua").  The output modality is implicitly
+//   transformational — the tool executes the script and records the exit code.
+//   Because the routing contract depends on the exact keyword, the phrase is
+//   intentionally exempt from the recommended-verb substitution rule.
+//   The output contract is: Script.return_code (integer) written to the
+//   WorkflowGraph on successful execution.
+//
 // Snapshot produced by this stage:
 //   Script.file_path    path of the script that was run
 //   Script.return_code  process exit code

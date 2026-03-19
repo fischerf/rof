@@ -7,7 +7,16 @@
 // Tool routing:
 //   "analyze bias"        → BiasDetectorTool  (pattern-based lexical analysis)
 //   "detect emotional"    → BiasDetectorTool  (sentiment lexicon scoring)
-//   "interpret framing"   → LLM               (requires contextual reasoning)
+//   "explain framing"     → LLM               (requires contextual reasoning)
+//
+// Goal verb note (§2.7.3):
+//   "analyze bias" and "detect emotional language" are tool-trigger phrases
+//   (BiasDetectorTool keywords); output modality is implicitly structured data
+//   per §2.7.2.
+//   "classify bias patterns" uses the recommended verb "classify" in place of
+//   the vague "analyze", making the decision output modality explicit per §2.7.2.
+//   "explain framing and context" uses the recommended verb "explain" in place of
+//   "interpret", making the explanatory output modality explicit per §2.7.2.
 //
 // if/then: High emotional language + low credibility source → elevated risk.
 
@@ -27,6 +36,6 @@ if BiasProfile has emotional_score > 0.70,
 if BiasProfile has clickbait_signals > 2,
     then ensure BiasProfile is clickbait_risk.
 
-ensure analyze bias patterns in Article.
+ensure classify bias patterns in Article.
 ensure detect emotional language in Article.
-ensure interpret framing and context of Article.
+ensure explain framing and context of Article.

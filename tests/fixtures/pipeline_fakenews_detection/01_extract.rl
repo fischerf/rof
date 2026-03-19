@@ -7,7 +7,14 @@
 // Tool routing:
 //   "extract claims"            → ClaimExtractorTool  (deterministic NLP scan)
 //   "identify source"           → SourceLookupTool    (domain registry lookup)
-//   "assess article structure"  → LLM                 (narrative analysis)
+//   "explain article structure" → LLM                 (narrative analysis)
+//
+// Goal verb note (§2.7.3):
+//   "extract claims" and "identify source information" are tool-trigger phrases
+//   (ClaimExtractorTool / SourceLookupTool keywords); output modality is
+//   implicitly structured data per §2.7.2.
+//   "explain article structure" uses the recommended verb "explain" in place of
+//   the vague "assess", making the explanatory output modality explicit per §2.7.2.
 
 define Article as "The news article under credibility review".
 define ClaimSet as "Set of discrete, verifiable factual claims extracted from the article".
@@ -23,4 +30,4 @@ relate Article and SourceInfo as "published_by".
 
 ensure extract claims from Article.
 ensure identify source information for Article.
-ensure assess article structure and narrative.
+ensure explain article structure and narrative for Article.
