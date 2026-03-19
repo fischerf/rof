@@ -34,6 +34,8 @@ def create_default_registry(
     rag_backend: str = "in_memory",
     code_timeout: float = 10.0,
     allowed_languages: Optional[list[str]] = None,
+    mcp_servers: Optional[list] = None,
+    mcp_eager_connect: bool = False,
 ) -> ToolRegistry:
     """
     Build a ToolRegistry pre-populated with all built-in tools.
@@ -49,6 +51,13 @@ def create_default_registry(
         rag_backend:          "in_memory" | "chromadb"
         code_timeout:         Timeout for CodeRunnerTool
         allowed_languages:    Languages enabled in CodeRunnerTool
+        mcp_servers:          Optional list of MCPServerConfig objects.  Each
+                              config produces one MCPClientTool that is
+                              registered alongside the built-in tools.
+                              Requires ``pip install mcp>=1.0``.
+        mcp_eager_connect:    When True, open MCP sessions immediately during
+                              registry construction (surfaces errors early).
+                              When False (default), connections are lazy.
 
     Returns:
         Fully populated ToolRegistry
@@ -64,6 +73,24 @@ def create_default_registry(
         if result.tool:
             resp = result.tool.execute(ToolRequest(name=result.tool.name,
                                                    goal="Python 3.13 features"))
+
+    MCP usage:
+        from rof_framework.tools.tools.mcp import MCPServerConfig
+
+        registry = create_default_registry(
+            mcp_servers=[
+                MCPServerConfig.stdio(
+                    name="filesystem",
+                    command="npx",
+                    args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+                ),
+                MCPServerConfig.http(
+                    name="sentry",
+                    url="https://mcp.sentry.io/mcp",
+                    auth_bearer="sntrys_...",
+                ),
+            ],
+        )
     """
     registry = ToolRegistry()
 
@@ -118,5 +145,29 @@ def create_default_registry(
                 pass
     except ImportError:
         pass
+
+    # ── MCP client tools (optional) ──────────────────────────────────────────
+    # Each MCPServerConfig produces one MCPClientTool that proxies the full
+    # set of tools advertised by that MCP server.  A missing ``mcp`` package
+    # is reported as a warning rather than raising so the registry is still
+    # usable for all non-MCP tools.
+    if mcp_servers:
+        try:
+            from rof_framework.tools.tools.mcp.factory import MCPToolFactory
+
+            mcp_factory = MCPToolFactory(
+                configs=mcp_servers,
+                eager_connect=mcp_eager_connect,
+                tags=["mcp", "external"],
+            )
+            mcp_factory.build_and_register(registry, force=False)
+        except ImportError:
+            import logging as _logging
+
+            _logging.getLogger("rof.tools").warning(
+                "create_default_registry: mcp_servers were provided but the "
+                "'mcp' package is not installed.  MCP tools were skipped.\n"
+                "Install with:  pip install mcp>=1.0"
+            )
 
     return registry

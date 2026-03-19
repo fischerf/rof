@@ -6,6 +6,10 @@ Tool layer for the RelateLang Orchestration Framework.
 Public API re-exports – import from here instead of the sub-modules:
 
     from rof_framework.tools import ToolRegistry, WebSearchTool, create_default_registry
+
+MCP connectivity (requires ``pip install mcp>=1.0``):
+
+    from rof_framework.tools import MCPServerConfig, MCPTransport, MCPClientTool, MCPToolFactory
 """
 
 from rof_framework.core.interfaces.tool_provider import ToolProvider, ToolRequest, ToolResponse
@@ -33,7 +37,25 @@ from rof_framework.tools.tools.rag import RAGTool
 from rof_framework.tools.tools.validator import ValidationIssue, ValidatorTool
 from rof_framework.tools.tools.web_search import SearchResult, WebSearchTool
 
+# MCP client integration (optional dependency: pip install mcp>=1.0)
+try:
+    from rof_framework.tools.tools.mcp import (
+        MCPClientTool,
+        MCPServerConfig,
+        MCPToolFactory,
+        MCPTransport,
+    )
+
+    _MCP_AVAILABLE = True
+except ImportError:
+    _MCP_AVAILABLE = False
+
 __all__ = [
+    # MCP client integration
+    "MCPServerConfig",
+    "MCPTransport",
+    "MCPClientTool",
+    "MCPToolFactory",
     # Core interfaces (re-exported for backward-compat with rof_tools monolith)
     "ToolProvider",
     "ToolRequest",
