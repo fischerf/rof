@@ -41,6 +41,7 @@ Dependencies
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import logging
 import os
@@ -117,6 +118,55 @@ def dim(t: str) -> str:
 
 SEP = dim("─" * 70)
 SEP2 = dim("═" * 70)
+
+
+# ---------------------------------------------------------------------------
+# Helpers for finding the cached MCP filesystem server
+# ---------------------------------------------------------------------------
+
+
+def _find_cached_fs_server() -> Optional[str]:
+    """
+    Return the absolute path to the cached ``@modelcontextprotocol/server-filesystem``
+    ``dist/index.js`` entry-point installed by a previous ``npx`` run.
+
+    Using ``node <path>`` directly avoids ``npx -y`` performing an npm-registry
+    update-check on every invocation, which hangs when there is no network access.
+
+    Returns ``None`` when the cache cannot be found (e.g. fresh machine).
+    """
+    if os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA", "")
+        cache_root = os.path.join(local_app_data, "npm-cache", "_npx")
+    else:
+        cache_root = os.path.join(os.path.expanduser("~"), ".npm", "_npx")
+
+    pattern = os.path.join(
+        cache_root,
+        "*",
+        "node_modules",
+        "@modelcontextprotocol",
+        "server-filesystem",
+        "dist",
+        "index.js",
+    )
+    matches = sorted(glob.glob(pattern))
+    return matches[-1] if matches else None  # newest cache entry last
+
+
+def _build_fs_server_args(resolved_dir: str) -> tuple[str, list[str]]:
+    """
+    Return ``(command, args)`` for launching the MCP filesystem server.
+
+    Preference order:
+      1. ``node <cached-index.js> <dir>``  – fast, no registry check.
+      2. ``npx --prefer-offline @modelcontextprotocol/server-filesystem <dir>``
+         – skips registry on subsequent calls when a cache entry exists.
+    """
+    cached = _find_cached_fs_server()
+    if cached:
+        return "node", [cached, resolved_dir]
+    return "npx", ["--prefer-offline", "@modelcontextprotocol/server-filesystem", resolved_dir]
 
 
 def section(title: str) -> None:
@@ -296,13 +346,19 @@ def demo_config(mode: str, dir_: str, url: str) -> None:
         return
 
     if mode == "filesystem":
+        from pathlib import Path as _Path
+
+        _resolved = str(_Path(dir_).resolve())
+        _cmd, _args = _build_fs_server_args(_resolved)
         cfg = MCPServerConfig.stdio(
             name="filesystem",
-            command="npx",
-            args=["-y", "@modelcontextprotocol/server-filesystem", dir_],
+            command=_cmd,
+            args=_args,
             trigger_keywords=["read file", "list directory", "write file"],
+            connect_timeout=120.0,
+            call_timeout=300.0,
         )
-        step("Created stdio config", f"command=npx  dir={dir_!r}")
+        step("Created stdio config", f"command={_cmd!r}  dir={dir_!r}")
     elif mode == "http":
         cfg = MCPServerConfig.http(
             name="remote-server",
@@ -366,12 +422,31 @@ def demo_registry(mode: str, dir_: str, url: str) -> tuple[ToolRegistry, ToolPro
         return registry, tool
 
     if mode == "filesystem":
+        # Resolve to an absolute path so the MCP server can find the directory
+        # regardless of where the script is invoked from.
+        from pathlib import Path as _Path
+
+        resolved_dir = str(_Path(dir_).resolve())
+        if not _Path(dir_).exists():
+            warn(f"Directory {dir_!r} does not exist (resolved: {resolved_dir!r}).")
+            parent = _Path(dir_).resolve().parent
+            try:
+                siblings = sorted(p.name for p in parent.iterdir() if p.is_dir())
+                if siblings:
+                    warn(f"Sub-directories of {str(parent)!r}: {siblings}")
+            except OSError:
+                pass
+            warn("Continuing – the MCP server will likely report an error.")
+        _cmd, _args = _build_fs_server_args(resolved_dir)
         cfg = MCPServerConfig.stdio(
             name="filesystem",
-            command="npx",
-            args=["-y", "@modelcontextprotocol/server-filesystem", dir_],
+            command=_cmd,
+            args=_args,
             trigger_keywords=["read file", "list directory", "write file"],
+            connect_timeout=120.0,
+            call_timeout=300.0,
         )
+        info(f"server command: {_cmd!r}  args prefix: {_args[:1]}")
     else:  # http
         cfg = MCPServerConfig.http(
             name="remote-server",
@@ -386,7 +461,24 @@ def demo_registry(mode: str, dir_: str, url: str) -> tuple[ToolRegistry, ToolPro
     info("Static trigger keywords (before discovery):")
     for kw in tool.trigger_keywords:
         info(f"  · {kw!r}")
-    info("(Additional keywords added after tools/list discovery on first execute)")
+
+    # Eagerly open the session now so sections 3-7 reuse the live connection.
+    # This also gives the user visible feedback during what can be a slow first
+    # npx download, rather than a silent hang inside execute().
+    print()
+    info("Connecting to MCP server (first run may download the npx package) …")
+    try:
+        tool.connect()
+        step("Connected", f"{len(tool.mcp_tools)} MCP tool(s) discovered")
+        if tool.mcp_tools:
+            info("Discovered MCP tools:")
+            for _t in tool.mcp_tools:
+                _desc = (getattr(_t, "description", "") or "")[:70]
+                info(f"  · {_t.name!r}  {dim(_desc)}")
+    except Exception as exc:
+        warn(f"Eager connect failed: {exc}")
+        warn("Tool calls in later sections will retry (lazy connect).")
+
     return registry, tool
 
 
@@ -417,35 +509,97 @@ def demo_routing(registry: ToolRegistry) -> None:
         print()
 
 
-def demo_tool_execute(tool: ToolProvider) -> None:
+def demo_tool_execute(tool: ToolProvider, dir_: str = "") -> None:
     section("4 · Direct tool execution – ToolRequest → ToolResponse")
 
-    cases: list[tuple[str, ToolRequest]] = [
-        (
-            "read a file",
-            ToolRequest(
-                name=tool.name,
-                input={"path": "/demo/hello.txt"},
-                goal="read file /demo/hello.txt",
+    # For real MCPClientTool use actual OS paths from the exposed directory;
+    # for MockMCPTool keep the virtual /demo paths it knows about.
+    is_mcp_client = hasattr(tool, "mcp_tools")
+
+    if is_mcp_client and dir_:
+        from pathlib import Path as _Path
+
+        abs_dir = str(_Path(dir_).resolve())
+        first_file = ""
+        _PREFERRED_SUFFIXES = (
+            ".py",
+            ".txt",
+            ".md",
+            ".json",
+            ".toml",
+            ".cfg",
+            ".ini",
+            ".yaml",
+            ".yml",
+        )
+        try:
+            _all_files = sorted(
+                p
+                for p in _Path(dir_).resolve().iterdir()
+                if p.is_file() and not p.name.startswith(".")
+            )
+            # Prefer readable text files over binary blobs
+            for _p in _all_files:
+                if _p.suffix.lower() in _PREFERRED_SUFFIXES:
+                    first_file = str(_p)
+                    break
+            # Fall back to first non-hidden file if no preferred suffix found
+            if not first_file and _all_files:
+                first_file = str(_all_files[0])
+        except OSError:
+            pass
+
+        cases: list[tuple[str, ToolRequest]] = []
+        if first_file:
+            cases.append(
+                (
+                    "read a file",
+                    ToolRequest(
+                        name=tool.name,
+                        input={"path": first_file},
+                        goal=f"read file {first_file}",
+                    ),
+                )
+            )
+        else:
+            info(f"(no files found in {abs_dir!r} – skipping read_file case)")
+        cases.append(
+            (
+                "list directory",
+                ToolRequest(
+                    name=tool.name,
+                    input={"path": abs_dir},
+                    goal=f"list directory {abs_dir}",
+                ),
+            )
+        )
+    else:
+        cases = [
+            (
+                "read a file",
+                ToolRequest(
+                    name=tool.name,
+                    input={"path": "/demo/hello.txt"},
+                    goal="read file /demo/hello.txt",
+                ),
             ),
-        ),
-        (
-            "list directory",
-            ToolRequest(
-                name=tool.name,
-                input={"path": "/demo"},
-                goal="list files in /demo directory",
+            (
+                "list directory",
+                ToolRequest(
+                    name=tool.name,
+                    input={"path": "/demo"},
+                    goal="list files in /demo directory",
+                ),
             ),
-        ),
-        (
-            "read JSON config",
-            ToolRequest(
-                name=tool.name,
-                input={"path": "/demo/config.json"},
-                goal="read file /demo/config.json",
+            (
+                "read JSON config",
+                ToolRequest(
+                    name=tool.name,
+                    input={"path": "/demo/config.json"},
+                    goal="read file /demo/config.json",
+                ),
             ),
-        ),
-    ]
+        ]
 
     for label, req in cases:
         print(f"\n  {bold(label)}")
@@ -840,7 +994,7 @@ def main() -> None:
     demo_routing(registry)
 
     # ── Section 4: Direct execution ──────────────────────────────────────────
-    demo_tool_execute(tool)
+    demo_tool_execute(tool, dir_=args.dir)
 
     # ── Section 5: Orchestrator (end-to-end .rl workflow) ───────────────────
     demo_orchestrator(tool)
