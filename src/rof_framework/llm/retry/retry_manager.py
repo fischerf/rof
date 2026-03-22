@@ -5,19 +5,29 @@ RetryManager, RetryConfig.
 
 from __future__ import annotations
 
-import copy, logging, math, random, time
+import copy
+import logging
+import math
+import random
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any, Callable, Optional
 
 from rof_framework.core.interfaces.llm_provider import LLMProvider, LLMRequest, LLMResponse
-from rof_framework.llm.providers.base import AuthError, ContextLimitError, ProviderError, RateLimitError
+from rof_framework.llm.providers.base import (
+    AuthError,
+    ContextLimitError,
+    ProviderError,
+    RateLimitError,
+)
 from rof_framework.llm.response.response_parser import ResponseParser
 
 logger = logging.getLogger("rof.llm")
 
 __all__ = ["BackoffStrategy", "RetryConfig", "RetryManager"]
+
 
 # rof_llm/retry/retry_manager.py
 # Retry, backoff, and model-fallback logic.
@@ -75,7 +85,7 @@ class RetryManager(LLMProvider):
 
         response = mgr.complete(LLMRequest(prompt="..."))
 
-    Erweiterung (custom retry hook):
+    Extension point (custom retry hook):
         mgr.on_retry = lambda attempt, exc: logger.warning("Retry %d: %s", attempt, exc)
     """
 
@@ -266,5 +276,3 @@ class RetryManager(LLMProvider):
             delay = base
 
         return min(delay, cfg.max_delay_s)
-
-

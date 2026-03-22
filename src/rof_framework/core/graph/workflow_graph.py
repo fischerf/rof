@@ -27,7 +27,7 @@ class GoalStatus(Enum):
 
 @dataclass
 class EntityState:
-    """Aktueller Laufzeit-Zustand einer Entität."""
+    """Current runtime state of an entity."""
 
     name: str
     description: str = ""
@@ -37,7 +37,7 @@ class EntityState:
 
 @dataclass
 class GoalState:
-    """Laufzeit-Zustand eines Goals."""
+    """Runtime state of a goal."""
 
     goal: Goal
     status: GoalStatus = GoalStatus.PENDING
@@ -46,10 +46,10 @@ class GoalState:
 
 class WorkflowGraph:
     """
-    Laufzeit-Graph eines Workflows.
-    Wird vom Orchestrator während der Ausführung befüllt und mutiert.
+    Runtime graph of a workflow.
+    Populated and mutated by the Orchestrator during execution.
 
-    Erweiterung: Eigene Listener über den EventBus.
+    Extension point: attach custom listeners via the EventBus.
     """
 
     def __init__(self, ast: WorkflowAST, bus: EventBus):
@@ -60,7 +60,7 @@ class WorkflowGraph:
         self._build_initial_state()
 
     # ------------------------------------------------------------------
-    # Öffentliche API
+    # Public API
     # ------------------------------------------------------------------
 
     @property
@@ -105,7 +105,7 @@ class WorkflowGraph:
         )
 
     def snapshot(self) -> dict:
-        """Serialisierbarer Snapshot des aktuellen State."""
+        """Serialisable snapshot of the current state."""
         return {
             "entities": {
                 name: {
@@ -142,7 +142,7 @@ class WorkflowGraph:
     # ------------------------------------------------------------------
 
     def _build_initial_state(self) -> None:
-        """AST → initialer Laufzeit-State."""
+        """AST → initial runtime state."""
         for d in self._ast.definitions:
             e = self._ensure_entity(d.entity)
             e.description = d.description

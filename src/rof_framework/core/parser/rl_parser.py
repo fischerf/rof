@@ -50,8 +50,8 @@ class ParseError(Exception):
 
 class StatementParser(ABC):
     """
-    Erweiterungspunkt: Eigene Statement-Typen registrieren.
-    Implementiere `matches` und `parse`, registriere mit RLParser.register().
+    Extension point: register custom statement types.
+    Implement `matches` and `parse`, then register with RLParser.register().
     """
 
     @abstractmethod
@@ -376,21 +376,21 @@ class DetermineParser(StatementParser):
 
 class RLParser:
     """
-    Haupt-Parser. Liest .rl-Text, delegiert jeden Statement
-    an registrierte StatementParser.
+    Main parser. Reads .rl source text and delegates each statement
+    to the registered StatementParsers.
 
-    Erweiterung:
+    Extension point:
         parser = RLParser()
         parser.register(MyCustomStatementParser())
         ast = parser.parse(source)
     """
 
     def __init__(self):
-        # Reihenfolge ist wichtig: spezifischere Parser zuerst
+        # Order matters: more specific parsers must come first
         self._parsers: list[StatementParser] = [
             RouteGoalParser(),  # before DefinitionParser – starts with "route"
             DefinitionParser(),
-            AttributeParser(),  # vor PredicateParser (hat "has … of")
+            AttributeParser(),  # before PredicateParser (matches "has … of")
             RelationParser(),
             AggregateParser(),  # before ConditionParser – starts with "aggregate"
             ConditionParser(),
@@ -399,13 +399,13 @@ class RLParser:
             AssessParser(),  # before GoalParser/PredicateParser – starts with "assess"
             GoalParser(),
             AttributeIsParser(),  # before PredicateParser – "Entity attr is value."
-            PredicateParser(),  # zuletzt: generisch – "Entity is predicate."
+            PredicateParser(),  # last: generic fallback – "Entity is predicate."
         ]
 
     def register(self, parser: StatementParser, position: int = -1) -> None:
-        """Eigenen StatementParser einhängen."""
+        """Register a custom StatementParser."""
         if position == -1:
-            self._parsers.insert(-1, parser)  # vor PredicateParser
+            self._parsers.insert(-1, parser)  # before PredicateParser
         else:
             self._parsers.insert(position, parser)
 
@@ -432,10 +432,10 @@ class RLParser:
 
     def _tokenize(self, source: str) -> list[tuple[int, str]]:
         """
-        Zeilen normalisieren:
-        - Kommentare (//) entfernen
-        - Mehrzeilige Statements (if/then über mehrere Zeilen) zusammenführen
-        - Leere Zeilen überspringen
+        Normalise lines:
+        - Strip comments (//)
+        - Join multi-line statements (if/then spanning multiple lines)
+        - Skip blank lines
         """
         lines = source.splitlines()
         cleaned: list[tuple[int, str]] = []
@@ -443,7 +443,7 @@ class RLParser:
         start_line = 0
 
         for i, line in enumerate(lines, 1):
-            # Kommentare entfernen
+            # Strip comments
             if "//" in line:
                 line = line[: line.index("//")]
             line = line.strip()

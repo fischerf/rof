@@ -32,8 +32,8 @@ class LLMRequest:
 @dataclass
 class LLMResponse:
     content: str
-    raw: dict = field(default_factory=dict)  # vollständige Provider-Antwort
-    tool_calls: list = field(default_factory=list)  # erkannte Tool-Call-Intents
+    raw: dict = field(default_factory=dict)  # full provider response payload
+    tool_calls: list = field(default_factory=list)  # detected tool-call intents
 
 
 @dataclass
@@ -77,9 +77,9 @@ class UsageInfo:
 
 class LLMProvider(ABC):
     """
-    Erweiterungspunkt: Konkretes LLM einhängen.
+    Extension point: plug in a concrete LLM backend.
 
-    Implementierungen leben in rof-llm:
+    Implementations live in rof-llm:
         class OpenAIProvider(LLMProvider): ...
         class AnthropicProvider(LLMProvider): ...
         class OllamaProvider(LLMProvider): ...

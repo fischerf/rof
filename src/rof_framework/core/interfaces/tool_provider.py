@@ -29,9 +29,9 @@ class ToolResponse:
 
 class ToolProvider(ABC):
     """
-    Erweiterungspunkt: Tools registrieren.
+    Extension point: register tool implementations.
 
-    Implementierungen leben in rof-tools:
+    Implementations live in rof-tools:
         class WebSearchTool(ToolProvider): ...
         class RAGTool(ToolProvider): ...
     """
@@ -43,7 +43,7 @@ class ToolProvider(ABC):
     @property
     @abstractmethod
     def trigger_keywords(self) -> list[str]:
-        """Stichwörter im Goal-Ausdruck, die dieses Tool aktivieren."""
+        """Keywords in the goal expression that activate this tool."""
         ...
 
     @abstractmethod
