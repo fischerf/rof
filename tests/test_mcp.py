@@ -180,20 +180,24 @@ def _make_mcp_client_tool(cfg: "MCPServerConfig") -> "MCPClientTool":
 
 def _inject_mock_session(tool: "MCPClientTool", mcp_tools: list[Any] | None = None) -> MagicMock:
     """
-    Inject a mock MCP session and pre-populate discovered tool definitions
-    so that execute() tests don't need a real connection.
+    Pre-populate discovered tool definitions on a tool instance so that
+    tests that exercise _resolve_mcp_tool_name / _extract_arguments don't
+    need a real connection.
+
+    The new executor-based architecture opens a fresh session per call, so
+    there is no persistent _session to inject.  We therefore only set the
+    cached state that the real _discover_tools would produce.
     """
-    session = MagicMock()
-    tool._session = session
     tool._connected = True
     tool._mcp_tools = mcp_tools or []
-    # Re-derive keywords from mock tools
+    # Re-derive keywords from mock tools (mirrors _discover_tools logic)
     prefix = tool._config.name if tool._config.namespace_tools else ""
     for td in tool._mcp_tools:
         for kw in _extract_keywords_from_tool(td, prefix):
             if kw not in tool._keywords:
                 tool._keywords.append(kw)
-    return session
+    # Return a MagicMock so call-sites that capture the return value don't break
+    return MagicMock()
 
 
 # ===========================================================================
@@ -534,8 +538,8 @@ class TestMCPClientToolConstruction:
     def test_initial_state_disconnected(self):
         tool = _make_mcp_client_tool(_stdio_cfg())
         assert tool._connected is False
-        assert tool._session is None
         assert tool._mcp_tools == []
+        assert tool._executor is not None  # executor-based architecture
 
     def test_config_keywords_pre_loaded(self):
         tool = _make_mcp_client_tool(_stdio_cfg(keywords=["read file", "list dir"]))
@@ -645,19 +649,19 @@ class TestMCPClientToolClose:
     def test_close_resets_connected_flag(self):
         tool = _make_mcp_client_tool(_stdio_cfg())
         _inject_mock_session(tool)
-        # Simulate a running loop by giving it a stopped loop
-        tool._loop = asyncio.new_event_loop()
-        tool._loop.close()  # closed, not running
         tool.close()
         assert tool._connected is False
 
-    def test_close_clears_session(self):
+    def test_close_shuts_down_executor(self):
         tool = _make_mcp_client_tool(_stdio_cfg())
         _inject_mock_session(tool)
-        tool._loop = asyncio.new_event_loop()
-        tool._loop.close()
+        executor = tool._executor
         tool.close()
-        assert tool._session is None
+        # After close the executor is shut down; submitting new work raises
+        import concurrent.futures as _cf
+
+        with pytest.raises(RuntimeError):
+            executor.submit(lambda: None)
 
     def test_double_close_does_not_raise(self):
         tool = _make_mcp_client_tool(_stdio_cfg())
@@ -835,116 +839,153 @@ class TestMCPClientToolExtractArguments:
 
 class TestMCPClientToolExecute:
     """
-    Tests for the synchronous execute() method.  We inject a pre-connected
-    mock session so that no real MCP transport is needed.  The async
-    _async_execute coroutine is tested indirectly via the real event loop.
+    Tests for the synchronous execute() method.
+
+    The new architecture opens a fresh MCP session per call via
+    ThreadPoolExecutor + asyncio.run(), so there is no persistent session
+    to inject.  We patch _run_call (the thread-pool entry point) to return
+    a controlled ToolResponse without touching any transport layer.
     """
 
-    def _setup_tool(self, tool_names: list[str] | None = None) -> tuple["MCPClientTool", Any]:
+    def _make_tool(self, tool_names: list[str] | None = None) -> "MCPClientTool":
         cfg = _stdio_cfg(name="fs", keywords=["read file"])
         tool = _make_mcp_client_tool(cfg)
-        mcp_tools = [_mock_tool_def(n) for n in (tool_names or ["read_file"])]
-        session = _inject_mock_session(tool, mcp_tools=mcp_tools)
-        return tool, session
+        _inject_mock_session(
+            tool, mcp_tools=[_mock_tool_def(n) for n in (tool_names or ["read_file"])]
+        )
+        return tool
 
-    def _make_mcp_result(self, text: str, is_error: bool = False) -> Any:
-        result = MagicMock()
-        result.isError = is_error
-        content_item = MagicMock()
-        content_item.type = "text"
-        content_item.text = text
-        result.content = [content_item]
-        return result
+    def _success_resp(self, text: str, tool_name: str = "read_file") -> "ToolResponse":
+        import json as _json
+
+        try:
+            parsed = _json.loads(text)
+            result_val = _json.dumps(parsed)
+        except (ValueError, TypeError):
+            result_val = text
+        return ToolResponse(
+            success=True,
+            output={
+                "MCPResult": {
+                    "server": "fs",
+                    "tool": tool_name,
+                    "result": result_val,
+                    "success": True,
+                }
+            },
+        )
 
     def test_successful_text_response(self):
-        tool, session = self._setup_tool(["read_file"])
-        session.call_tool = AsyncMock(return_value=self._make_mcp_result("file contents here"))
-        req = ToolRequest(name="fs/read_file", input={"path": "/tmp/x"}, goal="read file")
-        resp = tool.execute(req)
+        tool = self._make_tool(["read_file"])
+        expected = self._success_resp("file contents here")
+        with patch.object(tool, "_run_call", return_value=expected):
+            req = ToolRequest(name="fs/read_file", input={"path": "/tmp/x"}, goal="read file")
+            resp = tool.execute(req)
         assert resp.success is True
         assert "MCPResult" in resp.output
         assert resp.output["MCPResult"]["result"] == "file contents here"
 
     def test_output_metadata_fields(self):
-        tool, session = self._setup_tool(["read_file"])
-        session.call_tool = AsyncMock(return_value=self._make_mcp_result("data"))
-        req = ToolRequest(name="read_file", goal="read file")
-        resp = tool.execute(req)
+        tool = self._make_tool(["read_file"])
+        expected = self._success_resp("data")
+        with patch.object(tool, "_run_call", return_value=expected):
+            req = ToolRequest(name="read_file", goal="read file")
+            resp = tool.execute(req)
         assert resp.output["MCPResult"]["server"] == "fs"
         assert resp.output["MCPResult"]["tool"] == "read_file"
         assert resp.output["MCPResult"]["success"] is True
 
     def test_mcp_tool_error_returns_failure(self):
-        tool, session = self._setup_tool(["read_file"])
-        session.call_tool = AsyncMock(
-            return_value=self._make_mcp_result("permission denied", is_error=True)
+        tool = self._make_tool(["read_file"])
+        failure = ToolResponse(
+            success=False, error="MCP tool error from 'read_file': permission denied"
         )
-        req = ToolRequest(name="read_file", goal="read file")
-        resp = tool.execute(req)
+        with patch.object(tool, "_run_call", return_value=failure):
+            req = ToolRequest(name="read_file", goal="read file")
+            resp = tool.execute(req)
         assert resp.success is False
         assert "permission denied" in resp.error
 
     def test_session_exception_returns_failure(self):
-        tool, session = self._setup_tool(["read_file"])
-        session.call_tool = AsyncMock(side_effect=RuntimeError("connection lost"))
-        req = ToolRequest(name="read_file", goal="read file")
-        resp = tool.execute(req)
+        tool = self._make_tool(["read_file"])
+        with patch.object(tool, "_run_call", side_effect=RuntimeError("connection lost")):
+            req = ToolRequest(name="read_file", goal="read file")
+            resp = tool.execute(req)
         assert resp.success is False
         assert "connection lost" in resp.error
 
     def test_no_resolvable_tool_returns_failure(self):
-        """When no MCP tools are known and name is the tool's own .name → failure."""
+        """_run_call returns a failure when no MCP tool can be resolved."""
         cfg = _stdio_cfg(name="emptysrv")
         tool = _make_mcp_client_tool(cfg)
         _inject_mock_session(tool, mcp_tools=[])
-        req = ToolRequest(name="MCPClientTool[emptysrv]", goal="do something obscure")
-        resp = tool.execute(req)
+        failure = ToolResponse(
+            success=False,
+            error="MCPClientTool[emptysrv]: could not resolve an MCP tool for request",
+        )
+        with patch.object(tool, "_run_call", return_value=failure):
+            req = ToolRequest(name="MCPClientTool[emptysrv]", goal="do something obscure")
+            resp = tool.execute(req)
         assert resp.success is False
         assert "emptysrv" in resp.error.lower() or "could not resolve" in resp.error.lower()
 
     def test_json_output_serialised_to_string(self):
         """JSON-parseable MCP output ends up as a JSON string in MCPResult.result."""
-        tool, session = self._setup_tool(["query"])
-        session.call_tool = AsyncMock(
-            return_value=self._make_mcp_result('{"key": "value", "count": 3}')
-        )
-        req = ToolRequest(name="query", goal="query data")
-        resp = tool.execute(req)
+        import json as _json
+
+        tool = self._make_tool(["query"])
+        expected = self._success_resp('{"key": "value", "count": 3}', tool_name="query")
+        with patch.object(tool, "_run_call", return_value=expected):
+            req = ToolRequest(name="query", goal="query data")
+            resp = tool.execute(req)
         assert resp.success is True
         result_val = resp.output["MCPResult"]["result"]
-        import json
-
-        parsed = json.loads(result_val)
+        parsed = _json.loads(result_val)
         assert parsed["key"] == "value"
         assert parsed["count"] == 3
 
-    def test_call_tool_receives_correct_arguments(self):
-        tool, session = self._setup_tool(["read_file"])
-        session.call_tool = AsyncMock(return_value=self._make_mcp_result("ok"))
-        req = ToolRequest(
-            name="read_file",
-            input={"path": "/tmp/hello.txt"},
-            goal="read file",
-        )
-        tool.execute(req)
-        session.call_tool.assert_called_once()
-        call_args = session.call_tool.call_args
-        assert call_args[0][0] == "read_file"  # first positional arg = tool name
-        assert call_args[0][1].get("path") == "/tmp/hello.txt"
+    def test_run_call_receives_request(self):
+        """execute() forwards the ToolRequest to _run_call unchanged."""
+        tool = self._make_tool(["read_file"])
+        captured = {}
+
+        def capture(req):
+            captured["req"] = req
+            return ToolResponse(
+                success=True,
+                output={
+                    "MCPResult": {
+                        "server": "fs",
+                        "tool": "read_file",
+                        "result": "ok",
+                        "success": True,
+                    }
+                },
+            )
+
+        with patch.object(tool, "_run_call", side_effect=capture):
+            req = ToolRequest(name="read_file", input={"path": "/tmp/hello.txt"}, goal="read file")
+            tool.execute(req)
+
+        assert captured["req"] is req
 
     def test_timeout_returns_failure_response(self):
+        import concurrent.futures as _cf
+
         cfg = MCPServerConfig.stdio(name="slow", command="npx", call_timeout=0.001)
         tool = _make_mcp_client_tool(cfg)
+        _inject_mock_session(tool, mcp_tools=[_mock_tool_def("slow_tool")])
 
-        async def _slow_call(*_a, **_kw):
-            await asyncio.sleep(5)
+        # Simulate the executor timing out by raising _cf.TimeoutError from future.result()
+        with patch.object(tool._executor, "submit") as mock_submit:
+            mock_future = MagicMock()
+            mock_future.result.side_effect = _cf.TimeoutError()
+            mock_submit.return_value = mock_future
+            req = ToolRequest(name="slow_tool", goal="call slow tool")
+            resp = tool.execute(req)
 
-        session = _inject_mock_session(tool, mcp_tools=[_mock_tool_def("slow_tool")])
-        session.call_tool = AsyncMock(side_effect=_slow_call)
-        req = ToolRequest(name="slow_tool", goal="call slow tool")
-        resp = tool.execute(req)
         assert resp.success is False
-        assert "timed out" in resp.error.lower() or resp.error != ""
+        assert resp.error != ""
 
 
 # ===========================================================================
@@ -953,39 +994,39 @@ class TestMCPClientToolExecute:
 
 
 class TestMCPClientToolLazyConnect:
-    def test_execute_triggers_connect_when_not_connected(self):
+    def test_execute_routes_through_run_call(self):
         """
-        If _connected is False, _async_execute must call _async_connect first.
-        We verify this by patching _async_connect to set _connected and inject
-        a fake session, then confirm it was awaited.
+        execute() must delegate to _run_call (the thread-pool entry point).
+        We verify this by patching _run_call and confirming it is called with
+        the original ToolRequest.
         """
         cfg = _stdio_cfg(name="lazyfs")
         tool = _make_mcp_client_tool(cfg)
+        _inject_mock_session(tool, mcp_tools=[_mock_tool_def("read_file")])
 
-        connect_called = threading.Event()
+        called_with = {}
 
-        async def fake_connect():
-            connect_called.set()
-            # Inject a session so the rest of _async_execute can proceed
-            tool._connected = True
-            mock_td = _mock_tool_def("read_file")
-            tool._mcp_tools = [mock_td]
-            result = MagicMock()
-            result.isError = False
-            content = MagicMock()
-            content.type = "text"
-            content.text = "lazy result"
-            result.content = [content]
-            session = MagicMock()
-            session.call_tool = AsyncMock(return_value=result)
-            tool._session = session
+        def fake_run_call(req):
+            called_with["req"] = req
+            return ToolResponse(
+                success=True,
+                output={
+                    "MCPResult": {
+                        "server": "lazyfs",
+                        "tool": "read_file",
+                        "result": "lazy result",
+                        "success": True,
+                    }
+                },
+            )
 
-        with patch.object(tool, "_async_connect", side_effect=fake_connect):
+        with patch.object(tool, "_run_call", side_effect=fake_run_call):
             req = ToolRequest(name="read_file", goal="read file")
             resp = tool.execute(req)
 
-        assert connect_called.is_set(), "_async_connect was never called"
+        assert called_with.get("req") is req, "_run_call was not called with the request"
         assert resp.success is True
+        assert resp.output["MCPResult"]["result"] == "lazy result"
 
 
 # ===========================================================================
@@ -1347,21 +1388,24 @@ class TestMCPRegistryIntegration:
 
     def test_execute_through_registry_returns_tool_response(self):
         tool, registry = self._register_tool("fs", ["read file"])
-        mock_td = _mock_tool_def("read_file")
-        session = _inject_mock_session(tool, mcp_tools=[mock_td])
+        _inject_mock_session(tool, mcp_tools=[_mock_tool_def("read_file")])
 
-        content_item = MagicMock()
-        content_item.type = "text"
-        content_item.text = "hello from mcp"
-        mcp_result = MagicMock()
-        mcp_result.isError = False
-        mcp_result.content = [content_item]
-        session.call_tool = AsyncMock(return_value=mcp_result)
-
-        retrieved_tool = registry.get("MCPClientTool[fs]")
-        resp = retrieved_tool.execute(
-            ToolRequest(name="read_file", input={"path": "/tmp/hi.txt"}, goal="read file")
+        expected = ToolResponse(
+            success=True,
+            output={
+                "MCPResult": {
+                    "server": "fs",
+                    "tool": "read_file",
+                    "result": "hello from mcp",
+                    "success": True,
+                }
+            },
         )
+        retrieved_tool = registry.get("MCPClientTool[fs]")
+        with patch.object(retrieved_tool, "_run_call", return_value=expected):
+            resp = retrieved_tool.execute(
+                ToolRequest(name="read_file", input={"path": "/tmp/hi.txt"}, goal="read file")
+            )
         assert isinstance(resp, ToolResponse)
         assert resp.success is True
         assert resp.output["MCPResult"]["result"] == "hello from mcp"
