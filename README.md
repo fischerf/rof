@@ -26,7 +26,7 @@ ROF is a **business logic runtime for LLM workflows**. It occupies a fundamental
 
 > **How do I make business logic LLM-executable, testable, and version-controlled?**
 
-This is the same shift SQL made for databases. Think of the comparison as “SQL : databases :: RelateLang/rof : LLM-driven workflow execution”. ROF applies that principle to LLM workflows.
+This is the same shift SQL made for databases. Think of the comparison as "SQL : databases :: RelateLang/rof : LLM-driven workflow execution". ROF applies that principle to LLM workflows.
 
 | Framework | Core Question |
 |---|---|
@@ -98,117 +98,81 @@ One canonical format. Machine-lintable (`rof lint`). AST-inspectable (`rof inspe
 In every other framework, the deployable artifact is Python code. In ROF, it is a `.rl` file:
 
 - **Reviewable** — business stakeholders can read and sign off on `.rl` files
-- **Lintable** — CI pipelines run `rof lint --strict` and fail the build on invalid specs
-- **Diffable** — Git diffs on `.rl` files are human-readable business logic changes
-- **Canonical** — `rof inspect --format rl` emits a normalised version of the parsed spec
+- **Lintable** — `rof lint` catches undefined entities, missing goals, and duplicate definitions without an LLM
+- **Testable** — `rof test` runs `.rl.test` unit suites offline, with zero API calls
+- **Versionable** — every `.rl` change is a diff, not a blob of natural language embedded in code
 
 ### Static analysis without an LLM
 
-```
-E001  ParseError / SyntaxError          E003  Condition references undefined entity
-E002  Duplicate entity definition        E004  Goal references undefined entity
-W001  No goals defined                   W003  Orphaned definition
+```bash
+rof lint customer_segmentation.rl
+#  ✓ parsed  4 definitions  3 conditions  2 goals
+#  ⚠ W003  'PremiumTier' defined but never referenced
+#  ✗ E004  Goal 'determine Account status' references undefined entity 'Account'
 ```
 
-`rof lint` catches entire classes of workflow bugs **before a single LLM call is made**. This is the difference between *"we test by running it"* and *"we test with static analysis"*. No other orchestration framework offers a linter with machine-readable output and structured exit codes for CI integration.
+`rof lint` reports parse errors (E001–E004) and warnings (W001–W004) with line numbers. `--strict` treats warnings as errors. `--json` produces machine-readable output for CI pipelines.
 
 ### Progressive, immutable snapshot accumulation
 
-```
-snapshot₁ → snapshot₂ → snapshot₃ → final_result
-```
-
-Each pipeline stage adds to the snapshot; nothing is ever discarded. The final snapshot is a complete, replayable audit trail of every fact the system knew and every decision it made — without any custom logging code. It is not a log — it is an **immutable typed record** that can be fed back into `rof run --seed-snapshot` to replay or resume any execution.
+Every pipeline stage enriches a shared snapshot of RelateLang attribute statements. Each stage only declares its own goals; prior facts arrive as injected RL context. The final snapshot is a complete, replayable audit trail — every attribute change is traceable to the exact LLM call that produced it.
 
 ### Per-stage model routing
-
-ROF pipelines route different stages to different LLM providers and models:
 
 ```yaml
 stages:
   - name: gather
     rl_file: 01_gather.rl
-    model: gemma3:12b          # cheap local model for extraction
-    output_mode: auto          # Ollama: structured output supported — auto resolves to json
+    model: gemma3:12b
+    output_mode: auto
   - name: decide
     rl_file: 03_decide.rl
-    model: claude-opus-4-5     # powerful model for final reasoning
-    output_mode: json          # Anthropic: JSON schema enforced for reliability
+    model: claude-opus-4-5
+    output_mode: json
 ```
 
-This enables cost optimisation (cheap model for simple extraction, expensive model for critical decisions) and capability routing (local model for sensitive data, cloud model for complex reasoning).
-
-`output_mode` controls how ROF interprets each stage's LLM response — and how the Orchestrator asks for one:
-
-| `output_mode` | Best for | How it works |
-|---|---|---|
-| `"auto"` *(default)* | Any provider | Uses `"json"` if `provider.supports_structured_output()`, otherwise `"rl"` |
-| `"json"` | OpenAI, Anthropic, Gemini, Ollama | JSON schema enforced at the sampler level; response parsed as structured object; re-emitted as RL for the audit trail |
-| `"rl"` | Older/custom APIs, fine-tuned models | Full RLParser attempt; regex line-by-line fallback; RetryManager re-prompts with an RL hint on failure |
-
-Both paths produce the same graph delta (entity / attribute / predicate updates) and the same immutable RL audit snapshot — the output mode only affects how the LLM is asked to respond and how the response is decoded.
+Each stage can use a different model. Cheap local models handle extraction; capable frontier models handle complex decisions. Cost is kept proportional to task complexity.
 
 ### Strict separation of concerns
 
-| Layer | Owns | Nothing Else |
+| Layer | Responsibility | File |
 |---|---|---|
-| `.rl` file | Business logic | — |
-| `rof-pipeline` | Stage topology & snapshot threading | — |
-| `rof-core` | Goal execution loop & tool routing | — |
-| `rof-llm` | LLM calls, retry, response parsing | — |
-| `rof-tools` | Deterministic tool execution | — |
-| `rof-routing` | Learned routing confidence (session + historical) | — |
+| **Business logic** | What the rules are | `.rl` workflow spec |
+| **Test suite** | What the correct outputs are | `.rl.test` test file |
+| **Orchestration** | How goals are executed | `rof-core` |
+| **Tool dispatch** | Which tool answers which goal | `rof-tools` |
+| **LLM gateway** | Which model is called | `rof-llm` |
+| **Governance** | Immutable audit trail | `rof-governance` |
 
-Each module can be understood, tested, and replaced independently. Extensibility requires zero modifications to the ROF codebase:
+Tools are Python classes, not strings. They are testable, typed, and replaceable:
 
 ```python
-parser.register(MyStatementParser())          # Custom statement parser
-registry.register("my-llm", MyLLMProvider())  # Custom LLM provider
-
-@rof_tool(tags=["custom", "domain-specific"]) # Custom tool
-def my_tool(context: ToolContext) -> ToolResult: ...
+@rof_tool(
+    name="CreditScoreLookup",
+    description="Look up a credit score for an applicant",
+    trigger_keywords=["credit score", "lookup credit", "creditworthiness"],
+)
+def my_tool(entity_graph: dict, goal: str) -> dict:
+    score = credit_api.get_score(entity_graph["Applicant"]["ssn"])
+    return {"Applicant": {"credit_score": score}}
 ```
 
 ### When to use ROF
 
-**Choose ROF when:**
-- Business rules must be canonical, reviewable, and auditable
-- Non-technical stakeholders need to read and approve the logic
-- You need `rof lint` in CI before any LLM costs are incurred
-- You require a replayable, typed audit trail of every execution
-- The same spec must be runnable against multiple LLM providers
-- You want to version-control business logic the same way you version-control SQL schemas
+ROF is the right fit when:
 
-**Choose other frameworks when:**
-- You need LangChain's large ecosystem of pre-built integrations immediately
-- Your problem requires multiple agents debating or checking each other (AutoGen)
-- You need role-based task delegation for content generation (CrewAI)
-- Your workflow topology is highly dynamic and runtime-determined
+- Business rules change frequently and must be reviewable by non-engineers
+- You need an offline-testable, LLM-free CI pipeline for your AI workflows
+- You want a complete, immutable audit trail of every LLM decision (regulatory / compliance)
+- You need per-step model routing — cheap models for extraction, frontier models for decisions
+- You want to connect any MCP-compatible tool server to your workflows without writing adapter code
+- You are building multi-stage pipelines where earlier results must inform later stages
 
-```
-                        Declarative Logic Layer
-                               ▲
-                               │
-                          ┌────┤ ROF ├────┐
-                          │   RelateLang  │
-                          │   .rl files   │
-                          └───────────────┘
-                               │
-               ────────────────┼────────────────
-                               │
-        ┌──────────────────────┼──────────────────────┐
-        │                      │                      │
-   ┌────▼────┐          ┌──────▼──────┐        ┌──────▼──────┐
-   │LangChain│          │   AutoGen   │        │   CrewAI    │
-   │LangGraph│          │  MS Agents  │        │  SuperAGI   │
-   └─────────┘          └─────────────┘        └─────────────┘
-   Code-first chains    Multi-agent dialogue    Role-based crews
-   & tool pipelines     & coordination          & task delegation
+ROF is **not** a replacement for:
 
-                        Imperative Python Layer
-```
-
-ROF does not replace these frameworks — it operates at a **higher level of abstraction**. The `.rl` declaration layer and the execution layer are separable concerns. What ROF provides that none of the others do is the **canonical, lintable, versionable declaration layer itself**.
+- **LangChain / LangGraph** — if your primary need is wiring arbitrary Python callables in a graph
+- **AutoGen / CrewAI** — if you need multi-agent conversation loops
+- **DSPy** — if your primary goal is automatic prompt optimisation
 
 ---
 
@@ -227,9 +191,9 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
             ┌───────▼────────┐      ┌─────────▼──────────────────────┐
             │   RL Parser    │      │   rof_cli  (CLI entry point)    │
             │tokenise·validate│      │  lint · inspect · run · debug  │
-            │      · AST     │      │  pipeline run · pipeline debug  │
-            └───────┬────────┘      └─────────────────────────────────┘
-                    │
+            │      · AST     │      │  generate · test               │
+            └───────┬────────┘      │  pipeline run · pipeline debug  │
+                    │               └─────────────────────────────────┘
   ┌─────────────────▼───────────────────────────────────────────────────┐
   │              rof-routing  Learned Routing Layer          (optional) │
   │                                                                     │
@@ -250,7 +214,7 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   ┌──────────────────────────────▼──────────────────────────────────────┐
   │              rof-pipeline  Pipeline Runner                          │
   │                                                                     │
-  │  PipelineBuilder → [stage₁] → [stage₂] → [fan-out] → [stage₄]       │
+  │  PipelineBuilder → [stage₁] → [stage₂] → [fan-out] → [stage₄]      │
   │                                    ↑                                │
   │            accumulated snapshot injected as RL context              │
   │                                                                     │
@@ -287,10 +251,17 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   │  Provider           │       │  APICallTool     httpx REST       │   │
   │                     │       │  DatabaseTool    sqlite/SA        │   │
   │  RetryManager       │       │  FileReaderTool  pdf/csv/docx/…   │   │
-  │  PromptRenderer     │       │  ValidatorTool   RL schema check  │   │
-  │  ResponseParser     │       │  HumanInLoopTool stdin/cb/file    │   │
-  └─────────────────────┘       │  FileSaveTool    save to disk     │   │
-                                │  LuaRunTool      interactive Lua  │   │
+  │  PromptRenderer     │       │  FileSaveTool    save to disk     │   │
+  │  ResponseParser     │       │  ValidatorTool   RL schema check  │   │
+  │  TrackingProvider   │       │  HumanInLoopTool stdin/cb/file    │   │
+  │  UsageAccumulator   │       │  LuaRunTool      interactive Lua  │   │
+  │  CostGuard          │       │  AICodeGenTool   LLM code gen     │   │
+  └─────────────────────┘       │  LLMPlayerTool   LLM-driven I/O  │   │
+                                │                                   │   │
+                                │  MCP Layer (optional)             │   │
+                                │  MCPClientTool  stdio/HTTP        │   │
+                                │  MCPToolFactory bulk register     │   │
+                                │  MCPServerConfig  (dataclass)     │   │
                                 │                                   │   │
                                 │  SDK: @rof_tool · LuaScriptTool   │   │
                                 │       JavaScriptTool              │   │
@@ -366,22 +337,27 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
       events/event_bus.py              Event, EventHandler, EventBus
       context/context_injector.py      ContextProvider, ContextInjector
       conditions/condition_evaluator.py ConditionEvaluator
-      interfaces/llm_provider.py       LLMRequest, LLMResponse, LLMProvider ABC
+      interfaces/llm_provider.py       LLMRequest, LLMResponse, UsageInfo, LLMProvider ABC
       interfaces/tool_provider.py      ToolRequest, ToolResponse, ToolProvider ABC
       orchestrator/orchestrator.py     OrchestratorConfig, StepResult, RunResult, Orchestrator
 
-    llm/                               LLM Gateway — 5 provider adapters, retry, renderer
+    llm/                               LLM Gateway — providers, retry, renderer, tracking
       providers/openai_provider.py     OpenAIProvider, AzureOpenAIProvider
       providers/anthropic_provider.py  AnthropicProvider
       providers/gemini_provider.py     GeminiProvider
       providers/ollama_provider.py     OllamaProvider
       providers/github_copilot_provider.py  GitHubCopilotProvider
+      providers/base.py                ProviderError, RateLimitError, ContextLimitError,
+                                         AuthError, ROF_GRAPH_UPDATE_SCHEMA
       renderer/prompt_renderer.py      PromptRenderer, RendererConfig
       response/response_parser.py      ResponseParser, ParsedResponse
       retry/retry_manager.py           RetryManager, RetryConfig, BackoffStrategy
+      tracking.py                      TrackingProvider, UsageAccumulator, CallRecord,
+                                         CostGuard, BudgetExceededError
+      factory.py                       create_provider()
 
-    tools/                             Tool Layer — built-in tools, router, registry, SDK
-      registry/tool_registry.py        ToolRegistry
+    tools/                             Tool Layer — built-in tools, MCP, router, registry, SDK
+      registry/tool_registry.py        ToolRegistry, ToolRegistrationError
       registry/factory.py              create_default_registry()
       router/tool_router.py            ToolRouter, RoutingStrategy, RouteResult
       tools/web_search.py              WebSearchTool
@@ -396,7 +372,13 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
       tools/lua_run.py                 LuaRunTool
       tools/llm_player.py              LLMPlayerTool
       tools/ai_codegen.py              AICodeGenTool
-      sdk/decorator.py                 @rof_tool decorator
+      tools/mcp/
+        config.py                      MCPTransport, MCPServerConfig
+        client_tool.py                 MCPClientTool  (stdio + HTTP transports)
+        factory.py                     MCPToolFactory
+        __init__.py                    re-exports MCPServerConfig, MCPClientTool,
+                                         MCPToolFactory, MCPTransport
+      sdk/decorator.py                 @rof_tool decorator, FunctionTool
       sdk/lua_runner.py                LuaScriptTool
       sdk/js_runner.py                 JavaScriptTool
 
@@ -421,6 +403,16 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
       hints.py                         RoutingHint, RoutingHintExtractor
       inspector.py                     RoutingMemoryInspector
 
+    testing/                           Prompt unit testing framework
+      nodes.py                         TestFile, TestCase, GivenStatement,
+                                         RespondStatement, ExpectStatement,
+                                         ExpectKind, CompareOp
+      parser.py                        TestFileParser, TestFileParseError
+      runner.py                        TestRunner, TestRunnerConfig,
+                                         TestCaseResult, TestFileResult, TestStatus
+      assertions.py                    AssertionEvaluator, AssertionResult
+      mock_llm.py                      ScriptedLLMProvider, MockCall, ErrorResponse
+
     cli/main.py                        CLI entry point — all commands + main()
 
     # Backward-compatibility shims (thin re-export wrappers):
@@ -430,6 +422,7 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
     rof_pipeline.py   →  rof_framework.pipeline
     rof_routing.py    →  rof_framework.routing
     rof_governance.py →  rof_framework.governance.audit
+    rof_testing.py    →  rof_framework.testing
     rof_cli.py        →  rof_framework.cli
 
   tests/fixtures/
@@ -461,7 +454,7 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
 > **Migration note (v0.1 → package layout)**
 > The implementation has moved from six flat monolith files into typed
 > sub-packages (`rof_framework.core`, `.llm`, `.tools`, `.pipeline`,
-> `.routing`, `.cli`). All existing imports of the form
+> `.routing`, `.cli`, `.testing`). All existing imports of the form
 > `from rof_framework.rof_core import Orchestrator` continue to work
 > unchanged — each `rof_*.py` file is now a thin backward-compatibility
 > shim that re-exports every public name from the canonical sub-package.
@@ -661,18 +654,28 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
       system_preamble / system_preamble_json — swapped automatically by mode.
 ```
 
+---
+
 ### rof-llm
 
 ```
   LLMProvider (ABC)
   │   Unified interface — swap models without touching workflow code.
   │
-  ├── AnthropicProvider   (claude-opus-4-5, claude-sonnet-4-5, …)
+  ├── AnthropicProvider   (claude-opus-4-5, claude-sonnet-4-5, claude-haiku-3-5, …)
+  │     Structured output via forced tool_use ("rof_graph_update").
+  │     200 000-token context window on all current Claude models.
+  │
   ├── OpenAIProvider      (gpt-4o, gpt-4o-mini, o1, o3, …)
   │     also: Azure OpenAI (azure_endpoint + azure_deployment kwargs)
-  ├── GeminiProvider      (gemini-1.5-pro, gemini-2.0-flash, …)
+  │
+  ├── GeminiProvider      (gemini-1.5-pro, gemini-1.5-flash, gemini-2.0-flash, …)
+  │     Structured output via response_mime_type + response_schema.
+  │     Up to 1 000 000-token context on 1.5/2.0 models.
+  │
   ├── OllamaProvider      (llama3, mistral, gemma3, any local model)
   │     OpenAI-compat mode for vLLM: use_openai_compat=True
+  │
   └── GitHubCopilotProvider
         Talks to the GitHub Copilot Chat Completions API (OpenAI-compat).
         No official public API — reverse-engineered from the VS Code extension.
@@ -728,9 +731,9 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   │   → warnings          list of non-fatal parse notes
   │
   ParsedResponse
-      Structured result of ResponseParser.parse(content, output_mode):
-        raw_content, rl_statements, attribute_deltas, predicate_deltas,
-        is_valid_rl, warnings
+  │   Structured result of ResponseParser.parse(content, output_mode):
+  │     raw_content, rl_statements, attribute_deltas, predicate_deltas,
+  │     is_valid_rl, warnings
   │
   UsageInfo  (dataclass on LLMProvider ABC)
   │   Normalised token counts returned by LLMProvider.extract_usage().
@@ -766,29 +769,47 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   │   and the live accumulator for inspection or logging.
   │
   TrackingProvider
-      Transparent LLMProvider wrapper — invisible to the Orchestrator,
-      RetryManager, and all other framework components.
-      Intercepts every complete() call, measures wall-clock time, extracts
-      token counts (via extract_usage() hook first, raw dict heuristics as
-      fallback), appends a CallRecord to the accumulator, then optionally
-      checks the CostGuard threshold.
-
-      from rof_framework.llm import (
-          TrackingProvider, UsageAccumulator, CostGuard, BudgetExceededError
-      )
-
-      tracker  = UsageAccumulator()
-      guard    = CostGuard(max_total_tokens=10_000, max_calls=25)
-      provider = TrackingProvider(base_provider, tracker, cost_guard=guard)
-
-      try:
-          result = orchestrator.run(ast)
-      except BudgetExceededError as e:
-          print(f"Halted: {e}")          # includes overage details + run stats
-          print(tracker.summary())       # final accumulated stats
-
-      # Stats are also printed automatically by rof run / rof debug / rof generate
+  │   Transparent LLMProvider wrapper — invisible to the Orchestrator,
+  │   RetryManager, and all other framework components.
+  │   Intercepts every complete() call, measures wall-clock time, extracts
+  │   token counts (via extract_usage() hook first, raw dict heuristics as
+  │   fallback), appends a CallRecord to the accumulator, then optionally
+  │   checks the CostGuard threshold.
+  │
+  │   Token key paths per provider:
+  │     OpenAI / Azure / Ollama-compat:
+  │       raw["usage"]["prompt_tokens"]      → input_tokens
+  │       raw["usage"]["completion_tokens"]  → output_tokens
+  │     Anthropic:
+  │       raw["usage"]["input_tokens"]       → input_tokens
+  │       raw["usage"]["output_tokens"]      → output_tokens
+  │     Ollama native:
+  │       raw["prompt_eval_count"]           → input_tokens
+  │       raw["eval_count"]                  → output_tokens
+  │     Gemini:
+  │       usage not surfaced in stored raw → all None
+  │
+  │   from rof_framework.llm import (
+  │       TrackingProvider, UsageAccumulator, CostGuard, BudgetExceededError
+  │   )
+  │   tracker  = UsageAccumulator()
+  │   guard    = CostGuard(max_total_tokens=10_000, max_calls=25)
+  │   provider = TrackingProvider(base_provider, tracker, cost_guard=guard)
+  │   try:
+  │       result = orchestrator.run(ast)
+  │   except BudgetExceededError as e:
+  │       print(f"Halted: {e}")
+  │       print(tracker.summary())
+  │
+  create_provider()
+      Convenience factory. Wraps the named provider in a RetryManager.
+      Supports: "openai" | "azure" | "anthropic" | "gemini" | "ollama" |
+                "vllm" | "github_copilot"
+      llm = create_provider("anthropic", api_key="sk-ant-...",
+                            model="claude-opus-4-5")
 ```
+
+---
 
 ### rof-tools
 
@@ -823,6 +844,25 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   │   result.confidence  # 0.0 – 1.0
   │   result.candidates  # top-5 ranked tools
   │
+  create_default_registry()
+  │   Factory that builds a ToolRegistry pre-populated with all built-in
+  │   tools.  Pass mcp_servers=[...] to also register MCP client tools.
+  │
+  │   from rof_framework.tools import create_default_registry
+  │   from rof_framework.tools.tools.mcp import MCPServerConfig
+  │
+  │   registry = create_default_registry(
+  │       web_search_backend="duckduckgo",
+  │       db_dsn="postgresql://user:pw@localhost/mydb",
+  │       mcp_servers=[
+  │           MCPServerConfig.stdio("filesystem", "npx",
+  │               ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]),
+  │           MCPServerConfig.http("sentry",
+  │               url="https://mcp.sentry.io/mcp",
+  │               auth_bearer="sntrys_..."),
+  │       ],
+  │   )
+  │
   ├── WebSearchTool
   │   Live web search. Backends (auto-selected):
   │     1. DuckDuckGo   (pip install ddgs)
@@ -848,6 +888,7 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   │     LLMPlayerTool   – for interactive programs (games, questionnaires)
   │   Languages: python · lua · javascript · shell
   │   Output: language, saved_to (file path), filename
+  │   Constructor: AICodeGenTool(llm, output_dir=None, max_tokens=4096)
   │   Trigger keywords: "generate python code", "generate lua code",
   │                     "generate code", "write code", "implement code"
   │
@@ -883,6 +924,17 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   │   base_dir sandbox + allowed_extensions allowlist.
   │   Output: path, format, content (str or list), char_count
   │
+  ├── FileSaveTool
+  │   Saves arbitrary text content to a file.  The destination path
+  │   (including extension) is taken directly from the snapshot — no
+  │   assumptions are made about content type.  If no path is given a
+  │   temp file is created.  No LLM call is made.
+  │   Input: content (str, required), file_path (str, optional),
+  │          encoding (str, default "utf-8")
+  │   Output: file_path (str), bytes_written (int)
+  │   Constructor: FileSaveTool()
+  │   Trigger keywords: "save file", "write file"
+  │
   ├── ValidatorTool
   │   Validates content against RelateLang rules.
   │   Modes:
@@ -899,16 +951,15 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   │     auto_mock – returns mock_response immediately (for testing)
   │   Supports: options validation, configurable timeout, elapsed_s in output.
   │
-  ├── FileSaveTool
-  │   Saves arbitrary text content to a file.  The destination path
-  │   (including extension) is taken directly from the snapshot — no
-  │   assumptions are made about content type.  If no path is given a
-  │   temp file is created.  No LLM call is made.
-  │   Input: content (str, required), file_path (str, optional),
-  │          encoding (str, default "utf-8")
-  │   Output: file_path (str), bytes_written (int)
-  │   Constructor: FileSaveTool()
-  │   Trigger keywords: "save file", "write file"
+  ├── LuaRunTool
+  │   Runs a Lua script interactively in the current terminal.
+  │   stdin, stdout, and stderr are fully inherited from the parent
+  │   process.  On Windows the script is launched in a new console
+  │   window to ensure a proper interactive TTY.  Handles Ctrl+C
+  │   gracefully.
+  │   Input: file_path (str, required) — path to the .lua file
+  │   Output: file_path (str), return_code (int)
+  │   Trigger keywords: "run lua script", "run lua interactively"
   │
   ├── LLMPlayerTool
   │   Drives any interactive program (Python, Lua, JS) through its
@@ -921,21 +972,106 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   │     4. Writes the LLM's answer back to the process stdin.
   │     5. Repeats until the process exits or max_turns is reached.
   │     6. Saves the full turn-by-turn transcript to a .txt file.
+  │   Constructor: LLMPlayerTool(llm, output_dir=None, idle_wait=0.8,
+  │                               timeout_per_turn=15.0, max_turns=30)
   │   Output: transcript (list of {game_output, llm_choice}),
   │           transcript_file (path), turns, script, returncode
-  │   Trigger keywords: "play game", "play text adventure",
-  │                     "play and record choices", "let llm play",
-  │                     "play interactively", "run interactively"
+  │   Trigger keywords: "run interactively", "let llm drive",
+  │                     "automate program", "play interactively"
   │
-  ├── LuaRunTool
-  │   Runs a Lua script interactively in the current terminal.
-  │   stdin, stdout, and stderr are fully inherited from the parent
-  │   process.  On Windows the script is launched in a new console
-  │   window to ensure a proper interactive TTY.  Handles Ctrl+C
-  │   gracefully.
-  │   Input: file_path (str, required) — path to the .lua file
-  │   Output: file_path (str), return_code (int)
-  │   Trigger keywords: "run lua script", "run lua interactively"
+  ├── MCP Tool Layer  ─────────────────────────────────────────────────
+  │
+  │   Model Context Protocol (MCP) support lets ROF connect to any
+  │   MCP-compatible tool server — local stdio subprocess or remote HTTP —
+  │   and expose its full tool set to the ROF tool router and orchestrator.
+  │   No adapter code is required; the MCP server's tools/list response is
+  │   used to auto-discover tool names and generate routing keywords.
+  │
+  │   MCPServerConfig  (dataclass)
+  │   │   Describes one MCP server connection.
+  │   │     name            – unique server identifier (used as namespace prefix)
+  │   │     transport       – MCPTransport.STDIO | MCPTransport.HTTP
+  │   │     command / args  – subprocess command (stdio transport)
+  │   │     url             – base URL (http transport)
+  │   │     auth_bearer     – Bearer token for HTTP auth
+  │   │     auth_headers    – arbitrary extra HTTP headers
+  │   │     trigger_keywords – extra routing keywords (beyond auto-discovered)
+  │   │     connect_timeout – seconds for initial handshake (default: 30.0)
+  │   │     call_timeout    – seconds per tools/call (default: 60.0)
+  │   │     auto_discover   – call tools/list on connect (default: True)
+  │   │     namespace_tools – prefix tool names with "<name>/" (default: True)
+  │   │
+  │   │   Convenience constructors:
+  │   │     MCPServerConfig.stdio(name, command, args=[], env={}, ...)
+  │   │     MCPServerConfig.http(name, url, auth_bearer="", auth_headers={}, ...)
+  │   │
+  │   │   # Local filesystem MCP server (npx, auto-downloaded on first run):
+  │   │   fs = MCPServerConfig.stdio(
+  │   │       name="filesystem",
+  │   │       command="npx",
+  │   │       args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+  │   │   )
+  │   │
+  │   │   # Remote HTTP MCP server with bearer auth:
+  │   │   sentry = MCPServerConfig.http(
+  │   │       name="sentry",
+  │   │       url="https://mcp.sentry.io/mcp",
+  │   │       auth_bearer="sntrys_...",
+  │   │       trigger_keywords=["sentry error", "exception tracking"],
+  │   │   )
+  │   │
+  │   MCPClientTool  (ToolProvider)
+  │   │   ROF ToolProvider that wraps one MCP server.
+  │   │   Each execute() call opens a fresh MCP session (subprocess or HTTP),
+  │   │   runs the tool call, then closes the session.  This per-call pattern
+  │   │   guarantees correct anyio cancel-scope behaviour on Python 3.12+
+  │   │   Windows (avoids the cross-task RuntimeError seen in persistent-session
+  │   │   designs).
+  │   │   Tool discovery (tools/list) is performed once on the first call or
+  │   │   eagerly via connect(), and the result is cached for the lifetime of
+  │   │   the tool instance.
+  │   │   Session serialisation: a ThreadPoolExecutor(max_workers=1) ensures
+  │   │   the subprocess is never shared across concurrent execute() calls.
+  │   │   Increase max_workers for explicit parallelism.
+  │   │
+  │   │   tool = MCPClientTool(cfg)
+  │   │   tool.connect()                # eager discovery (optional)
+  │   │   resp = tool.execute(request)  # opens session, calls tool, closes
+  │   │   tool.close()                  # shut down executor cleanly
+  │   │
+  │   │   Context-manager form:
+  │   │   with MCPClientTool(cfg) as tool:
+  │   │       resp = tool.execute(request)
+  │   │
+  │   MCPToolFactory
+  │       Builds and bulk-registers MCPClientTool instances from a list of
+  │       MCPServerConfig objects.  Mirrors create_default_registry() in
+  │       its single-call assembly pattern.
+  │
+  │       factory = MCPToolFactory(
+  │           configs=[fs_cfg, sentry_cfg],
+  │           eager_connect=False,   # lazy connections (default)
+  │           tags=["mcp", "external"],
+  │       )
+  │       tools = factory.build_and_register(registry)
+  │       # ... run workflows ...
+  │       factory.close_all()   # clean shutdown of all MCP sessions
+  │
+  │       Properties:
+  │         factory.tools       – list of all MCPClientTool instances built so far
+  │       Methods:
+  │         build_and_register(registry, force=False) → list[MCPClientTool]
+  │         build()                                   → list[MCPClientTool]
+  │         close_all()
+  │
+  │   Dependencies:
+  │     pip install mcp>=1.0
+  │     # or via extras:
+  │     pip install "rof[mcp]"
+  │
+  │   A missing mcp package raises ImportError with an actionable install hint.
+  │   All other per-server construction errors are caught and logged so that
+  │   one broken config does not prevent the remaining servers from registering.
   │
   └── SDK
       @rof_tool decorator  – register any Python function as a tool
@@ -945,6 +1081,8 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
                              (runs via py_mini_racer or Node.js)
       FunctionTool         – wraps a callable, used internally by @rof_tool
 ```
+
+---
 
 ### rof-pipeline
 
@@ -990,6 +1128,8 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
       .stage("gather")              → StageResult
       .summary()                    → one-line status string
 ```
+
+---
 
 ### rof-routing
 
@@ -1086,8 +1226,8 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
   │
   RoutingStats
       Per (tool, pattern) statistics record:
-        call_count, success_count, avg_satisfaction (EMA),
-        success_rate, reliability (sample-size proxy)
+        attempt_count, success_count, avg_satisfaction (EMA),
+        success_rate, reliability (sample-size proxy, reaches 1.0 after 10 obs.)
       Serialisable: RoutingStats.to_dict() / RoutingStats.from_dict()
 
   New EventBus events
@@ -1100,6 +1240,188 @@ ROF does not replace these frameworks — it operates at a **higher level of abs
       pip install sentence-transformers  # real embeddings (TF-IDF fallback otherwise)
 ```
 
+---
+
+### rof-testing
+
+The testing module provides a fully offline, deterministic prompt unit-testing
+framework. No LLM API key is needed — the `ScriptedLLMProvider` drives the
+orchestrator with pre-scripted responses, and the `TestRunner` evaluates
+assertions against the final snapshot.
+
+```
+  ScriptedLLMProvider  (LLMProvider)
+  │   A deterministic LLMProvider driven by a list of scripted responses.
+  │   Three authoring modes:
+  │
+  │   1. Scripted (ordered) — responses consumed one-by-one, last repeated:
+  │      provider = ScriptedLLMProvider([
+  │          'Customer has segment of "HighValue".',
+  │          'Customer is "premium".',
+  │      ])
+  │
+  │   2. Goal-keyed — match responses to specific goal expressions:
+  │      provider = ScriptedLLMProvider.from_goal_map({
+  │          "determine Customer segment": 'Customer has segment of "HighValue".',
+  │          "*": "Task completed.",   # wildcard fallback
+  │      })
+  │
+  │   3. Callable — supply a function (request: LLMRequest) → str:
+  │      provider = ScriptedLLMProvider.from_callable(
+  │          lambda req: 'Customer has segment of "HighValue".'
+  │          if "segment" in req.prompt else "Task completed."
+  │      )
+  │
+  │   4. File responses — load responses from .rl files on disk:
+  │      provider = ScriptedLLMProvider.from_file_responses(
+  │          ["responses/step1.rl", "responses/step2.rl"],
+  │          base_dir=Path("tests/fixtures"),
+  │      )
+  │
+  │   Error injection (test retry / fallback logic):
+  │      from rof_framework.llm.providers.base import RateLimitError
+  │      provider = ScriptedLLMProvider([
+  │          ErrorResponse(RateLimitError("simulated rate limit")),
+  │          'Customer has segment of "HighValue".',
+  │      ])
+  │
+  │   JSON mode: plain RL strings are auto-converted to the rof_graph_update
+  │   JSON schema when the orchestrator requests json output_mode.
+  │
+  │   Call recording:
+  │      provider.call_count      # int
+  │      provider.last_call       # MockCall | None
+  │      provider.calls           # list[MockCall]
+  │      provider.prompts_sent    # list[str]  (raw prompt strings)
+  │
+  TestRunner
+  │   Stateless between test cases — every case gets its own Orchestrator,
+  │   EventBus, WorkflowGraph, and ScriptedLLMProvider instance.
+  │
+  │   runner = TestRunner()
+  │   result = runner.run_file("tests/fixtures/customer.rl.test")
+  │   # or: result = runner.run_suite(test_file_object)
+  │   # or: result = runner.run_case(test_case_object)
+  │
+  │   Execution order per test case:
+  │     1. Parse the .rl workflow (inline rl_source or rl_file).
+  │     2. Build a fresh WorkflowGraph from the AST.
+  │     3. Apply all GivenStatement seed facts to the graph.
+  │     4. Construct a ScriptedLLMProvider from the respond-with list.
+  │     5. Run Orchestrator.run(ast).
+  │     6. Evaluate every ExpectStatement with AssertionEvaluator.
+  │     7. Return a TestCaseResult.
+  │
+  │   Pipeline test cases: when rl_file points at a .yaml config the runner
+  │   delegates to a pipeline-specific path that builds a Pipeline from YAML
+  │   and asserts against the final PipelineResult snapshot.
+  │
+  │   TestRunnerConfig controls: max_iter, default_output_mode,
+  │   inject_givens_as_rl, verbose_errors
+  │
+  TestCaseResult
+  │   .passed, .failed, .skipped  (bool)
+  │   .pass_count, .fail_count    (int)
+  │   .failed_assertions          (list[AssertionResult] where result.failed)
+  │   .summary_line()             → "PASS  My test name  (3/3 assertions)"
+  │   .error                      (Exception | None — set on unexpected crash)
+  │
+  TestFileResult
+  │   .total, .passed, .failed, .skipped  (int)
+  │   .all_passed                         (bool)
+  │   .exit_code                          (0 | 1 | 3)
+  │   .summary()                          → multi-line test report
+  │   .to_dict()                          → JSON-serialisable dict
+  │   .test_case_results                  (list[TestCaseResult])
+  │
+  TestStatus  (Enum)
+  │   PASS | FAIL | ERROR | SKIP
+  │
+  AssertionResult  (dataclass)
+  │   .passed / .failed  (bool)
+  │   .description       — human-readable assertion text
+  │   .message           — detail on failure (expected vs. actual)
+  │
+  AssertionEvaluator
+  │   Evaluates ExpectStatement nodes against a WorkflowGraph snapshot
+  │   and a RunResult.  Each ExpectKind maps to a dedicated check method.
+  │
+  ExpectKind  (Enum)
+  │   ENTITY_EXISTS / ENTITY_NOT_EXISTS
+  │   HAS_PREDICATE / NOT_HAS_PREDICATE
+  │   ATTRIBUTE_EQUALS / ATTRIBUTE_COMPARE / ATTRIBUTE_EXISTS
+  │   GOAL_ACHIEVED / GOAL_FAILED / GOAL_EXISTS
+  │   RUN_SUCCEEDS / RUN_FAILS
+  │
+  CompareOp  (Enum)
+      EQ (== / equals) | NEQ (!=) | GT (>) | GTE (>=) | LT (<) | LTE (<=)
+```
+
+**The `.rl.test` file format:**
+
+```
+// Point at the workflow under test (relative to this file)
+workflow: tests/fixtures/loan_approval.rl
+
+test "Creditworthy applicant is approved"
+    // Seed the graph before the workflow runs
+    given CreditProfile has score of 740.
+    given CreditProfile has debt_to_income of 0.28.
+    given LoanRequest has amount of 20000.
+
+    // Scripted LLM responses — consumed in order, one per goal
+    respond with 'Applicant is creditworthy.'
+    respond with 'LoanRequest is eligible.'
+    respond with 'ApprovalDecision has outcome of "approved".'
+
+    // File-based response (loaded from disk):
+    // respond with file "responses/step3.rl"
+
+    // JSON-mode response:
+    // respond with json '{"attributes":[...],"predicates":[],"reasoning":"..."}'
+
+    // Assertions against the final snapshot
+    expect Applicant is creditworthy.
+    expect attribute ApprovalDecision.outcome equals "approved".
+    expect attribute CreditProfile.score > 600.
+    expect attribute CreditProfile.debt_to_income <= 0.40.
+    expect goal "determine loan eligibility" is achieved.
+    expect entity "UnknownEntity" does not exist.
+    expect run succeeds.
+end
+
+test "Low credit score applicant is rejected"
+    given CreditProfile has score of 580.
+    given CreditProfile has debt_to_income of 0.55.
+    respond with 'Applicant is not creditworthy.'
+    expect Applicant is not creditworthy.
+    expect run succeeds.
+end
+
+test "Skip this placeholder"
+    skip because "work in progress"
+end
+```
+
+Supported `expect` forms:
+
+```
+  expect <Entity> is "<predicate>".
+  expect <Entity> is not "<predicate>".
+  expect entity "<Name>" exists.
+  expect entity "<Name>" does not exist.
+  expect attribute <Entity>.<attr> equals <value>.
+  expect attribute <Entity>.<attr> <op> <value>.     (op: > >= < <= !=)
+  expect attribute <Entity>.<attr> exists.
+  expect goal "<expr>" is achieved.
+  expect goal "<expr>" is failed.
+  expect goal "<expr>" exists.
+  expect run succeeds.
+  expect run fails.
+```
+
+---
+
 ### rof-cli
 
 The CLI is the recommended entry point for running and validating `.rl` files
@@ -1110,6 +1432,7 @@ without writing any Python.
   rof inspect <file.rl>           Show AST structure
   rof run     <file.rl>           Execute workflow against a real LLM
   rof debug   <file.rl>           Step-through with full prompt/response capture
+  rof generate <description>      Generate a .rl workflow from natural language
   rof test    <file.rl.test>      Run prompt unit tests (no LLM required)
   rof pipeline run   <config.yaml>   Execute a multi-stage pipeline from YAML
   rof pipeline debug <config.yaml>   Debug a pipeline with full prompt/response trace
@@ -1159,8 +1482,12 @@ without writing any Python.
     --verbose / -v           Show goal results and full event trace
     --json                   Output RunResult as JSON
     --max-iter N             Max orchestrator iterations (default: 25)
+    --output-mode MODE       auto | json | rl  (default: auto)
+                               auto → json if provider supports structured output
+                               json → enforce rof_graph_update JSON schema
+                               rl   → request plain RelateLang text
     --output-snapshot FILE   Save final snapshot to FILE.json
-    --seed-snapshot FILE     Load initial snapshot from FILE.json
+    --seed-snapshot FILE     Load initial snapshot from FILE.json (replay / resume)
     --audit-log              Enable the immutable audit log
     --audit-dir DIR          Directory for audit JSONL files (default: ./audit_logs)
     + provider flags (see below)
@@ -1173,14 +1500,65 @@ without writing any Python.
   --step          Pause and wait for Enter after each step
   --json          Output full trace including all LLM prompts/responses as JSON
   --max-iter N    Max orchestrator iterations (default: 25)
+  --output-mode   auto | json | rl  (default: auto)
   + provider flags (see below)
 ```
+
+**`rof generate`** — generate a `.rl` workflow from natural language
+
+```
+  Calls the LLM with a structured code-generation prompt and writes a
+  complete, linted .rl file.  The generated source is automatically
+  linted before output unless --no-lint is specified.
+
+  Flags:
+    --output / -o FILE   Write generated .rl source to FILE (default: stdout)
+    --no-lint            Skip the automatic lint pass on generated output
+    --json               Output result as JSON: { source, lint_issues, stats }
+    + provider flags (see below)
+
+  Examples:
+    rof generate "loan approval workflow for a bank" --provider anthropic
+    rof generate "customer churn prediction model" --output churn.rl
+    rof generate "fraud detection system" --provider ollama --json
+```
+
+**`rof test`** — prompt unit testing (no LLM required)
+
+`rof test` runs `.rl.test` files — declarative test suites that exercise a
+workflow spec without calling a real LLM. Each test case seeds the graph with
+known inputs, drives the orchestrator with scripted mock responses, and asserts
+against the final snapshot. Tests are fully deterministic and offline.
+
+```
+  Flags:
+    --tag TAG         Only run test cases tagged with TAG (repeatable)
+    --fail-fast / -x  Stop after the first failing test case
+    --verbose / -v    Print each assertion result individually
+    --json            Machine-readable output (all results + aggregate summary)
+    --output-mode     Override output_mode for every test case: auto | json | rl
+
+  Arguments:
+    FILE_OR_DIR       One or more .rl.test files, or directories scanned
+                      recursively for *.rl.test files
+
+  Exit codes:  0 = all passed  |  1 = any failed  |  2 = file error  |  3 = no tests found
+
+  Examples:
+    rof test tests/fixtures/loan_approval.rl.test
+    rof test tests/fixtures/ --tag smoke --json
+    rof test suite.rl.test --fail-fast --verbose
+```
+
+The `.rl.test` file is separate from the `.rl` workflow file by design — the
+workflow is the subject under test; the `.rl.test` file is the test suite. One
+`.rl.test` file can reference multiple `.rl` workflows, and one workflow can be
+covered by multiple test suites.
 
 **`rof pipeline run`** — YAML-driven pipeline
 
 ```
   Executes a pipeline defined in a YAML config file.
-  Automatically loads FileSaveTool + LuaRunTool from rof_tools if available.
 
   YAML shape:
     provider: ollama          # optional — overrides env
@@ -1205,6 +1583,7 @@ without writing any Python.
   Flags:
     --verbose / -v   Enable DEBUG logging (parser, orchestrator, LLM events)
     --json           Output PipelineResult as JSON
+    --seed-snapshot FILE   Load initial snapshot from FILE.json
     --audit-log      Enable the immutable audit log
     --audit-dir DIR  Directory for audit JSONL files (default: ./audit_logs)
     + provider flags (see below)
@@ -1220,101 +1599,16 @@ without writing any Python.
   Flags:
     --step    Pause and wait for Enter after each LLM step (stage × goal)
     --json    Output complete trace (all prompts + responses) and final
-              snapshot as a single JSON document — useful for offline analysis
+              snapshot as a single JSON document
+    --seed-snapshot FILE   Load initial snapshot from FILE.json
     + provider flags (see below)
-
-  Example output (non-JSON mode):
-    ════════════════════════════════════════
-      ROF Pipeline Debug  →  pipeline.yaml
-    ════════════════════════════════════════
-      Stages   : 3
-      Provider : OllamaProvider
-
-    ════════════════════════════════════════
-      Stage 1  —  gather
-    ════════════════════════════════════════
-
-    ▸ Step 1  —  extract claims from Article
-      ─── LLM Prompt ──────────────────────
-        System: You are a RelateLang workflow executor …
-        Prompt: define Article as "…"
-                …
-                ensure extract claims from Article.
-      ─────────────────────────────────────
-
-      ✓ achieved
-      LLM Response
-        Article has claim_count of 5.
-        Article has extraction_status of "complete".
-
-    ▸ Step 2  —  …
 ```
 
-**`rof test`** — prompt unit testing (no LLM required)
-
-`rof test` runs `.rl.test` files — declarative test suites that exercise a
-workflow spec without calling a real LLM. Each test case seeds the graph with
-known inputs, drives the orchestrator with scripted mock responses, and asserts
-against the final snapshot. Tests are fully deterministic and offline.
-
-The `.rl.test` format:
-
-```
-// Point at the workflow under test
-workflow: tests/fixtures/loan_approval.rl
-
-test "Creditworthy applicant is approved"
-    // Seed the graph before the workflow runs
-    given CreditProfile has score of 740.
-    given CreditProfile has debt_to_income of 0.28.
-    given LoanRequest has amount of 20000.
-
-    // Scripted LLM responses — returned in order, one per goal
-    respond with 'Applicant is creditworthy.'
-    respond with 'LoanRequest is eligible.'
-    respond with 'ApprovalDecision has outcome of "approved".'
-
-    // Assertions against the final snapshot
-    expect Applicant is creditworthy.
-    expect attribute ApprovalDecision.outcome equals "approved".
-    expect run succeeds.
-end
-
-test "Low credit score applicant is rejected"
-    given CreditProfile has score of 580.
-    given CreditProfile has debt_to_income of 0.55.
-    respond with 'Applicant is not creditworthy.'
-    expect Applicant is not creditworthy.
-    expect run succeeds.
-end
-```
-
-```
-  Flags:
-    --tag TAG         Only run test cases tagged with TAG (repeatable)
-    --fail-fast / -x  Stop after the first failing test case
-    --verbose / -v    Print each assertion result individually
-    --json            Machine-readable output (all results + aggregate summary)
-    --output-mode     Override output_mode for every test case: auto | json | rl
-
-  Arguments:
-    FILE_OR_DIR       One or more .rl.test files, or directories scanned
-                      recursively for *.rl.test files
-
-  Exit codes:  0 = all passed  |  1 = any failed  |  2 = file error  |  3 = no tests found
-```
-
-The `.rl.test` file is separate from the `.rl` workflow file by design — the
-workflow is the subject under test; the `.rl.test` file is the test suite. One
-`.rl.test` file can reference multiple `.rl` workflows, and one workflow can be
-covered by multiple test suites.
-
----
-
-**Provider flags** (shared by `run`, `debug`, `pipeline run`, `pipeline debug`):
+**Provider flags** (shared by `run`, `debug`, `pipeline run`, `pipeline debug`, `generate`):
 
 ```
   --provider NAME   openai | anthropic | gemini | ollama
+                    (auto-detected from installed SDKs if omitted)
   --model    NAME   Model name (default: per-provider default or ROF_MODEL)
   --api-key  KEY    API key (default: ROF_API_KEY or provider-specific env var)
 ```
@@ -1330,8 +1624,6 @@ covered by multiple test suites.
   ANTHROPIC_API_KEY
   GOOGLE_API_KEY
 ```
-
----
 
 **Audit log flags** — shared by `rof run` and `rof pipeline run`:
 
@@ -1361,6 +1653,8 @@ cd rof
 pip install -e .
 # pipeline support needs PyYAML:
 pip install -e ".[pipeline]"
+# MCP support (optional):
+pip install -e ".[mcp]"
 ```
 
 **Lint and inspect a single `.rl` file:**
@@ -1422,11 +1716,10 @@ except BudgetExceededError as e:
     print(tracker.summary())        # stats up to the point of halt
 ```
 
-Custom and generic providers (e.g. `FujitsuChatAIProvider`) report their token
+Custom and generic providers (e.g. `XYZChatAIProvider`) report their token
 counts by overriding `LLMProvider.extract_usage()` — the `TrackingProvider`
 calls this hook first and falls back to built-in raw-dict heuristics for the
 four bundled providers.
-
 
 **Run the prompt unit test suites (no LLM, no API key):**
 
@@ -1442,6 +1735,95 @@ rof test tests/fixtures/testing/ --tag smoke --json
 
 # Stop on first failure, print every assertion
 rof test tests/fixtures/testing/loan_approval.rl.test --fail-fast --verbose
+```
+
+**Prompt unit testing (Python SDK):**
+
+```python
+from rof_framework.testing import TestRunner
+
+runner = TestRunner()
+result = runner.run_file("tests/fixtures/customer_segmentation.rl.test")
+
+print(result.summary())
+for tc_result in result.test_case_results:
+    if tc_result.failed:
+        for ar in tc_result.failed_assertions:
+            print(f"  FAIL  {ar.description}")
+            print(f"        {ar.message}")
+
+raise SystemExit(result.exit_code)   # 0 = all passed, 1 = any failed
+```
+
+**MCP tool integration:**
+
+```python
+from rof_framework.tools import create_default_registry
+from rof_framework.tools.tools.mcp import MCPServerConfig
+
+# Connect a local stdio MCP server (e.g. the official filesystem server)
+# and a remote HTTP MCP server, alongside all built-in ROF tools:
+registry = create_default_registry(
+    mcp_servers=[
+        MCPServerConfig.stdio(
+            name="filesystem",
+            command="npx",
+            args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+            trigger_keywords=["read file", "list directory", "write file"],
+        ),
+        MCPServerConfig.http(
+            name="sentry",
+            url="https://mcp.sentry.io/mcp",
+            auth_bearer="sntrys_...",
+            trigger_keywords=["sentry error", "exception tracking"],
+        ),
+    ],
+    mcp_eager_connect=False,   # lazy connections (default)
+)
+
+# Use the registry with the orchestrator exactly as before:
+from rof_framework.core import Orchestrator, RLParser
+from rof_framework.llm import AnthropicProvider
+
+llm    = AnthropicProvider(api_key="sk-ant-...", model="claude-sonnet-4-5")
+orch   = Orchestrator(llm_provider=llm, tools=registry.all_tools())
+result = orch.run(RLParser().parse(open("my_workflow.rl").read()))
+```
+
+Direct `MCPToolFactory` usage (when you need explicit lifecycle control):
+
+```python
+from rof_framework.tools.tools.mcp import MCPServerConfig, MCPToolFactory
+from rof_framework.tools.registry.tool_registry import ToolRegistry
+
+configs = [
+    MCPServerConfig.stdio("filesystem", "npx",
+                          ["-y", "@modelcontextprotocol/server-filesystem", "."]),
+]
+
+registry = ToolRegistry()
+factory  = MCPToolFactory(configs, eager_connect=True)
+tools    = factory.build_and_register(registry)
+
+try:
+    run_my_app(registry)
+finally:
+    factory.close_all()   # clean shutdown of MCP subprocess sessions
+```
+
+**GitHub Copilot provider:**
+
+```python
+from rof_framework.llm.providers.github_copilot_provider import GitHubCopilotProvider
+
+# First time: opens browser for device-flow OAuth, caches token
+llm = GitHubCopilotProvider.authenticate(model="gpt-4o")
+
+# Subsequent runs: load token silently from cache
+llm = GitHubCopilotProvider.from_cache(model="gpt-4o")
+
+# Direct token (skip device flow)
+llm = GitHubCopilotProvider(github_token="ghu_...", model="gpt-4o")
 ```
 
 **Loan Approval pipeline** (`gather → analyse → decide`):
@@ -1462,6 +1844,10 @@ rof pipeline run tests/fixtures/pipeline_load_approval/pipeline.yaml \
 # JSON output (inspect final snapshot)
 rof pipeline run tests/fixtures/pipeline_load_approval/pipeline.yaml \
     --provider anthropic --json | python -m json.tool
+
+# Resume from a saved snapshot
+rof pipeline run tests/fixtures/pipeline_load_approval/pipeline.yaml \
+    --provider anthropic --seed-snapshot prior_run.json
 ```
 
 **Fake-News / Fact-Check pipeline** (6 stages with tool routing):
@@ -1479,7 +1865,7 @@ rof lint    tests/fixtures/pipeline_fakenews_detection/01_extract.rl
 rof inspect tests/fixtures/pipeline_fakenews_detection/05_decide.rl --format json
 ```
 
-**Interactive Lua pipeline** (FileSaveTool + LuaRunTool):
+**Interactive Lua pipeline** (AICodeGenTool + LuaRunTool):
 
 ```bash
 # Requires Lua on PATH and --provider with a capable model
@@ -1568,12 +1954,15 @@ class KafkaSink(AuditSink):
 subscriber = AuditSubscriber(bus=bus, sink=KafkaSink())
 ```
 
-**Shim import (backward-compatibility):**
+**Shim imports (backward-compatibility):**
 
 ```python
-# Canonical path (preferred for new code):
+# Canonical paths (preferred for new code):
 from rof_framework.governance.audit import AuditSubscriber, JsonLinesSink
+from rof_framework.testing import TestRunner, ScriptedLLMProvider
+from rof_framework.tools.tools.mcp import MCPServerConfig, MCPClientTool
 
-# Shim path (identical, for consistency with other rof_* shims):
+# Shim paths (identical — maintained for the full v0.x series):
 from rof_framework.rof_governance import AuditSubscriber, JsonLinesSink
+from rof_framework.rof_testing import TestRunner, ScriptedLLMProvider
 ```

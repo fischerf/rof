@@ -31,9 +31,9 @@ class StatementType(Enum):
 
 @dataclass
 class RLNode:
-    """Basisklasse aller AST-Knoten."""
+    """Base class for all AST nodes."""
 
-    source_line: int = 0  # Zeilennummer im .rl-File (für Fehlermeldungen)
+    source_line: int = 0  # line number in the .rl file (used in error messages)
 
 
 @dataclass
@@ -103,7 +103,7 @@ class ExtensionNode(RLNode):
 
 @dataclass
 class WorkflowAST:
-    """Root-Knoten: vollständig geparster Workflow."""
+    """Root node: fully parsed workflow."""
 
     definitions: list[Definition] = field(default_factory=list)
     predicates: list[Predicate] = field(default_factory=list)
@@ -113,7 +113,7 @@ class WorkflowAST:
     goals: list[Goal] = field(default_factory=list)
 
     def all_entities(self) -> set[str]:
-        """Alle bekannten Entitätsnamen im AST."""
+        """All known entity names in the AST."""
         entities: set[str] = set()
         for d in self.definitions:
             entities.add(d.entity)

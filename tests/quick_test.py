@@ -17,6 +17,7 @@ TEST_DOMAINS = {
     "lint": "test_lint.py",
     "llm": "test_llm_providers.py",
     "tools": "test_tools_registry.py",
+    "mcp": "test_mcp.py",
     "passthrough": "test_tool_output_graph_passthrough.py",
     "chains": "test_pipeline_chains.py",
     "pipeline": "test_pipeline_runner.py test_pipeline_fanout_and_extras.py test_pipeline_result_and_renderer.py test_condition_evaluator.py test_response_parser.py test_retry_manager.py",
@@ -73,6 +74,7 @@ Available domains:
   lint     - Linter tests
   llm      - LLM provider tests
   tools       - Tools and registry tests
+  mcp         - MCP client integration tests (MCPServerConfig, MCPClientTool, MCPToolFactory)
   passthrough - Tool output entity-keyed contract & graph passthrough tests
   chains      - Real multi-tool pipeline chain integration tests
   pipeline    - Pipeline orchestration tests

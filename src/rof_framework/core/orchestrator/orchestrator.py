@@ -30,11 +30,11 @@ __all__ = [
 
 @dataclass
 class OrchestratorConfig:
-    """Konfiguration der Orchestrator-Engine."""
+    """Configuration for the Orchestrator engine."""
 
-    max_iterations: int = 50  # Schutz vor Endlosschleifen
-    pause_on_error: bool = False  # Workflow bei Fehler anhalten?
-    auto_save_state: bool = True  # Nach jedem Step State speichern?
+    max_iterations: int = 50  # guard against infinite loops
+    pause_on_error: bool = False  # halt the workflow on the first error?
+    auto_save_state: bool = True  # persist state after every step?
 
     # Output mode: how the LLM is asked to respond.
     # "auto"  → use "json" if provider.supports_structured_output(), else "rl"
@@ -77,15 +77,15 @@ class RunResult:
 
 class Orchestrator:
     """
-    Haupt-Engine des ROF Core.
+    Main execution engine for ROF Core.
 
-    Verwendung:
+    Usage:
         parser     = RLParser()
         bus        = EventBus()
         injector   = ContextInjector()
         state_mgr  = StateManager()
-        llm        = MyLLMProvider()          # aus rof-llm
-        tools      = [WebSearchTool()]        # aus rof-tools
+        llm        = MyLLMProvider()          # from rof-llm
+        tools      = [WebSearchTool()]        # from rof-tools
 
         orch = Orchestrator(
             llm_provider=llm,
@@ -96,11 +96,11 @@ class Orchestrator:
         ast    = parser.parse(rl_source)
         result = orch.run(ast)
 
-    Erweiterung:
-        - Eigene Tools: tools=[...] übergeben
-        - Eigene ContextProvider: orch.injector.register_provider(...)
-        - Eigene EventHandler: orch.bus.subscribe("step.completed", handler)
-        - Eigenen StateAdapter: orch.state_manager.swap_adapter(RedisAdapter())
+    Extension points:
+        - Custom tools: pass tools=[...] to the constructor
+        - Custom ContextProvider: orch.injector.register_provider(...)
+        - Custom EventHandler: orch.bus.subscribe("step.completed", handler)
+        - Custom StateAdapter: orch.state_manager.swap_adapter(RedisAdapter())
     """
 
     def __init__(
@@ -131,8 +131,7 @@ class Orchestrator:
 
     def run(self, ast: WorkflowAST, run_id: str | None = None) -> RunResult:
         """
-        Führt einen vollständigen Workflow aus.
-        Gibt RunResult mit allen Steps zurück.
+        Execute a complete workflow and return a RunResult with all steps.
         """
         run_id = run_id or str(uuid.uuid4())
         graph = WorkflowGraph(ast, self.bus)
@@ -157,7 +156,7 @@ class Orchestrator:
                     break
                 if iterations >= self.config.max_iterations:
                     raise RuntimeError(
-                        f"Maximale Iterationen ({self.config.max_iterations}) erreicht."
+                        f"Maximum iterations ({self.config.max_iterations}) reached."
                     )
 
                 goal = pending[0]
@@ -178,7 +177,7 @@ class Orchestrator:
                     self.state_manager.save(run_id, graph)
 
         except Exception as e:
-            logger.exception("Workflow-Fehler run_id=%s", run_id)
+            logger.exception("Workflow error run_id=%s", run_id)
             self.bus.publish(Event("run.failed", {"run_id": run_id, "error": str(e)}))
             return RunResult(
                 run_id=run_id, success=False, steps=steps, snapshot=graph.snapshot(), error=str(e)
@@ -196,7 +195,7 @@ class Orchestrator:
         )
 
     # ------------------------------------------------------------------
-    # Intern: Step-Ausführung
+    # Internal: step execution
     # ------------------------------------------------------------------
 
     def _execute_step(self, graph: WorkflowGraph, goal: GoalState, run_id: str) -> StepResult:
@@ -293,7 +292,7 @@ class Orchestrator:
         run_id: str,
     ) -> StepResult:
 
-        # Kontext als Tool-Input (vereinfacht: relevante Attribute)
+        # Context as tool input (simplified: all entity attributes)
         entity_data: dict = {}
         for name, e in graph.all_entities().items():
             entity_data[name] = {**e.attributes, "__predicates__": e.predicates}

@@ -157,6 +157,13 @@ def main():
             ],
         ),
         TestDomain(
+            name="MCP Client Integration",
+            description="Tests for MCPServerConfig/MCPTransport (config), MCPClientTool (client_tool), and MCPToolFactory (factory) — all offline using mocked MCP sessions",
+            test_files=[
+                "test_mcp.py",
+            ],
+        ),
+        TestDomain(
             name="Tool Output & Graph Passthrough",
             description="Tests that tool outputs are entity-keyed dicts, written into the WorkflowGraph, and forwarded to downstream tools via ToolRequest.input (WebSearchTool → AICodeGenTool / FileSaveTool pipeline contract)",
             test_files=[

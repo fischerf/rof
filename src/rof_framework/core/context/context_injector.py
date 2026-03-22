@@ -14,9 +14,9 @@ __all__ = [
 
 class ContextProvider(ABC):
     """
-    Erweiterungspunkt: Externe Kontext-Quellen (RAG, Templates, Skill-Docs).
+    Extension point: plug in external context sources (RAG, templates, skill docs).
 
-    Beispiel:
+    Example:
         class RAGContextProvider(ContextProvider):
             def provide(self, graph, goal, entities):
                 docs = self.retriever.query(goal.goal.goal_expr)
@@ -29,9 +29,9 @@ class ContextProvider(ABC):
 
 class ContextInjector:
     """
-    Assembliert den Kontext für einen einzelnen Orchestrator-Step.
+    Assembles the context for a single Orchestrator step.
 
-    Erweiterung: Eigene ContextProvider registrieren (z.B. für RAG).
+    Extension point: register custom ContextProviders (e.g. for RAG).
         injector.register_provider(MyRAGProvider())
     """
 
@@ -43,18 +43,18 @@ class ContextInjector:
 
     def build(self, graph: WorkflowGraph, goal: GoalState) -> str:
         """
-        Gibt den minimierten Kontext als RL-String zurück.
-        Nur Entities + Conditions, die für diesen Goal relevant sind.
+        Returns the minimised context as an RL string.
+        Only entities and conditions relevant to the current goal are included.
         """
         relevant_entities = self._find_relevant_entities(graph, goal)
         sections: list[str] = []
 
-        # 1. Definitionen relevanter Entitäten
+        # 1. Definitions of relevant entities
         for d in graph.ast.definitions:
             if d.entity in relevant_entities:
                 sections.append(f'define {d.entity} as "{d.description}".')
 
-        # 2. Attribute relevanter Entitäten (Laufzeit-State)
+        # 2. Attributes of relevant entities (runtime state)
         for name in relevant_entities:
             e = graph.entity(name)
             if e:
@@ -64,7 +64,7 @@ class ContextInjector:
                 for pred in e.predicates:
                     sections.append(f'{name} is "{pred}".')
 
-        # 3. Conditions, die relevante Entitäten betreffen
+        # 3. Conditions that involve relevant entities
         for c in graph.ast.conditions:
             if any(ent in c.condition_expr or ent in c.action for ent in relevant_entities):
                 sections.append(f"if {c.condition_expr}, then ensure {c.action}.")
@@ -88,8 +88,8 @@ class ContextInjector:
 
     def _find_relevant_entities(self, graph: WorkflowGraph, goal: GoalState) -> set[str]:
         """
-        Heuristik: Entitäten, die im Goal-Ausdruck oder in Conditions
-        zum Goal vorkommen, plus deren direkte Nachbarn über Relationen.
+        Heuristic: entities that appear in the goal expression or in conditions
+        related to the goal, plus their direct neighbours via relations.
         """
         goal_text = goal.goal.goal_expr
         relevant: set[str] = set()
@@ -104,7 +104,7 @@ class ContextInjector:
                     if name in c.condition_expr or name in c.action:
                         relevant.add(name)
 
-        # Wenn nichts gefunden: alle Entitäten (Fallback)
+        # Nothing matched: fall back to all entities
         if not relevant:
             relevant = set(graph.all_entities().keys())
 
