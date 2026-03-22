@@ -2,6 +2,24 @@
 
 ---
 
+## Module structure
+
+The demo is split into seven focused modules that live side-by-side in
+`demos/rof_ai_demo/`.  `rof_ai_demo.py` is the thin entry-point; every
+other concern lives in its own file.
+
+| Module | Responsibility |
+|--------|---------------|
+| `imports.py` | Bootstrap: `_try_import`, all `rof_framework` imports, `_HAS_TOOLS` / `_HAS_ROUTING` / `_HAS_MCP` flags |
+| `telemetry.py` | `_SessionStats`, `_STATS` singleton, `_StatsTracker`, `_CommsLogger`, `_attach_debug_hooks` |
+| `console.py` | ANSI colour helpers, `_box` / `_print_box`, `banner` / `section` / `step` / `warn` / `err` / `info`, headline bar |
+| `planner.py` | `_PLANNER_SYSTEM_BASE`, `_build_planner_system`, `_make_knowledge_hint`, `_make_mcp_hint`, `Planner` |
+| `session.py` | `ROFSession` — tool wiring, MCP registration, run loop, retry logic, RAG, routing memory, artifacts |
+| `wizard.py` | `_setup_wizard`, `_print_config_box`, provider defaults, GitHub Copilot + generic provider paths |
+| `rof_ai_demo.py` | REPL, `_print_help`, `_parse_args` (all CLI flags including MCP), `_build_mcp_configs`, `main()` |
+
+---
+
 ## Pipeline overview
 
 ```
@@ -12,12 +30,15 @@
           │  auto-retry on ParseError
           ▼
   Stage 2 — EXECUTION  (Orchestrator + tools)
-          │  keyword routing → AICodeGenTool (generate + save)
+          │  keyword routing → AICodeGenTool  (generate + save)
           │                  → CodeRunnerTool (run non-interactive scripts)
-          │                  → LLMPlayerTool (drive interactive programs)
+          │                  → LLMPlayerTool  (drive interactive programs via LLM)
+          │                  → LuaRunTool     (run Lua script — human drives it)
           │                  → WebSearchTool / RAGTool / APICallTool
-          │                  → FileReaderTool / ValidatorTool
-          │                  → HumanInLoopTool / LLM fallback
+          │                  → DatabaseTool / FileReaderTool / FileSaveTool
+          │                  → ValidatorTool / HumanInLoopTool
+          │                  → MCPClientTool  (any connected MCP server)
+          │                  → LLM fallback   (no-tool plain answer)
           ▼
   RunResult { success, steps, snapshot, run_id }
           │
@@ -65,6 +86,10 @@ python rof_ai_demo.py --provider openai --model gpt-4o --api-key sk-...
 # One-shot (non-interactive)
 python rof_ai_demo.py --provider ollama --model qwen2.5:7b \
     --one-shot "Create a small text adventure in Python and play it"
+
+# With an MCP filesystem server (stdio)
+python rof_ai_demo.py --provider github_copilot \
+    --mcp-stdio filesystem npx -y @modelcontextprotocol/server-filesystem /tmp
 ```
 
 ---
@@ -106,7 +131,7 @@ subsequent startup. You never need to manage it manually.
 
 ```sh
 # Both invocations read from and write to the same file
-python rof_ai_demo.py --provider ollama --routing-memory ~/rof_routing.json
+python rof_ai_demo.py --provider ollama  --routing-memory ~/rof_routing.json
 python rof_ai_demo.py --provider openai  --routing-memory ~/rof_routing.json
 ```
 
@@ -115,9 +140,9 @@ python rof_ai_demo.py --provider openai  --routing-memory ~/rof_routing.json
 Every routing decision is printed live:
 
 ```
-  [ROUTE]  AICodeGenTool  composite=0.821  tier=historical
-  [ROUTE]  LLMPlayerTool  composite=0.654  tier=session
-  [WARN ]  Uncertain routing: WebSearchTool  composite=0.412  (threshold=0.50)
+  ▸ ROUTE   AICodeGenTool  composite=0.821  tier=historical
+  ▸ ROUTE   LLMPlayerTool  composite=0.654  tier=session
+  ⚠ WARN    Uncertain routing: WebSearchTool  composite=0.412  (threshold=0.50)
 ```
 
 Routing trace entities are also written into the run snapshot JSON so
@@ -147,8 +172,6 @@ for each FAILED step (original order):
   │      Extract capitalised entity names from the failed goal expression
   │      (e.g. SearchResult, KnowledgeDoc).  If any appear in a later
   │      goal, that later goal is SKIPPED — its required input is missing.
-  │      This is the proof that follow-up tools only run when their
-  │      dependencies succeeded.
   │
   ├─ 2. Retry loop (up to --step-retries times) ──────────────────────
   │      Re-run the single failed goal as a minimal one-goal workflow.
@@ -157,7 +180,7 @@ for each FAILED step (original order):
   │
   └─ 3. LLM fallback (unless --no-llm-fallback) ──────────────────────
          Strip all tool trigger keywords from the goal expression so
-         _route_tool() returns None and the LLM handles it directly.
+         the router returns None and the LLM handles it directly.
          Inject failed_goal + tool_error as a FallbackContext entity
          so the LLM sees what was attempted and why it failed.
          The fallback .rl source is printed so nothing is hidden.
@@ -193,23 +216,23 @@ so the model knows what was tried and why it failed before answering.
 ### Live output during recovery
 
 ```
-  [WARN ]  1 step(s) failed — starting retry loop (max 1 retry/step, llm_fallback=True)
-  [WARN ]  Retry 1/1: 'retrieve web_information about latest AI news'
-  [ ERR ]  Retry 1 failed: Connection refused
-  [WARN ]  All retries exhausted for 'retrieve web_information...' — trying LLM fallback
-  [STEP ]  FALLBK  LLM fallback: 'retrieve web_information about ...'
+  ⚠ WARN    1 step(s) failed — starting retry loop (max 1 retry/step, llm_fallback=True)
+  ⚠ WARN    Retry 1/1: 'retrieve web_information about latest AI news'
+  ✗ ERR     Retry 1 failed: Connection refused
+  ⚠ WARN    All retries exhausted for 'retrieve web_information...' — trying LLM fallback
+  ▸ FALLBK  LLM fallback: 'retrieve web_information about ...'
     define FallbackContext as "LLM fallback after tool failure".
     FallbackContext has failed_goal of "...".
     FallbackContext has tool_error of "Connection refused".
     ensure  about latest AI news.
-  [STEP ]  FALLBK  LLM fallback succeeded for 'retrieve web_information about ...'
+  ▸ FALLBK  LLM fallback succeeded for 'retrieve web_information about ...'
 ```
 
 If a later goal was blocked by the dependency guard:
 
 ```
-  [WARN ]  Skipping 'generate python code for writing SearchResult to csv'
-           — depends on failed goal 'retrieve web_information about SearchResult'
+  ⚠ WARN    Skipping 'generate python code for writing SearchResult to csv'
+             — depends on failed goal 'retrieve web_information about SearchResult'
 ```
 
 ### CLI flags
@@ -237,6 +260,152 @@ python rof_ai_demo.py --provider ollama --step-retries 0 --no-llm-fallback
 
 ---
 
+## MCP tool integration
+
+Model Context Protocol (MCP) support lets you connect any MCP-compatible
+tool server — a local subprocess or a remote HTTP endpoint — so it becomes
+a first-class ROF tool.  No adapter code is required: the server's
+`tools/list` response is used to auto-discover tool names and generate
+routing keywords, which are also injected into the planner's system prompt
+so the LLM knows how to route goals to the MCP server.
+
+Requires `pip install mcp>=1.0` (or `pip install "rof[mcp]"`).  The demo
+degrades gracefully when the package is absent — all other tools continue
+to work normally.
+
+### How it works
+
+1. `--mcp-stdio` / `--mcp-http` flags build `MCPServerConfig` objects.
+2. `ROFSession.__init__` calls `_register_mcp_tools()`, which uses
+   `MCPToolFactory` to build one `MCPClientTool` per config.
+3. Each `MCPClientTool` is appended to `self._tools` alongside all
+   built-in tools.
+4. Discovered trigger keywords are fed into `_make_mcp_hint()` in
+   `planner.py`, which appends a `## MCP Servers` block to the planner
+   system prompt so the LLM routes goals correctly.
+5. At REPL exit (or after a one-shot run) `session.close_mcp()` cleanly
+   terminates all subprocess / HTTP sessions.
+
+### Adding a stdio server (local subprocess)
+
+```sh
+# Filesystem server via npx (auto-downloaded on first run)
+python rof_ai_demo.py --provider github_copilot \
+    --mcp-stdio filesystem \
+        npx -y @modelcontextprotocol/server-filesystem /tmp
+
+# Multiple stdio servers
+python rof_ai_demo.py --provider github_copilot \
+    --mcp-stdio filesystem npx -y @modelcontextprotocol/server-filesystem /tmp \
+    --mcp-stdio git-server uvx mcp-server-git --repository /path/to/repo
+```
+
+The format for `--mcp-stdio` is:
+
+```
+--mcp-stdio  NAME  CMD  [ARG ...]
+```
+
+`NAME` is a unique identifier used in log output and the planner prompt.
+`CMD` and the optional `ARG` tokens are passed verbatim to `subprocess.Popen`.
+
+### Adding an HTTP server (remote)
+
+```sh
+# Sentry MCP server with bearer auth
+python rof_ai_demo.py --provider github_copilot \
+    --mcp-http sentry https://mcp.sentry.io/mcp \
+    --mcp-token sntrys_...
+
+# Multiple HTTP servers (token is applied to all of them)
+python rof_ai_demo.py --provider github_copilot \
+    --mcp-http sentry  https://mcp.sentry.io/mcp \
+    --mcp-http metrics https://metrics.corp.internal/mcp \
+    --mcp-token corp-internal-token
+```
+
+The format for `--mcp-http` is:
+
+```
+--mcp-http  NAME  URL
+```
+
+### Eager connection
+
+By default MCP sessions open lazily on the first `execute()` call.  Pass
+`--mcp-eager` to connect all servers at startup and surface any
+misconfiguration errors before the first prompt:
+
+```sh
+python rof_ai_demo.py --provider github_copilot \
+    --mcp-stdio filesystem npx -y @modelcontextprotocol/server-filesystem /tmp \
+    --mcp-eager
+```
+
+### Custom trigger keywords
+
+By default, trigger keywords are auto-discovered from the server's
+`tools/list` response.  Override them with `--mcp-keywords` (applied to
+all configured MCP servers):
+
+```sh
+python rof_ai_demo.py --provider github_copilot \
+    --mcp-stdio filesystem npx -y @modelcontextprotocol/server-filesystem /tmp \
+    --mcp-keywords "read file" "list directory" "write file"
+```
+
+### Startup output
+
+```
+  ℹ       MCP stdio server queued: filesystem  cmd='npx'  args=['-y', '...', '/tmp']
+  ℹ       MCP tool registered: MCPClientTool[filesystem]  (3 trigger keyword(s))
+  ℹ       MCP: 1 server(s) connected (lazy connect)
+  ℹ       MCP servers   : 1 configured
+```
+
+### Run summary
+
+When MCP servers are active, the run summary includes an extra row:
+
+```
+  MCP         1 server(s) connected
+```
+
+### Programmatic usage
+
+For full lifecycle control you can construct `MCPServerConfig` objects
+directly and pass them to `ROFSession`:
+
+```python
+from rof_framework.tools.tools.mcp import MCPServerConfig
+from session import ROFSession
+
+configs = [
+    MCPServerConfig.stdio(
+        name="filesystem",
+        command="npx",
+        args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+        trigger_keywords=["read file", "list directory"],
+    ),
+    MCPServerConfig.http(
+        name="sentry",
+        url="https://mcp.sentry.io/mcp",
+        auth_bearer="sntrys_...",
+        trigger_keywords=["sentry error", "exception tracking"],
+    ),
+]
+
+with ROFSession(llm=llm, output_dir=output_dir,
+                mcp_server_configs=configs,
+                mcp_eager_connect=True) as session:
+    session.run("List the files in /tmp")
+```
+
+The context-manager form (`with` statement) calls `session.close_mcp()`
+automatically on exit.
+
+---
+
 ## Knowledge base
 
 ### How it works
@@ -260,7 +429,7 @@ LLM can use them.
 |------|---------|-------------|
 | `--rag-backend in_memory\|chromadb` | `in_memory` | Vector store backend |
 | `--rag-persist-dir PATH` | `<output-dir>/chroma_store` | ChromaDB storage directory (only used with `--rag-backend chromadb`) |
-| `--knowledge-dir PATH` | — | Directory of documents to pre-load at startup. Files with extensions `.txt`, `.md`, `.rst`, `.html`, `.json`, `.csv` are scanned recursively and ingested via `add_documents()`. |
+| `--knowledge-dir PATH` | — | Directory of documents to pre-load at startup. Extensions `.txt`, `.md`, `.rst`, `.html`, `.json`, `.csv` are scanned recursively. |
 
 ### Seeding the knowledge base
 
@@ -330,9 +499,9 @@ Search the knowledge base for error handling guidelines
 When the session starts you will see a line confirming the active backend:
 
 ```
-  [INFO]  RAG backend   : in_memory
-  [INFO]  RAG backend   : chromadb  →  ./knowledge_store
-  [INFO]  Knowledge loaded: 42 document(s) from ./my_docs  (backend=chromadb)
+  ℹ       RAG backend   : in_memory
+  ℹ       RAG backend   : chromadb  →  ./knowledge_store
+  ℹ       Knowledge loaded: 42 document(s) from ./my_docs  (backend=chromadb)
 ```
 
 ---
@@ -352,13 +521,18 @@ python rof_ai_demo.py --provider github_copilot
 | `routing` | Print learned routing memory summary and persistence path |
 | `save routing` | Flush routing memory to disk immediately (without exiting) |
 | `knowledge` | Print RAGTool backend, document count, and persist path |
+| `mcp` | List all connected MCP servers and their trigger keywords |
+| `tools` | List every registered tool (built-in + MCP + generated) and its trigger keywords |
 | `verbose` | Toggle verbose / debug logging on and off |
 | `clear` | Clear the terminal screen |
-| `quit` / `exit` | Exit — routing memory is auto-saved before goodbye |
+| `quit` / `exit` | Exit — routing memory and MCP sessions are cleaned up automatically |
 
-> **Auto-save:** the routing memory is always saved automatically when you
-> `quit` the REPL or when a `--one-shot` run finishes (including on error).
-> The `save routing` command is only needed if you want to checkpoint mid-session.
+> **Auto-save:** routing memory is always saved automatically when you `quit`
+> the REPL or when a `--one-shot` run finishes (including on error).  The
+> `save routing` command is only needed if you want to checkpoint mid-session.
+
+> **MCP shutdown:** all MCP subprocess / HTTP sessions are closed cleanly on
+> exit whether you type `quit`, hit Ctrl-C, or use `--one-shot`.
 
 > **Knowledge persistence:** when `--rag-backend chromadb` is used, ChromaDB
 > manages its own disk writes — there is no separate save step.  The `knowledge`
@@ -372,7 +546,7 @@ python rof_ai_demo.py --provider github_copilot
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--provider NAME` | — | LLM provider: `anthropic`, `openai`, `ollama`, `github_copilot`, or any generic provider from `rof_providers.PROVIDER_REGISTRY` |
+| `--provider NAME` | — | LLM provider: `anthropic`, `openai`, `ollama`, `github_copilot`, or any generic provider from `rof_providers.PROVIDER_REGISTRY`. Omit to see a full interactive menu. |
 | `--model NAME` | — | Model name, e.g. `claude-opus-4-5`, `gpt-4o`, `qwen2.5:7b` |
 | `--api-key KEY` | env var | API key for Anthropic / OpenAI |
 | `--base-url URL` | — | Base URL for Ollama / vLLM |
@@ -398,6 +572,16 @@ python rof_ai_demo.py --provider github_copilot
 | `auto` | Uses `json` if the provider supports structured output, otherwise `rl`. Safe default. |
 | `json` | Enforce the `rof_graph_update` JSON schema. Works with OpenAI, Anthropic, Gemini, and Ollama (≥ 0.4, grammar-sampled). |
 | `rl` | Plain RelateLang text. Legacy / fallback mode. Use when targeting very old APIs or models that ignore schema constraints. |
+
+### MCP options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--mcp-stdio NAME CMD [ARG ...]` | — | Add a local stdio MCP server. `NAME` is a unique identifier; `CMD` and optional `ARG` tokens are the subprocess command. May be repeated for multiple servers. |
+| `--mcp-http NAME URL` | — | Add a remote HTTP MCP server. `NAME` is a unique identifier; `URL` is the base endpoint. May be repeated for multiple servers. |
+| `--mcp-token TOKEN` | — | Bearer token applied to all HTTP MCP servers. Typically a Sentry DSN, GitHub PAT, or similar credential. |
+| `--mcp-eager` | off | Eagerly open all MCP sessions and run `tools/list` discovery at startup. Surfaces misconfiguration errors before the first prompt. |
+| `--mcp-keywords KW [KW ...]` | auto-discovered | Static trigger keywords forwarded to all MCP servers. When omitted, keywords are auto-discovered from each server's `tools/list` response. |
 
 ### GitHub Copilot options
 
@@ -433,7 +617,7 @@ env var as shown in its documentation.
 
 ## Output artifacts
 
-Every successful run writes files into `--output-dir` (default `./rof_output`):
+Every run writes files into `--output-dir` (default `./rof_output`):
 
 | File | Description |
 |------|-------------|
@@ -519,16 +703,8 @@ Even though `ddgs` is installed, the tool appears broken.  There are two fixes:
 `DDGS(verify=…)`:
 
 ```python
-# web_search.py — constructor default
+# verify=False is the default in web_search.py — no code change needed
 WebSearchTool(verify=False)
-```
-
-`verify=False` is already the **default** in `web_search.py` so no code change
-is needed.  If you have overridden this or are constructing the tool explicitly,
-pass `verify=False`:
-
-```python
-tool = WebSearchTool(verify=False)
 ```
 
 ### Option B — supply your corporate CA bundle (recommended for production)
@@ -600,6 +776,10 @@ Create a small questionnaire for CLI in Lua, run it with the LLM player
 
 # Web search
 Search the web for the latest news about RelateLang
+
+# MCP (requires --mcp-stdio or --mcp-http at startup)
+List the files in /tmp using the filesystem MCP server
+Read the contents of /tmp/hello.txt
 ```
 
 ### How AICodeGenTool + execution tools work together
@@ -610,7 +790,8 @@ it.  Every code workflow therefore needs a second goal that executes the file:
 | Program type | Execution tool | Example second goal |
 |---|---|---|
 | Non-interactive (pure output) | `CodeRunnerTool` | `ensure run python code.` |
-| Interactive (reads user input) | `LLMPlayerTool` | `ensure play game with llm player and record choices.` |
+| Interactive — LLM plays it | `LLMPlayerTool` | `ensure play game with llm player and record choices.` |
+| Interactive — human plays it | `LuaRunTool` | `ensure run lua script.` |
 
 The planner is instructed to always emit both goals automatically.  If you
 write prompts by hand, follow the same pattern:
@@ -620,10 +801,18 @@ write prompts by hand, follow the same pattern:
 ensure generate python code for computing the first 15 Fibonacci numbers.
 ensure run python code.
 
-# Interactive
+# Interactive — LLM driven
 ensure generate python code for a small text adventure game.
 ensure play game with llm player and record choices.
+
+# Interactive — human driven (Lua)
+ensure generate lua code for an interactive CLI questionnaire.
+ensure run lua script.
 ```
+
+> **Do not pair `LLMPlayerTool` and `CodeRunnerTool` for the same script.**
+> `LLMPlayerTool` executes the script itself through a piped subprocess —
+> `CodeRunnerTool` would run it a second time.  Choose one per generated file.
 
 ---
 
@@ -641,25 +830,20 @@ pip install ddgs httpx         # enables WebSearchTool and APICallTool
                                # see "Web search & corporate SSL" above
 pip install lupa               # Lua execution in-process (fallback: lua binary)
 
+# MCP tool integration
+pip install mcp>=1.0           # MCP client — connects any MCP-compatible server
+# or via rof extras:
+pip install "rof[mcp]"
+
 # Optional routing
 # rof_routing ships with rof_framework — no separate install needed
 # when rof_framework is installed from source
 
 # Optional providers
-pip install rof-providers      # optional generic providers (e.g. rof_providers.PROVIDER_REGISTRY)
+pip install rof-providers      # additional generic providers (rof_providers.PROVIDER_REGISTRY)
 
 # Knowledge base (ChromaDB persistent backend)
 pip install chromadb sentence-transformers   # persistent vector store + real embeddings
 # sentence-transformers downloads a ~90 MB model on first run
 # Silence a pynvml FutureWarning with: pip install nvidia-ml-py
-```
-
-If importing from source with dash-named files, rename them so Python can
-import them:
-
-```sh
-rof-core.py   →  rof_core.py
-rof-llm.py    →  rof_llm.py
-rof-tools.py  →  rof_tools.py
-rof-routing.py → rof_routing.py
 ```
