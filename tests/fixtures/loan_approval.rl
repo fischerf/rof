@@ -27,6 +27,6 @@ if CreditProfile has score > 700 and debt_to_income < 0.4,
 if Applicant is creditworthy and LoanRequest has amount < 50000,
     then ensure LoanRequest is eligible.
 
-ensure assess Applicant creditworthiness.
-ensure determine ApprovalDecision outcome.
-ensure calculate LoanRequest monthly_payment.
+ensure return a creditworthiness decision for Applicant as "creditworthy" or "not_creditworthy".
+ensure return a decision for ApprovalDecision as "approved" or "rejected".
+ensure produce a monthly_payment calculation for LoanRequest.

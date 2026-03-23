@@ -12,5 +12,5 @@ Customer has support_tickets of 2.
 if Customer has total_purchases > 10000 and account_age_days > 365,
     then ensure Customer is HighValue.
 
-ensure determine Customer segment.
-ensure recommend Customer support tier.
+ensure classify Customer as "high_value" or "standard".
+ensure generate a natural language support_tier_recommendation for Customer.

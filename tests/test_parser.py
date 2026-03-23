@@ -185,28 +185,28 @@ class TestConditionParser:
 
 class TestGoalParser:
     def test_basic_goal(self):
-        ast = parse("ensure determine Customer segment.")
+        ast = parse('ensure classify Customer as "high_value" or "standard".')
         g = ast.goals[0]
-        assert g.goal_expr == "determine Customer segment"
+        assert g.goal_expr == 'classify Customer as "high_value" or "standard"'
 
     def test_multiple_goals(self):
         src = """
-        ensure determine Customer segment.
-        ensure recommend Customer support tier.
-        ensure calculate Order discount.
+        ensure classify Customer as "high_value" or "standard".
+        ensure generate a natural language support_tier_recommendation for Customer.
+        ensure produce a discount_summary for Order.
         """
         ast = parse(src)
         assert len(ast.goals) == 3
 
     def test_goal_line_number(self):
-        src = 'define X as "e".\nensure check X status.'
+        src = 'define X as "e".\nensure classify X as "active" or "inactive".'
         ast = parse(src)
         assert ast.goals[0].source_line == 2
 
     def test_ensure_is_not_definition(self):
         src = """
         define Customer as "buyer".
-        ensure determine Customer status.
+        ensure classify Customer as "active" or "inactive".
         """
         ast = parse(src)
         assert len(ast.definitions) == 1
@@ -241,7 +241,7 @@ class TestTokenizer:
     def test_comment_stripped(self):
         src = """
         define Foo as "bar". // This is a comment
-        ensure check Foo status. // another comment
+        ensure classify Foo as "valid" or "invalid". // another comment
         """
         ast = parse(src)
         assert len(ast.definitions) == 1
@@ -258,7 +258,7 @@ class TestTokenizer:
 
     def test_trailing_incomplete_raises(self):
         with pytest.raises(ParseError, match="Incomplete statement"):
-            parse('define Foo as "bar"')  # no trailing period
+            parse('define Foo as "bar"')  # no trailing period — E001
 
 
 # ─── Full fixture files ────────────────────────────────────────────────────────
@@ -271,6 +271,10 @@ class TestFixtureFiles:
         assert len(ast.goals) >= 1
         entities = ast.all_entities()
         assert "Customer" in entities
+        # Goals must use §2.7-compliant output-contract verbs
+        goal_exprs = [g.goal_expr for g in ast.goals]
+        assert any("classify" in g for g in goal_exprs), "Expected 'classify' goal verb per §2.7.3"
+        assert any("generate" in g for g in goal_exprs), "Expected 'generate' goal verb per §2.7.3"
 
     def test_loan_approval_parses(self):
         ast = parse_file("loan_approval.rl")
@@ -278,11 +282,16 @@ class TestFixtureFiles:
         assert len(ast.goals) == 3
         assert len(ast.conditions) == 2
         assert len(ast.relations) == 2
+        # Goals must use §2.7-compliant output-contract verbs
+        goal_exprs = [g.goal_expr for g in ast.goals]
+        assert any("return" in g for g in goal_exprs), "Expected 'return' goal verb per §2.7.3"
+        assert any("produce" in g for g in goal_exprs), "Expected 'produce' goal verb per §2.7.3"
 
     def test_no_goals_parses_without_error(self):
         ast = parse_file("no_goals.rl")
         assert len(ast.goals) == 0
         assert len(ast.definitions) >= 1
+        # no_goals.rl is intentionally goal-free (triggers W001 in linter)
 
 
 # ─── WorkflowAST helpers ──────────────────────────────────────────────────────

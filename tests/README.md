@@ -74,13 +74,35 @@ Tests are organized by domain:
 - Tests `@rof_tool` decorator and `FunctionTool`
 - Tests `create_default_registry` and registry+router integration
 
-### 9. **Pipeline** (`tests/test_pipeline_runner.py`)
+### 9. **MCP Client Integration** (`tests/test_mcp.py`) — **121 tests, fully offline**
+- Tests `MCPTransport` enum values and string-subclass behaviour
+- Tests `MCPServerConfig` construction-time validation (empty name, missing `command`/`url`)
+- Tests `MCPServerConfig.stdio()` and `MCPServerConfig.http()` factory classmethods and all keyword arguments
+- Tests `effective_headers()` — bearer-token merging, arbitrary headers, no mutation of caller's dict
+- Tests `_extract_keywords_from_tool` helper — name-to-space conversion, namespace prefix, description word cap, hyphen handling
+- Tests `_content_to_text` helper — all six MCP content-block types (`text`, `image`, `resource`+text, `resource`+uri, unknown, mixed)
+- Tests `MCPClientTool` construction — `ImportError` with install hint when `mcp` is absent, initial disconnected state
+- Tests `MCPClientTool` `ToolProvider` interface — `.name`, `.trigger_keywords`, `.mcp_tools` (returns copy), `__repr__`
+- Tests `MCPClientTool` context-manager (`__enter__` / `__exit__`) and `close()` idempotency
+- Tests `_resolve_mcp_tool_name` — all five resolution tiers (namespaced exact, unqualified exact, substring on goal, keyword-overlap, last-resort first tool)
+- Tests `_extract_arguments` — plain dict pass-through, `__mcp_args__` escape hatch, entity-snapshot flattening, multi-entity merge
+- Tests `execute()` end-to-end via injected mock async session — success path, output metadata, MCP-level error, session exception, unresolvable tool, JSON serialisation, argument forwarding, timeout
+- Tests lazy-connect: verifies `_async_connect` is called on the first `execute()` when not yet connected
+- Tests `MCPToolFactory.build()` and `build_and_register()` — correct count, type, duplicate handling, `force=` flag
+- Tests `MCPToolFactory` eager-connect path and failure-tolerance (failed connect doesn't block registration)
+- Tests `MCPToolFactory.close_all()` — calls `close()` on each tool, empties list, tolerates errors in individual closes
+- Tests `MCPToolFactory` `ImportError` propagation (missing `mcp` package is not swallowed)
+- Integration tests: `MCPClientTool` in a real `ToolRegistry` + `ToolRouter` — registration by name, keyword lookup, router routing to correct tool, execute through registry, factory tools visible in registry
+
+No external MCP server, subprocess, or network access is required — all transport activity is intercepted with `unittest.mock`.
+
+### 10. **Pipeline** (`tests/test_pipeline_runner.py`)
 - Tests multi-stage pipeline orchestration
 - Tests PipelineBuilder fluent API
 - Tests failure handling strategies (HALT, CONTINUE, RETRY)
 - Tests snapshot accumulation and merging
 
-### 10. **Routing** (`tests/test_routing.py`)
+### 11. **Routing** (`tests/test_routing.py`)
 - Tests `GoalPatternNormalizer` – entity/number/stopword stripping, stable pattern keys
 - Tests `RoutingStats` – update logic, EMA confidence, reliability, serialisation
 - Tests `RoutingMemory` – CRUD, persistence via `StateAdapter`, merge-on-load semantics
@@ -394,6 +416,7 @@ For extended documentation on the built-in provider live tests, see `tests/LIVE_
 - `pyyaml` — pipeline tests
 - `sentence-transformers` — embedding-based routing tests
 - `rof-providers` — generic provider tests (`test_generic_providers.py`)
+- `mcp>=1.0` — only needed to run the tool against a **real** MCP server; all 121 unit tests in `test_mcp.py` mock the `mcp` package and work without it
 - `nvidia-ml-py` — silences a PyTorch `FutureWarning` about deprecated `pynvml`
   that surfaces when running routing tests with `sentence-transformers` installed:
   ```cmd
@@ -528,6 +551,7 @@ ROF_TEST_PROVIDER=my_provider ROF_TEST_API_KEY=<key> \
 | `rof_pipeline` | ~65% | > 75% |
 | `rof_routing` | varies | > 80% (sections without optional deps skip gracefully) |
 | `rof_providers` | varies | > 80% (covered by `test_generic_providers.py`) |
+| `rof_framework.tools.tools.mcp` | **121 tests** ✓ | > 90% (all paths exercised offline) |
 
 ---
 
@@ -619,9 +643,12 @@ When contributing new tests:
 2. Add tests to the appropriate domain file or create a new one.
 3. If you are adding a new generic provider to `rof_providers`, verify it passes
    `pytest tests/test_generic_providers.py -v` before opening a PR — no other test files need changing.
-4. Update this README if adding a new test domain.
-5. Run the full suite (`python -m pytest` from the project root) before submitting a PR.
-6. Aim for meaningful assertions, not just "doesn't crash".
+4. If you are extending the MCP integration (new transport type, new resolution tier, etc.), add
+   corresponding tests to `tests/test_mcp.py`. Use `_make_mcp_client_tool` and `_inject_mock_session`
+   helpers to keep tests offline — no real MCP server should ever be required for unit tests.
+5. Update this README if adding a new test domain.
+6. Run the full suite (`python -m pytest` from the project root) before submitting a PR.
+7. Aim for meaningful assertions, not just "doesn't crash".
 
 ---
 

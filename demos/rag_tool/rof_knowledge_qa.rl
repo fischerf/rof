@@ -114,10 +114,16 @@ relate Developer and OnboardingGuide as "benefits from".
 
 // ── Goals ─────────────────────────────────────────────────────────────────────
 // Each goal triggers RAGTool via "retrieve information about … from the knowledge base".
+//
+// Goal verb note (§2.7.3):
+//   "retrieve information about" is a tool-trigger phrase (RAGTool keyword);
+//   the output modality is implicitly natural language / structured knowledge.
+//   "produce … summary_sections" and "produce … next_learning_steps" use the
+//   recommended verb "produce" with an explicit output entity per §2.7.1.
 
 ensure retrieve information about ToolRouter routing strategy from the knowledge base.
 ensure retrieve information about RAGTool backends and vector store options from the knowledge base.
 ensure retrieve information about pipeline definition and multi-stage orchestration from the knowledge base.
 ensure retrieve information about RelateLang syntax entities attributes conditions and goals from the knowledge base.
-ensure determine OnboardingGuide summary_sections.
-ensure recommend Developer next_learning_steps.
+ensure produce OnboardingGuide summary_sections based on all retrieved answers.
+ensure produce next_learning_steps for Developer based on OnboardingGuide.

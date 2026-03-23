@@ -28,10 +28,10 @@ test "Premium customer is classified as HighValue"
     given Customer has support_tickets of 2.
 
     // One response per goal in the workflow.
-    // Goal 1: "determine Customer segment"
-    respond with 'Customer has segment of "HighValue".'
-    // Goal 2: "recommend Customer support tier"
-    respond with 'Customer has tier of "gold".'
+    // Goal 1: "classify Customer as "high_value" or "standard""
+    respond with 'Customer has segment of "high_value".'
+    // Goal 2: "generate a natural language support_tier_recommendation for Customer"
+    respond with 'Customer has support_tier_recommendation of "gold support tier with dedicated account manager".'
 
     // ── Entity-level assertions ──────────────────────────────────────────
     expect entity "Customer" exists.
@@ -45,8 +45,8 @@ test "Premium customer is classified as HighValue"
     expect Customer is not "Standard".
 
     // ── Attribute assertions ─────────────────────────────────────────────
-    expect attribute Customer.segment equals "HighValue".
-    expect attribute Customer.tier equals "gold".
+    expect attribute Customer.segment equals "high_value".
+    expect attribute Customer.support_tier_recommendation exists.
     expect attribute Customer.total_purchases exists.
     expect attribute Customer.total_purchases == 15000.
     expect attribute Customer.total_purchases > 10000.
@@ -68,12 +68,12 @@ test "Standard customer stays below HighValue threshold"
     given Customer has support_tickets of 1.
 
     // Neither goal-condition fires, so the LLM decides the segment.
-    respond with 'Customer has segment of "Standard".'
-    respond with 'Customer has tier of "basic".'
+    respond with 'Customer has segment of "standard".'
+    respond with 'Customer has support_tier_recommendation of "basic support tier with self-service portal".'
 
     expect Customer is not "HighValue".
-    expect attribute Customer.segment equals "Standard".
-    expect attribute Customer.tier equals "basic".
+    expect attribute Customer.segment equals "standard".
+    expect attribute Customer.support_tier_recommendation exists.
     expect attribute Customer.total_purchases < 10000.
     expect attribute Customer.total_purchases <= 500.
     expect run succeeds.
@@ -89,12 +89,12 @@ test "Boundary customer at exact threshold is not HighValue"
     given Customer has total_purchases of 10000.
     given Customer has account_age_days of 365.
 
-    respond with 'Customer has segment of "Standard".'
-    respond with 'Customer has tier of "basic".'
+    respond with 'Customer has segment of "standard".'
+    respond with 'Customer has support_tier_recommendation of "basic support tier".'
 
     // Condition requires > 10000 AND > 365, so 10000/365 does not qualify.
     expect Customer is not "HighValue".
-    expect attribute Customer.segment equals "Standard".
+    expect attribute Customer.segment equals "standard".
     expect attribute Customer.total_purchases == 10000.
     expect attribute Customer.account_age_days == 365.
     expect run succeeds.
@@ -109,12 +109,12 @@ test "Goals are recorded in snapshot after run"
     given Customer has total_purchases of 15000.
     given Customer has account_age_days of 400.
 
-    respond with 'Customer has segment of "HighValue".'
-    respond with 'Customer has tier of "gold".'
+    respond with 'Customer has segment of "high_value".'
+    respond with 'Customer has support_tier_recommendation of "gold support tier".'
 
-    expect goal "determine Customer segment" is achieved.
-    expect goal "recommend Customer support tier" is achieved.
-    expect goal "determine Customer segment" exists.
+    expect goal "classify Customer as \"high_value\" or \"standard\"" is achieved.
+    expect goal "generate a natural language support_tier_recommendation for Customer" is achieved.
+    expect goal "classify Customer as \"high_value\" or \"standard\"" exists.
     expect run succeeds.
 end
 
@@ -128,15 +128,16 @@ test "Numeric attribute comparisons pass for high-value customer"
     given Customer has account_age_days of 730.
     given Customer has support_tickets of 0.
 
-    respond with 'Customer has segment of "HighValue".'
-    respond with 'Customer has tier of "platinum".'
+    respond with 'Customer has segment of "high_value".'
+    respond with 'Customer has support_tier_recommendation of "platinum support tier with SLA".'
 
     expect attribute Customer.total_purchases > 20000.
     expect attribute Customer.total_purchases >= 25000.
     expect attribute Customer.total_purchases != 0.
     expect attribute Customer.account_age_days > 365.
     expect attribute Customer.account_age_days < 1000.
-    expect attribute Customer.tier equals "platinum".
+    expect attribute Customer.segment equals "high_value".
+    expect attribute Customer.support_tier_recommendation exists.
     expect run succeeds.
 end
 
@@ -150,15 +151,15 @@ test "Inline workflow: entity definition and attribute goal"
         define Product as "An item for sale".
         Product has price of 99.
         Product has stock of 10.
-        ensure determine Product availability.
+        ensure classify Product as "available" or "out_of_stock".
     end
 
-    respond with 'Product has availability of "in_stock".'
+    respond with 'Product has availability of "available".'
 
     expect entity "Product" exists.
     expect attribute Product.price equals 99.
     expect attribute Product.stock == 10.
-    expect attribute Product.availability equals "in_stock".
+    expect attribute Product.availability equals "available".
     expect run succeeds.
 end
 
@@ -177,13 +178,13 @@ test "JSON-mode response is parsed correctly"
         define HighValue as "Premium customer segment".
         if Customer has total_purchases > 10000 and account_age_days > 365,
             then ensure Customer is HighValue.
-        ensure determine Customer segment.
+        ensure classify Customer as "high_value" or "standard".
     end
 
-    respond with json '{"attributes": [{"entity": "Customer", "name": "segment", "value": "HighValue"}], "predicates": [{"entity": "Customer", "value": "HighValue"}], "reasoning": "purchases above threshold"}'
+    respond with json '{"attributes": [{"entity": "Customer", "name": "segment", "value": "high_value"}], "predicates": [{"entity": "Customer", "value": "HighValue"}], "reasoning": "purchases above threshold"}'
 
     expect Customer is "HighValue".
-    expect attribute Customer.segment equals "HighValue".
+    expect attribute Customer.segment equals "high_value".
     expect run succeeds.
 end
 
@@ -211,8 +212,8 @@ test "Smoke: basic workflow parses and runs"
     given Customer has total_purchases of 15000.
     given Customer has account_age_days of 400.
 
-    respond with 'Customer has segment of "HighValue".'
-    respond with 'Customer has tier of "gold".'
+    respond with 'Customer has segment of "high_value".'
+    respond with 'Customer has support_tier_recommendation of "gold support tier".'
 
     expect run succeeds.
     expect entity "Customer" exists.
@@ -225,8 +226,8 @@ test "Smoke: standard path runs without error"
     given Customer has total_purchases of 100.
     given Customer has account_age_days of 30.
 
-    respond with 'Customer has segment of "Standard".'
-    respond with 'Customer has tier of "basic".'
+    respond with 'Customer has segment of "standard".'
+    respond with 'Customer has support_tier_recommendation of "basic support tier".'
 
     expect run succeeds.
     expect entity "Customer" exists.

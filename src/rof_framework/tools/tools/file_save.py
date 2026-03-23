@@ -5,8 +5,25 @@ FileSaveTool – write / append files to disk.
 
 from __future__ import annotations
 
-import copy, csv, hashlib, io, json, logging, math, os, queue, re, shlex, shutil
-import subprocess, sys, tempfile, textwrap, threading, time, uuid
+import copy
+import csv
+import hashlib
+import io
+import json
+import logging
+import math
+import os
+import queue
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
+import threading
+import time
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -76,23 +93,59 @@ class FileSaveTool(ToolProvider):
 
     def execute(self, request: ToolRequest) -> ToolResponse:
         # ── 1. Extract attributes from any matching snapshot entity ───────
+        #
+        # Search order:
+        #   a) Any entity that already has a "content" key  (explicit, highest priority)
+        #   b) MCPResult entity — use "result" or "content" as the text body
+        #   c) Any entity with a non-empty string value as a last resort
+        #
+        # "file_path" is collected from any entity that declares it, so it can
+        # live on a separate entity (e.g. Result has file_path of "issue.md").
+
+        entity_map: dict = {
+            k: v for k, v in request.input.items() if isinstance(v, dict) and not k.startswith("__")
+        }
+
+        # Pass a: explicit "content" attribute wins immediately.
         attrs: dict = {}
-        for entity_data in request.input.values():
-            if isinstance(entity_data, dict) and "content" in entity_data:
+        for entity_data in entity_map.values():
+            if "content" in entity_data:
                 attrs = {k: v for k, v in entity_data.items() if not k.startswith("__")}
                 break
+
+        # Pass b: look for an MCPResult entity and use its result/content text.
+        if not attrs.get("content") and "MCPResult" in entity_map:
+            mcp = entity_map["MCPResult"]
+            mcp_text = mcp.get("content") or mcp.get("result") or ""
+            if mcp_text:
+                attrs = dict(attrs)  # don't clobber other attrs we may have collected
+                attrs["content"] = str(mcp_text)
+
+        # Pass c: merge file_path from any entity that declares it (e.g. Result).
+        # Also pick up encoding if declared anywhere.
+        file_path_fallback: str = ""
+        encoding_fallback: str = ""
+        for entity_data in entity_map.values():
+            if not file_path_fallback and entity_data.get("file_path"):
+                file_path_fallback = str(entity_data["file_path"])
+            if not encoding_fallback and entity_data.get("encoding"):
+                encoding_fallback = str(entity_data["encoding"])
 
         content: str = str(attrs.get("content", ""))
         if not content:
             return ToolResponse(
                 success=False,
-                error="FileSaveTool: no 'content' attribute found in the snapshot.",
+                error=(
+                    "FileSaveTool: no 'content' attribute found in the snapshot.  "
+                    "Make sure a previous step (e.g. MCPClientTool) wrote its output "
+                    "to the graph before this step runs."
+                ),
             )
 
-        encoding: str = attrs.get("encoding", "utf-8")
+        encoding: str = attrs.get("encoding", "") or encoding_fallback or "utf-8"
 
         # ── 2. Resolve destination path ───────────────────────────────────
-        file_path_str: str = attrs.get("file_path", "")
+        file_path_str: str = attrs.get("file_path", "") or file_path_fallback
         if file_path_str:
             dest = Path(file_path_str)
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -119,5 +172,3 @@ class FileSaveTool(ToolProvider):
                 "bytes_written": bytes_written,
             },
         )
-
-

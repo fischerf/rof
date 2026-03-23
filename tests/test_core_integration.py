@@ -194,8 +194,8 @@ class TestWorkflowGraph:
 
     def test_pending_goals(self):
         source = """
-        ensure goal1 is complete.
-        ensure goal2 is complete.
+        ensure classify Goal1 as "complete" or "incomplete".
+        ensure classify Goal2 as "complete" or "incomplete".
         """
         ast = RLParser().parse(source)
         bus = EventBus()
@@ -206,7 +206,7 @@ class TestWorkflowGraph:
         assert all(g.status == GoalStatus.PENDING for g in pending)
 
     def test_mark_goal(self):
-        source = "ensure test goal."
+        source = 'ensure classify Task as "passed" or "failed".'
         ast = RLParser().parse(source)
         bus = EventBus()
         graph = WorkflowGraph(ast, bus)
@@ -226,7 +226,7 @@ class TestWorkflowGraph:
         define Product as "An item for sale".
         Product has price of 100.
         Product is available.
-        ensure check inventory.
+        ensure classify Product as "in_stock" or "out_of_stock".
         """
         ast = RLParser().parse(source)
         bus = EventBus()
@@ -257,7 +257,7 @@ class TestOrchestrator:
     def test_simple_goal_execution(self):
         source = """
         define Task as "A simple task".
-        ensure complete the Task.
+        ensure produce a completion_summary for Task.
         """
         ast = RLParser().parse(source)
         llm = MockLLMProvider(["Task has been completed successfully."])
@@ -272,7 +272,7 @@ class TestOrchestrator:
     def test_tool_execution(self):
         source = """
         define Data as "Information to process".
-        ensure process Data with mock_tool.
+        ensure generate a processed_result for Data with mock_tool.
         """
         ast = RLParser().parse(source)
         llm = MockLLMProvider(["I will use mock_tool to process the data."])
@@ -286,7 +286,7 @@ class TestOrchestrator:
         assert "mock_tool" in orch.tools
 
     def test_max_iterations_limit(self):
-        source = "ensure never ending task."
+        source = 'ensure classify Task as "complete" or "incomplete".'
         ast = RLParser().parse(source)
         llm = MockLLMProvider(["Still working..."] * 100)
         config = OrchestratorConfig(max_iterations=3)
@@ -298,7 +298,7 @@ class TestOrchestrator:
         assert llm.call_count <= config.max_iterations + 1
 
     def test_event_emission(self):
-        source = "ensure test goal."
+        source = 'ensure classify Task as "done" or "pending".'
         ast = RLParser().parse(source)
         llm = MockLLMProvider(["Goal achieved."])
         config = OrchestratorConfig(max_iterations=5)
@@ -317,8 +317,8 @@ class TestOrchestrator:
         source = """
         define Task1 as "First task".
         define Task2 as "Second task".
-        ensure complete Task1.
-        ensure complete Task2.
+        ensure produce a completion_summary for Task1.
+        ensure produce a completion_summary for Task2.
         """
         ast = RLParser().parse(source)
         llm = MockLLMProvider(["Task1 completed.", "Task2 completed."])
@@ -340,7 +340,7 @@ class TestContextInjector:
         source = """
         define Customer as "A buyer".
         Customer has age of 30.
-        ensure verify Customer eligibility.
+        ensure classify Customer as "eligible" or "ineligible".
         """
         ast = RLParser().parse(source)
         bus = EventBus()
@@ -366,7 +366,7 @@ class TestContextInjector:
         A has value of 1.
         B has value of 2.
         C has value of 3.
-        ensure process A.
+        ensure classify A as "valid" or "invalid".
         """
         ast = RLParser().parse(source)
         bus = EventBus()
@@ -391,7 +391,7 @@ class TestStateManager:
         source = """
         define Test as "A test entity".
         Test has value of 42.
-        ensure verify Test.
+        ensure classify Test as "present" or "absent".
         """
         ast = RLParser().parse(source)
         bus = EventBus()

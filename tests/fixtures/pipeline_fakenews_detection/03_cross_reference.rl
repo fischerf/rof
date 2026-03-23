@@ -7,6 +7,14 @@
 // Tool routing:
 //   "cross_reference claims"     → CrossReferenceTool  (fact database)
 //   "check statistical claims"   → CrossReferenceTool  (statistical sources)
+//   "explain evidence quality"   → LLM                 (explanatory output)
+//
+// Goal verb note (§2.7.3):
+//   "cross_reference claims" and "check statistical claims" are tool-trigger
+//   phrases (CrossReferenceTool keywords); output modality is implicitly
+//   structured data per §2.7.2.
+//   "explain evidence quality" uses the recommended verb "explain" in place of
+//   the vague "assess", making the explanatory output modality explicit per §2.7.2.
 //
 // if/then: Majority disputed claims → article flagged.
 
@@ -26,4 +34,4 @@ if VerificationResult has confirmed_count > 3,
 
 ensure cross_reference claims in ClaimSet.
 ensure check statistical claims for accuracy.
-ensure assess evidence quality for VerificationResult.
+ensure explain evidence quality for VerificationResult.

@@ -827,30 +827,47 @@ class TestRunner:
 
         Resolution order:
         1. Absolute path — returned as-is.
-        2. Relative to CWD (project root) — preferred for paths declared in
-           fixture files like ``workflow: tests/fixtures/customer.rl`` that
-           are written relative to the repo root.
+        2. Relative to CWD — works when pytest is invoked from the repo root.
         3. Relative to *base_dir* (the directory of the .rl.test file) —
-           fallback for paths declared relative to the test file itself.
-        4. Relative to *base_dir* unconditionally — returned even when it
-           does not exist so callers produce a clean "file not found" error.
+           works when paths are declared relative to the test file itself.
+        4. Walking up the ancestor directories of *base_dir* — handles the
+           common case where ``workflow: tests/fixtures/foo.rl`` is declared
+           relative to the project root but pytest is invoked from a
+           sub-directory (e.g. ``tests/``).  Each parent of *base_dir* is
+           tried in turn (nearest first) until the file is found.
+        5. *base_dir*-relative path unconditionally — returned even when it
+           does not exist so callers get a clean "file not found" error with
+           the most-likely intended path.
         """
         p = Path(rel_path)
         if p.is_absolute():
             return p
 
-        # Try CWD first (project-root-relative paths)
+        # Try CWD first (project-root-relative paths when invoked from root)
         cwd_candidate = Path.cwd() / p
         if cwd_candidate.exists():
             return cwd_candidate
 
-        # Try base_dir (test-file-relative paths)
         if base_dir:
-            base_candidate = Path(base_dir) / p
+            base = Path(base_dir)
+
+            # Try base_dir itself (test-file-relative paths)
+            base_candidate = base / p
             if base_candidate.exists():
                 return base_candidate
-            # Return the base_dir-relative path even if it doesn't exist
-            # so that callers get a meaningful FileNotFoundError message.
+
+            # Walk up ancestor directories of base_dir.
+            # This resolves repo-root-relative paths (e.g.
+            # "tests/fixtures/foo.rl") correctly when pytest is run from any
+            # subdirectory — each parent is tried nearest-first until the
+            # file resolves or we reach the filesystem root.
+            for ancestor in base.parents:
+                ancestor_candidate = ancestor / p
+                if ancestor_candidate.exists():
+                    return ancestor_candidate
+
+            # Nothing found — return the base_dir-relative path so the caller
+            # produces a meaningful FileNotFoundError with the intended path.
             return base_candidate
 
         return p

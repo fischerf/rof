@@ -238,6 +238,76 @@ def _make_generic_provider(provider_name: str, args: argparse.Namespace) -> Any:
 
 from rof_framework.core.lint.linter import Linter, LintIssue, Severity  # noqa: E402
 
+# ─── Audit log helper ────────────────────────────────────────────────────────
+
+
+def _setup_audit_subscriber(bus: Any, args: argparse.Namespace) -> Any | None:
+    """
+    Wire an AuditSubscriber to *bus* when ``--audit-log`` is set.
+
+    Returns the AuditSubscriber instance (caller must call .close() when done),
+    or None when audit logging is disabled or the governance module is not
+    available.
+
+    Parameters
+    ----------
+    bus:
+        The EventBus instance the orchestrator / pipeline will publish to.
+    args:
+        Parsed CLI args.  Reads ``args.audit_log`` (bool) and
+        ``args.audit_dir`` (str | None).
+    """
+    if not getattr(args, "audit_log", False):
+        return None
+
+    try:
+        from rof_framework.governance.audit import (
+            AuditConfig,
+            AuditSubscriber,
+            JsonLinesSink,
+        )
+    except ImportError:
+        _warn("rof_framework.governance.audit not available — audit logging skipped.")
+        return None
+
+    audit_dir = getattr(args, "audit_dir", None) or "./audit_logs"
+
+    sink = JsonLinesSink(
+        output_dir=audit_dir,
+        rotate_by="day",
+        shutdown_timeout_s=5.0,
+    )
+    cfg = AuditConfig(
+        sink_type="jsonlines",
+        output_dir=audit_dir,
+        exclude_events=["state.attribute_set", "state.predicate_added"],
+    )
+    subscriber = AuditSubscriber(bus=bus, sink=sink, config=cfg)
+    _ok(f"Audit log enabled  →  {dim(audit_dir)}")
+    return subscriber
+
+
+def _audit_args(p: argparse.ArgumentParser) -> None:
+    """Add shared ``--audit-log`` / ``--audit-dir`` flags to a sub-command parser."""
+    g = p.add_argument_group("Audit log")
+    g.add_argument(
+        "--audit-log",
+        action="store_true",
+        dest="audit_log",
+        help=(
+            "Enable the immutable audit log. Every EventBus event is recorded as "
+            "a structured JSON line to the audit directory."
+        ),
+    )
+    g.add_argument(
+        "--audit-dir",
+        metavar="DIR",
+        dest="audit_dir",
+        default=None,
+        help="Directory for audit JSONL files (default: ./audit_logs). "
+        "Implies --audit-log when given.",
+    )
+
 
 def _fmt_issue(issue: LintIssue) -> str:
     """Render a LintIssue with terminal colours for CLI display."""
@@ -635,10 +705,62 @@ LANGUAGE CONSTRUCTS
                   then ensure RiskLevel is "high".
 
 6. Goal (what the orchestrator must achieve — drives LLM calls):
-       ensure <verb> <Entity> <aspect>.
+
+   A goal is an OUTPUT CONTRACT. It must specify:
+     a) the intended task verb
+     b) the output modality (what form the result takes)
+     c) the target entity or context
+     d) optional constraints (language, tone, format, schema)
+
+   Canonical form (preferred):
+       ensure <verb> <output_type> for <Entity> [based on <context>] [with <constraints>].
+
+   Also valid (predicate assignment form):
        ensure <Entity> is <predicate>.
+
    - Each goal maps to one LLM call; order matters.
-   - Prefer concrete, specific goal expressions over vague ones.
+   - ALWAYS use a specific output verb. Recommended verbs:
+       generate, produce, return, classify, summarize, explain,
+       translate, transform, validate, compose, draft
+   - AVOID vague verbs: determine, handle, process, greet, evaluate, recommend.
+     If you must use them, make the output modality explicit via the form above.
+
+   OUTPUT MODALITY PATTERNS (use the most specific form that fits):
+
+   Natural language response:
+       ensure generate a natural language response for User in User.language.
+
+   Decision / classification:
+       ensure return a decision for Customer as "premium" or "standard".
+
+   Source code generation:
+       ensure generate Python source code for EmailValidator.
+
+   Structured output (JSON / YAML):
+       ensure generate JSON summary for Order.
+
+   Explanation / rationale:
+       ensure explain the decision for Application.
+
+   Summarization:
+       ensure summarize Report concisely.
+
+   Translation:
+       ensure translate Report into German.
+
+   Transformation:
+       ensure transform Draft into concise business language.
+
+   Constrained output:
+       ensure generate output for Entity with constraints on tone, length, or format.
+
+DESIGN RULES (Appendix A.3 — must be followed)
+---------------
+1. Always specify the output type in every goal (natural language, JSON, decision label, code, etc.).
+2. Avoid vague verbs: greet, handle, process, evaluate, determine, recommend.
+3. Prefer: generate / return / produce / explain / summarize / translate / transform / validate.
+4. Treat every `ensure` statement as an output contract — it defines what the LLM must produce.
+5. Separate reasoning (conditions / if-then rules) from outcomes (ensure goals).
 
 STYLE GUIDELINES
 ----------------
@@ -664,9 +786,9 @@ Customer has support_tickets of 2.
 if Customer has total_purchases > 10000 and account_age_days > 365,
     then ensure Customer is HighValue.
 
-ensure determine Customer segment.
-ensure recommend Customer support_tier.
-ensure generate Customer outreach_message.
+ensure classify Customer as "high_value" or "standard".
+ensure generate a natural language outreach_message for Customer.
+ensure produce JSON summary for Customer with segment and support_tier.
 ------------------------------------------------------------------------------------------
 
 EXAMPLE OUTPUT (fraud detection — cross-entity conditions, for style reference only):
@@ -688,14 +810,141 @@ relate Transaction and UserProfile as "initiated by".
 if Transaction has amount > 1000 and Transaction.location != UserProfile.home_location,
     then ensure RiskLevel is "high".
 
-ensure evaluate Transaction for fraud_risk.
-ensure generate RiskLevel explanation.
-ensure recommend Transaction action.
+ensure return a decision for Transaction based on RiskLevel as "block" or "approve".
+ensure explain the decision for Transaction based on RiskLevel.
+ensure generate a natural language action_summary for Transaction.
 ------------------------------------------------------------------------------------------
 
 Now generate a complete, valid, immediately-lintable .rl workflow file for the description \
 the user provides. Output only the .rl source.\
 """
+
+
+# ── File-save attribute keys recognised as "saved to disk" ───────────────────
+_FILE_ATTRS = {"file_path", "saved_to", "output_file", "filename"}
+# ── Attribute keys whose values are long prose (wrap them nicely) ─────────────
+_PROSE_ATTRS = {
+    "summary",
+    "result",
+    "content",
+    "description",
+    "text",
+    "report",
+    "answer",
+    "response",
+    "analysis",
+    "output",
+}
+# ── Width for wrapped prose output ───────────────────────────────────────────
+_WRAP_WIDTH = 100
+
+
+def _is_file_attr(key: str) -> bool:
+    """Return True when *key* is a known file-output attribute."""
+    return key in _FILE_ATTRS
+
+
+def _has_file_saved(attrs: dict) -> bool:
+    """Return True when any attribute in *attrs* indicates a saved file."""
+    return any(_is_file_attr(k) for k in attrs)
+
+
+def _print_entity_state(
+    ent_name: str,
+    attrs: dict,
+    preds: list,
+    desc: str,
+    failed_goals: list[dict] | None = None,
+) -> None:
+    """
+    Pretty-print a single entity's state.
+
+    Rules
+    -----
+    * If the entity has a file-save attribute (``file_path``, ``saved_to``, …)
+      show **only** that location line (suppress all other attributes).
+    * Long prose attributes (``summary``, ``result``, …) are word-wrapped.
+    * If the entity has *no* attributes and *no* predicates, print ``...``
+      and, when *failed_goals* is given, append a short failure hint.
+    """
+    header = f"  {bold(cyan(ent_name))}" + (f"  {dim(repr(desc))}" if desc else "")
+    print(header)
+
+    # ── No state at all ───────────────────────────────────────────────────────
+    if not attrs and not preds:
+        print(f"    {dim('...')}")
+        if failed_goals:
+            for g in failed_goals:
+                hint = g.get("error") or g.get("result") or g.get("expr", "")
+                if hint:
+                    snippet = str(hint)[:160].replace("\n", " ")
+                    print(f"    {red('↳')} {dim(snippet)}")
+        return
+
+    # ── File-save entity: show only location ──────────────────────────────────
+    if _has_file_saved(attrs):
+        for k in _FILE_ATTRS:
+            if k in attrs:
+                path_val = attrs[k]
+                bytes_val = attrs.get("bytes_written")
+                size_hint = f"  {dim(f'({bytes_val} bytes)')}" if bytes_val else ""
+                print(f"    {green('📄')} {bold(str(path_val))}{size_hint}")
+        return
+
+    # ── Normal entity ─────────────────────────────────────────────────────────
+    indent = "    "
+    for k, v in attrs.items():
+        str_v = str(v)
+        if k in _PROSE_ATTRS and len(str_v) > 80:
+            # Word-wrap long prose values
+            label = f"{blue(k)} ="
+            first_indent = indent + label + " "
+            cont_indent = indent + " " * (len(k) + 3)
+            lines = textwrap.wrap(
+                str_v, width=_WRAP_WIDTH, initial_indent=first_indent, subsequent_indent=cont_indent
+            )
+            for line in lines:
+                print(green(line))
+        else:
+            print(f"{indent}{blue(k)} = {green(repr(v))}")
+    for p in preds:
+        print(f"{indent}{dim('is')} {yellow(p)}")
+
+
+def _print_result_section(snap: dict, failed_goals: list[dict] | None = None) -> None:
+    """
+    Print the «Final state» section from a snapshot dict.
+
+    *failed_goals* is a list of goal dicts (with at least ``status`` and
+    ``expr``) used to surface short failure hints for empty entities.
+    """
+    _section("Final state")
+    entities = snap.get("entities", {})
+    if not entities:
+        print(f"  {dim('(no entities in snapshot)')}")
+        return
+
+    # Build a map of entity-name → list of failed goal dicts for hint lookup
+    fail_map: dict[str, list[dict]] = {}
+    for g in failed_goals or []:
+        if g.get("status") in ("FAILED", "ERROR"):
+            expr = g.get("expr", "")
+            # Heuristic: associate failure with any entity name mentioned
+            for ent in entities:
+                if ent.lower() in expr.lower():
+                    fail_map.setdefault(ent, []).append(g)
+
+    for ent_name, ent in entities.items():
+        attrs = ent.get("attributes", {})
+        preds = ent.get("predicates", [])
+        desc = ent.get("description", "")
+        _print_entity_state(
+            ent_name,
+            attrs,
+            preds,
+            desc,
+            failed_goals=fail_map.get(ent_name),
+        )
 
 
 def _print_stats(acc: Any) -> None:
@@ -1142,6 +1391,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     bus = core.EventBus()
     steps_log: list[dict] = []
 
+    # ── Audit log (optional) ──────────────────────────────────────────────
+    _audit_subscriber = _setup_audit_subscriber(bus, args)
+
     if not as_json:
 
         def on_step_started(e: Any) -> None:
@@ -1257,6 +1509,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     result = orch.run(ast)
     elapsed = round(time.perf_counter() - t0, 3)
 
+    # ── Close audit subscriber (flushes + closes the sink) ────────────────
+    if _audit_subscriber is not None:
+        _audit_subscriber.close()
+        if not as_json:
+            audit_path = getattr(args, "audit_dir", None) or "./audit_logs"
+            _ok(f"Audit log written  →  {dim(audit_path)}")
+
     # ── Save snapshot ─────────────────────────────────────────────────────
     if out_snap:
         snap_path = Path(out_snap)
@@ -1290,23 +1549,15 @@ def cmd_run(args: argparse.Namespace) -> int:
     if result.error:
         print(f"  {red('error:')} {result.error}")
 
-    _section("Final state")
     snap = result.snapshot
-    for ent_name, ent in snap.get("entities", {}).items():
-        attrs = ent.get("attributes", {})
-        preds = ent.get("predicates", [])
-        desc = ent.get("description", "")
-        print(f"  {bold(cyan(ent_name))}" + (f"  {dim(repr(desc))}" if desc else ""))
-        for k, v in attrs.items():
-            print(f"    {blue(k)} = {green(repr(v))}")
-        for p in preds:
-            print(f"    {dim('is')} {yellow(p)}")
-        if not attrs and not preds:
-            print(f"    {dim('(no state)')}")
+    all_goals: list[dict] = snap.get("goals", [])
+    failed_goals = [g for g in all_goals if g.get("status") in ("FAILED", "ERROR")]
+
+    _print_result_section(snap, failed_goals=failed_goals)
 
     if verbose:
         _section("Goal results")
-        for g in snap.get("goals", []):
+        for g in all_goals:
             status = g["status"]
             colour = green if status == "ACHIEVED" else (red if status == "FAILED" else dim)
             print(f"  {colour('●')} {g['expr']}")
@@ -1638,6 +1889,9 @@ def cmd_pipeline_run(args: argparse.Namespace) -> int:
 
     pipeline = builder.build()
 
+    # ── Audit log (optional) ──────────────────────────────────────────────
+    _audit_subscriber = _setup_audit_subscriber(pipeline.bus, args)
+
     if not as_json:
         _banner(f"ROF Pipeline  →  {config_path.name}")
         print(f"  Stages   : {len(stages_cfg)}")
@@ -1663,6 +1917,13 @@ def cmd_pipeline_run(args: argparse.Namespace) -> int:
     t0 = time.perf_counter()
     result = pipeline.run(seed_snapshot=seed_snapshot)
     elapsed = round(time.perf_counter() - t0, 3)
+
+    # ── Close audit subscriber (flushes + closes the sink) ────────────────
+    if _audit_subscriber is not None:
+        _audit_subscriber.close()
+        if not as_json:
+            audit_path = getattr(args, "audit_dir", None) or "./audit_logs"
+            _ok(f"Audit log written  →  {dim(audit_path)}")
 
     if as_json:
         print(
@@ -1695,7 +1956,14 @@ def cmd_pipeline_run(args: argparse.Namespace) -> int:
         ela = getattr(step, "elapsed_s", "?")
         print(f"  {mark} {bold(name)}  {dim(f'{ela}s')}")
         if not ok and hasattr(step, "error") and step.error:
-            print(f"    {red(step.error)}")
+            print(f"    {red('↳')} {dim(step.error[:160])}")
+
+    # ── Final snapshot ────────────────────────────────────────────────────
+    final_snap = getattr(result, "final_snapshot", None) or {}
+    if final_snap:
+        all_goals: list[dict] = final_snap.get("goals", [])
+        failed_goals = [g for g in all_goals if g.get("status") in ("FAILED", "ERROR")]
+        _print_result_section(final_snap, failed_goals=failed_goals)
 
     print()
     return 0 if result.success else 1
@@ -2029,6 +2297,8 @@ def build_parser() -> argparse.ArgumentParser:
               rof inspect customer.rl --format json
               rof run customer.rl --provider anthropic --model claude-sonnet-4-5
               rof run customer.rl --json --output-snapshot snap.json
+              rof run customer.rl --audit-log --audit-dir ./audit_logs --provider openai
+              rof pipeline run pipeline.yaml --audit-log --audit-dir ./audit_logs
               rof debug customer.rl --step
               rof debug customer.rl --max-iter 5 --provider openai
               rof pipeline run pipeline.yaml
@@ -2041,6 +2311,19 @@ def build_parser() -> argparse.ArgumentParser:
               rof test tests/fixtures/ --tag smoke --json
               rof test suite.rl.test --fail-fast --verbose
               rof version
+
+            Audit log (immutable structured JSON, ELK/Splunk/Datadog compatible):
+              # Enable audit logging for a single run:
+              rof run customer.rl --audit-log --provider anthropic
+
+              # Write audit files to a custom directory:
+              rof run customer.rl --audit-log --audit-dir /var/log/rof --provider openai
+
+              # Audit a multi-stage pipeline run:
+              rof pipeline run pipeline.yaml --audit-log --audit-dir ./audit_logs
+
+              # Each day produces one file: audit_YYYY-MM-DD.jsonl
+              # Ingest with: filebeat, fluentd, vector, or tail -f audit_*.jsonl | jq .
 
             Snapshot seeding (replay / resume a prior run):
               # Save the snapshot of any run to a file:
@@ -2134,6 +2417,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     _provider_args(p_run)
+    _audit_args(p_run)
 
     # ── debug ─────────────────────────────────────────────────────────────
     p_dbg = sub.add_parser("debug", help="Step-through execution with prompt/response")
@@ -2186,6 +2470,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Load initial snapshot from a JSON file (replay / resume a prior run)",
     )
     _provider_args(p_pip_run)
+    _audit_args(p_pip_run)
 
     p_pip_dbg = pip_sub.add_parser("debug", help="Debug a pipeline with full prompt/response trace")
     p_pip_dbg.add_argument(

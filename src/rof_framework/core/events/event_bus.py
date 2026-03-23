@@ -26,9 +26,9 @@ EventHandler = Callable[[Event], None]
 
 class EventBus:
     """
-    Synchroner Pub/Sub Bus.
+    Synchronous pub/sub bus.
 
-    Erweiterung: Eigene Handler per subscribe() einhängen.
+    Extension point: attach custom handlers via subscribe().
         bus.subscribe("step.completed", my_handler)
     """
 
@@ -46,11 +46,11 @@ class EventBus:
             try:
                 h(event)
             except Exception as e:
-                logger.error("EventHandler-Fehler für %r: %s", event.name, e)
+                logger.error("EventHandler error for %r: %s", event.name, e)
 
-        # Wildcard-Handler ("*") erhalten alle Events
+        # Wildcard handlers ("*") receive every event
         for h in self._handlers.get("*", []):
             try:
                 h(event)
             except Exception as e:
-                logger.error("Wildcard-Handler-Fehler: %s", e)
+                logger.error("Wildcard handler error: %s", e)

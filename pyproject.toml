@@ -28,6 +28,7 @@ openai    = ["openai>=1.0"]
 anthropic = ["anthropic>=0.20"]
 gemini    = ["google-generativeai>=0.5"]
 ollama    = ["httpx>=0.25"]
+mcp       = ["mcp>=1.0"]
 pipeline  = ["pyyaml>=6.0"]
 routing   = [
     "sentence-transformers>=2.2",   # embedding-based ToolRouter strategy
@@ -46,6 +47,7 @@ all = [
     "anthropic>=0.20",
     "google-generativeai>=0.5",
     "httpx>=0.25",
+    "mcp>=1.0",
     "tiktoken>=0.7",
     "pyyaml>=6.0",
     "sentence-transformers>=2.2",

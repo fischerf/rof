@@ -124,8 +124,8 @@ class TestCondition:
 
 class TestGoal:
     def test_goal_creation(self):
-        goal = Goal(source_line=6, goal_expr="verify Customer eligibility")
-        assert goal.goal_expr == "verify Customer eligibility"
+        goal = Goal(source_line=6, goal_expr='classify Customer as "eligible" or "ineligible"')
+        assert goal.goal_expr == 'classify Customer as "eligible" or "ineligible"'
 
     def test_goal_defaults(self):
         goal = Goal()
@@ -268,8 +268,8 @@ class TestComplexAST:
         )
 
         # Goals
-        ast.goals.append(Goal(goal_expr="process Order"))
-        ast.goals.append(Goal(goal_expr="notify Customer"))
+        ast.goals.append(Goal(goal_expr='return a decision for Order as "approved" or "rejected"'))
+        ast.goals.append(Goal(goal_expr="generate a natural language notification for Customer"))
 
         # Verify structure
         assert len(ast.definitions) == 2

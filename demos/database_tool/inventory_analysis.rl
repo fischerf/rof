@@ -100,10 +100,16 @@ relate ReorderBreachReport and InventorySummary as "feeds into".
 
 // ── Goals ─────────────────────────────────────────────────────────────────────
 // Each goal triggers DatabaseTool via the "query database for …" keyword phrase.
+//
+// Goal verb note (§2.7.3):
+//   "query database for" is a tool-trigger phrase (DatabaseTool keyword);
+//   the output modality is implicitly structured data per §2.7.2.
+//   "produce … overall_health_status" and "produce … priority_actions" use the
+//   recommended verb "produce" with an explicit output entity per §2.7.1.
 
 ensure query database for products with quantity below 20 units.
 ensure query database for top 5 most expensive products currently in stock.
 ensure query database for total inventory value grouped by category.
 ensure query database for products that have breached their reorder level.
-ensure determine InventorySummary overall_health_status.
-ensure recommend RestockPlan priority_actions.
+ensure produce InventorySummary overall_health_status based on all query results.
+ensure produce priority_actions for RestockPlan based on ReorderBreachReport.

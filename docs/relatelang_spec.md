@@ -3,7 +3,9 @@
 ## Abstract
 **RelateLang** is a declarative meta-language designed to streamline the creation of structured and consistent prompts for large language models (LLMs).
 
-This paper introduces RelateLang's syntax, highlighting its foundation in relational and predicate logic. By focusing on relationships, conditions, and context, RelateLang bridges the gap between natural language expressiveness and the precision required for effective LLM interaction. It facilitates a novel approach to prompt engineering, where humans and LLMs collaboratively develop structured prompts that can be easily modified and reused for diverse tasks, enhancing the reliability and automation capabilities of LLM-driven workflows. The language is particularly valuable in scenarios requiring structured input, chain-of-thought guidance, and maintainable prompt management in production systems.
+This paper introduces RelateLang's syntax, highlighting its foundation in relational and predicate logic. By focusing on relationships, conditions, and context, RelateLang bridges the gap between natural language expressiveness and the precision required for effective LLM interaction. It facilitates a novel approach to prompt engineering, where humans and LLMs collaboratively develop structured prompts that can be easily modified and reused for diverse tasks, enhancing the reliability and automation capabilities of LLM-driven workflows.
+
+A key contribution of this work is the introduction of outcome-oriented goal specification, enabling precise control over LLM outputs such as natural language, decisions, structured data, and generated code.
 
 ---
 
@@ -179,13 +181,13 @@ UserProfile has typical_time_range of "09:00-22:00".
 define RiskLevel as "Transaction risk assessment".
 
 if Transaction has amount > (UserProfile.typical_amount * 5),
-    then ensure RiskLevel is "high".
+    then ensure set RiskLevel to "high".
 
 if Transaction.location != UserProfile.home_location and 
    Transaction.time not in UserProfile.typical_time_range,
-    then ensure RiskLevel is "high".
+    then ensure set RiskLevel to "high".
 
-ensure evaluate Transaction for fraud_risk.
+ensure return a decision for Transaction based on RiskLevel.
 ```
 
 This structure provides:
@@ -225,26 +227,25 @@ Q:
 
 ```prolog
 define Location as "A point in the delivery network".
-define Route as "A path connecting two or more locations".
+define Route as "A path connecting locations".
 define Vehicle as "The transport used for delivery".
-Vehicle has capacity of 20. // units
-Location has demand of 5. // units
+
+Vehicle has capacity of 20.
 
 define Step1_Result as "All possible route segments are identified".
-define Step2_Result as "Routes exceeding vehicle capacity are eliminated".
+define Step2_Result as "Routes exceeding capacity are eliminated".
 define Step3_Result as "The shortest valid route is selected".
 
-// Chain of logic
 if Location exists,
-    then ensure Step1_Result is achieved.
+    then ensure generate possible routes for all locations.
 
-if Step1_Result is achieved and Route.total_demand > Vehicle.capacity,
-    then ensure Route is invalid.
+if Route.total_demand > Vehicle.capacity,
+    then ensure mark Route as invalid.
 
-if Step2_Result is achieved,
-    then ensure Step3_Result is achieved by optimizing for minimal_distance.
+if valid Route exists,
+    then ensure select the route with minimal total_distance.
 
-ensure generate optimal_route based on Step3_Result.
+ensure return the optimal delivery plan with total distance.
 ```
 
 A:
@@ -272,6 +273,113 @@ This structured approach helps LLMs maintain logical consistency across complex 
 
 ---
 
+### 2.7 Outcome-Oriented Goal Specification
+
+RelateLang goals should specify not only *what* should be achieved, but also *what form the result should take*. This distinction is important because large language models support multiple output modalities, including natural language responses, decisions, code generation, structured data, summaries, translations, and transformations. A goal that only names an action, such as `greet`, may be under-specified unless the expected output modality is also made explicit.
+
+In RelateLang, a goal therefore functions as an **output contract**. It defines the desired task outcome, the relevant input context, and the constraints under which the result will be considered successful. This design improves interpretability, reduces ambiguity, and makes prompt behavior more consistent across different models and use cases.
+
+> A goal in RelateLang is not merely an instruction but an output contract defining the expected result and its form.
+
+A well-formed goal should make the following aspects explicit:
+
+1. the intended task;
+2. the output modality;
+3. the input context or source entities;
+4. relevant constraints such as language, tone, structure, or format;
+5. the success criterion by which the output can be judged.
+
+#### 2.7.1 General Form
+
+A practical RelateLang goal can be written as:
+
+```prolog
+ensure <verb> <output_type> for <target> based on <context> with <constraints>.
+```
+
+Examples include:
+
+```prolog
+ensure generate a natural language greeting for User in User.language.
+ensure return a decision for Transaction based on RiskLevel.
+ensure generate Python source code for DataProcessor.
+ensure produce a JSON summary of Report.
+```
+
+This formulation is preferred over vague symbolic actions, because it makes the desired output directly interpretable by the model.
+
+#### 2.7.2 Output Modalities
+
+RelateLang supports multiple output modalities as first-class goal types.
+
+**Natural language output** is used when the desired result is a human-readable response.
+
+```prolog
+ensure generate a natural language greeting for User in User.language.
+```
+
+**Decision output** is used when the model should return a label, class, or status.
+
+```prolog
+ensure return a decision for Customer as "premium" or "standard".
+```
+
+**Source code generation** is used when the model should produce executable code in a target language.
+
+```prolog
+ensure generate Python source code for EmailValidator.
+```
+
+**Structured output** is used when the model should return machine-readable content, such as JSON or YAML.
+
+```prolog
+ensure generate JSON summary for Order.
+```
+
+**Explanatory output** is used when the model should provide a reasoned explanation, diagnosis, or rationale.
+
+```prolog
+ensure explain the decision for Application.
+```
+
+**Transformational output** is used when the model should rewrite, translate, or adapt existing content.
+
+```prolog
+ensure translate Report into German.
+ensure transform Draft into concise business language.
+```
+
+#### 2.7.3 Recommended Goal Verbs
+
+To reduce ambiguity, RelateLang should prefer goal verbs that explicitly describe the expected output operation. Recommended verbs include:
+
+* `generate`
+* `produce`
+* `return`
+* `classify`
+* `summarize`
+* `explain`
+* `translate`
+* `transform`
+* `validate`
+* `compose`
+* `draft`
+
+These verbs should be preferred over underspecified task verbs unless the output modality is otherwise explicit. For example, `ensure greet User in English` is less precise than `ensure generate a natural language greeting for User in English`.
+
+#### 2.7.4 Success Criteria
+
+A goal is considered achieved when the generated output satisfies the specified modality and constraints. For example:
+
+* a greeting goal is achieved if the response is natural language, addresses the correct user, and uses the requested language;
+* a decision goal is achieved if the output matches one of the allowed decision labels;
+* a code generation goal is achieved if the output is valid in the target language and implements the requested behavior;
+* a structured output goal is achieved if the response conforms to the required schema.
+
+By making these criteria explicit, RelateLang enables clearer evaluation, stronger prompt reuse, and more consistent LLM behavior in production settings.
+
+---
+
 ## 3. Combining RelateLang and Natural Language
 
 RelateLang offers a structured, logic-driven framework that seamlessly complements natural language-based prompting approaches. While natural language excels in conveying nuance and ambiguity, particularly for creative tasks, RelateLang provides clarity, precision, and logical consistency—essential qualities for complex and multi-step interactions with LLMs.
@@ -295,10 +403,10 @@ RelateLang aligns with advanced prompting techniques for LLMs, such as:
 
 ### 3.3 Applications and Limitations
 RelateLang is ideal for tasks requiring:
-- Precise execution of logical rules and conditions
-- Modeling of structured systems like workflows, decision trees, or knowledge graphs
-- Creating reusable prompt templates for consistent LLM interactions
-- Maintaining prompts in production codebases
+- precise execution of logical rules
+- modeling structured systems
+- reusable prompt templates
+- controlled output generation across modalities
 
 However, natural language remains superior for:
 - Creative, open-ended tasks where ambiguity or nuance is a feature
@@ -320,11 +428,14 @@ Example: Modeling physical phenomena
 ```prolog
 define Photon as "A quantum of light".
 Photon has energy of E.
+
 define Metal as "A metallic element".
 Metal has work_function of Phi.
 
 if Photon.energy > Metal.work_function,
-    then ensure Electron is emitted.
+    then ensure state that an electron emission occurs.
+
+ensure explain the interaction between Photon and Metal.
 ```
 
 ### 4.2 AI Systems and Automation
@@ -345,7 +456,9 @@ Transaction has amount of 2500.
 Transaction has risk_score of calculated.
 
 if Transaction has amount > 1000 and Transaction occurs_at "unusual_hour",
-    then ensure Transaction requires manual_review.
+    then ensure set Transaction status to "requires_manual_review".
+
+ensure return a decision for Transaction.
 ```
 
 **Version Control Benefits**: Structured format produces clean, reviewable diffs
@@ -407,21 +520,20 @@ public class CustomerSegmentation {
 
 **RelateLang template:** `customer_segmentation_v2.rl`
 ```prolog
-        define Customer as "A person who purchases products".
-        Customer has total_purchases of %d.
-        Customer has account_age_days of %d.
-        Customer has support_tickets of %d.
-        
-        define HighValue as "Customer segment requiring premium support".
-        define Standard as "Customer segment with normal support".
-        
-        if Customer has total_purchases > 10000 and account_age_days > 365,
-            then ensure Customer is HighValue.
-        
-        if Customer has support_tickets > 5 and total_purchases > 5000,
-            then ensure Customer is HighValue.
-            
-        ensure determine Customer segment.
+define Customer as "A person who purchases products".
+Customer has total_purchases of 15000.
+Customer has account_age_days of 400.
+Customer has support_tickets of 2.
+
+define Segment as "Customer classification".
+
+if Customer.total_purchases > 10000 and Customer.account_age_days > 365,
+    then ensure set Segment to "HighValue".
+
+if Customer.support_tickets > 5 and Customer.total_purchases > 5000,
+    then ensure set Segment to "HighValue".
+
+ensure return the customer segment for Customer.
 ```
 
 **Java Example:**
@@ -523,6 +635,109 @@ By integrating RelateLang with natural language prompting, users can leverage th
 Just as SQL standardized database queries across applications and teams, RelateLang offers a path toward standardizing LLM prompt engineering—not by replacing natural language, but by providing structure where structure adds value.
 
 ---
+
+# Appendix A: RelateLang DSL Guidelines
+
+## A.1 Purpose
+
+This appendix provides canonical patterns for writing RelateLang prompts that produce reliable outputs across different LLM tasks.
+
+---
+
+## A.2 Canonical Patterns
+
+### 1. Natural Language Generation
+
+```prolog
+ensure generate a natural language response for User in User.language.
+```
+
+---
+
+### 2. Decision / Classification
+
+```prolog
+ensure return a decision for Entity as "OptionA" or "OptionB".
+```
+
+---
+
+### 3. Explanation
+
+```prolog
+ensure explain why Entity has a given state.
+```
+
+---
+
+### 4. Source Code Generation
+
+```prolog
+ensure generate <Language> source code for <Specification>.
+```
+
+---
+
+### 5. Structured Output
+
+```prolog
+ensure generate JSON summary for Entity.
+```
+
+---
+
+### 6. Summarization
+
+```prolog
+ensure summarize Entity concisely.
+```
+
+---
+
+### 7. Translation
+
+```prolog
+ensure translate Text into TargetLanguage.
+```
+
+---
+
+### 8. Transformation
+
+```prolog
+ensure transform Text into desired style or tone.
+```
+
+---
+
+### 9. Conditional Output
+
+```prolog
+if Condition,
+    then ensure generate output based on Condition.
+```
+
+---
+
+### 10. Constrained Output
+
+```prolog
+ensure generate output for Entity
+with constraints on tone, length, or format.
+```
+
+---
+
+## A.3 Design Rules
+
+1. Always specify **output type**
+2. Avoid vague verbs like `greet`, `handle`, `process`
+3. Prefer **generate / return / produce / explain**
+4. Treat `ensure` as an **output contract**
+5. Separate:
+
+   * reasoning (conditions)
+   * outcome (goal)
 
 ## Author
 *By Florian Fischer*  

@@ -19,9 +19,9 @@ __all__ = [
 
 class StateAdapter(ABC):
     """
-    Erweiterungspunkt: Persistenz-Backend austauschen.
+    Extension point: swap out the persistence backend.
 
-    Beispiel Redis-Adapter:
+    Example Redis adapter:
         class RedisStateAdapter(StateAdapter):
             def save(self, run_id, data): redis.set(run_id, json.dumps(data))
             def load(self, run_id): return json.loads(redis.get(run_id))
@@ -63,8 +63,8 @@ class InMemoryStateAdapter(StateAdapter):
 
 class StateManager:
     """
-    Verwaltet Workflow-Snapshots über einen StateAdapter.
-    Ermöglicht Pause, Replay und Wiederaufnahme von Runs.
+    Manages workflow snapshots via a StateAdapter.
+    Enables pause, replay, and resumption of runs.
     """
 
     def __init__(self, adapter: StateAdapter | None = None):
@@ -72,7 +72,7 @@ class StateManager:
 
     def save(self, run_id: str, graph: WorkflowGraph) -> None:
         self._adapter.save(run_id, graph.snapshot())
-        logger.debug("State gespeichert: run_id=%s", run_id)
+        logger.debug("State saved: run_id=%s", run_id)
 
     def load(self, run_id: str) -> dict | None:
         return self._adapter.load(run_id)
@@ -82,8 +82,8 @@ class StateManager:
 
     def delete(self, run_id: str) -> None:
         self._adapter.delete(run_id)
-        logger.debug("State gelöscht: run_id=%s", run_id)
+        logger.debug("State deleted: run_id=%s", run_id)
 
     def swap_adapter(self, adapter: StateAdapter) -> None:
-        """Adapter zur Laufzeit austauschen (z.B. InMemory → Redis)."""
+        """Swap the adapter at runtime (e.g. InMemory → Redis)."""
         self._adapter = adapter

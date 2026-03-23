@@ -138,6 +138,13 @@ class ConfidentOrchestrator(Orchestrator):
         to the parent's simple keyword scan when no tools are registered.
 
         Stores the routing decision for post-execution feedback recording.
+
+        When the composite confidence is below the uncertainty threshold the
+        decision is flagged ``is_uncertain=True``.  In that case we publish the
+        warning event for observability but return ``None`` so the orchestrator
+        falls through to the LLM instead of forcing a low-confidence tool that
+        is very likely wrong (e.g. ValidatorTool being matched to
+        "analyse context and write report" via spurious embedding similarity).
         """
         if self._confident_router is None:
             # No tools registered – fall back to parent behaviour
@@ -161,6 +168,19 @@ class ConfidentOrchestrator(Orchestrator):
                         },
                     )
                 )
+                # Below the confidence threshold → let the LLM handle this goal.
+                # Do NOT dispatch the uncertain tool; it is almost certainly a
+                # false-positive embedding match (e.g. ValidatorTool ↔ "analyse
+                # context and write report").  Clear the pending decision so no
+                # misleading RoutingTrace is written for an LLM-handled step.
+                logger.debug(
+                    "_route_tool: uncertain (%.3f < %.3f) for %r — deferring to LLM",
+                    decision.composite_confidence,
+                    self._confident_router._uth,
+                    goal_expr,
+                )
+                self._pending_decision = None
+                return None
 
             self.bus.publish(
                 Event(

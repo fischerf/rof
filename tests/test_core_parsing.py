@@ -49,7 +49,7 @@ class TestMultilineStatements:
         Customer has status of "active".
 
         // Processing goal
-        ensure process Customer order.
+        ensure generate a natural language order_summary for Customer.
         """
         ast = parse(source)
         assert len(ast.definitions) == 1
@@ -65,7 +65,7 @@ class TestComments:
         source = """
         // This is a comment
         define Test as "test entity".
-        ensure verify Test.
+        ensure classify Test as "valid" or "invalid".
         """
         ast = parse(source)
         assert len(ast.definitions) == 1
@@ -74,7 +74,7 @@ class TestComments:
     def test_inline_comment(self):
         source = """
         define Product as "An item for sale". // inline comment
-        ensure check inventory. // another comment
+        ensure produce a JSON inventory_summary for Product. // another comment
         """
         ast = parse(source)
         assert len(ast.definitions) == 1
@@ -84,7 +84,7 @@ class TestComments:
         source = """
         if Customer has age >= 18 // must be adult
            and Customer is verified, // and verified
-           then ensure grant access. // give access
+           then ensure return a decision for User as "access_granted" or "access_denied". // give access
         """
         ast = parse(source)
         assert len(ast.conditions) == 1
@@ -204,7 +204,7 @@ class TestComplexExpressions:
         Customer has age of 30.
         Customer has income of 50000.
         Customer has credit_score of 720.
-        ensure verify Customer.
+        ensure classify Customer as "approved" or "rejected".
         """
         ast = parse(source)
         assert len(ast.attributes) == 3
@@ -228,10 +228,10 @@ class TestCaseInsensitivity:
 
     def test_ensure_case_variants(self):
         variants = [
-            "ensure test goal.",
-            "ENSURE test goal.",
-            "Ensure test goal.",
-            "EnSuRe test goal.",
+            'ensure classify Entity as "a" or "b".',
+            'ENSURE classify Entity as "a" or "b".',
+            'Ensure classify Entity as "a" or "b".',
+            'EnSuRe classify Entity as "a" or "b".',
         ]
         for variant in variants:
             ast = parse(variant)
@@ -249,7 +249,7 @@ class TestCaseInsensitivity:
 class TestStatementOrder:
     def test_goals_before_definitions(self):
         source = """
-        ensure process Customer.
+        ensure generate a natural language order_summary for Customer.
         define Customer as "A buyer".
         """
         ast = parse(source)
@@ -267,10 +267,10 @@ class TestStatementOrder:
 
     def test_mixed_order(self):
         source = """
-        ensure goal1.
+        ensure classify A as "valid" or "invalid".
         define A as "first".
         A has x of 1.
-        ensure goal2.
+        ensure classify B as "valid" or "invalid".
         define B as "second".
         B has y of 2.
         """
