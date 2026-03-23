@@ -129,7 +129,10 @@ _TOOL_TRIGGER_STRIP = re.compile(
     r"run (?:python|lua|javascript|code|script)|execute code|"
     r"call api|http request|fetch url|read file|parse file|"
     r"query database|sql query|database lookup|execute sql|"
-    r"validate (?:output|schema)|wait for human|human approval|"
+    r"validate (?:output|schema|response|relatelang)|check (?:format|rl)|"
+    r"schema check|verify schema|"
+    r"analyse context(?: and write report)?|write report|"
+    r"wait for human|human approval|"
     r"save (?:file|csv|results|data|output)|write (?:file|csv|data))\b",
     re.IGNORECASE,
 )
@@ -269,8 +272,9 @@ class ROFSession:
                 self._tools.append(t)
 
         # ── MCP tool registration ─────────────────────────────────────────
-        self._mcp_tool_meta: list[tuple[str, str, list[str]]] = []
-        # Each entry: (server_name, description, trigger_keywords)
+        self._mcp_tool_meta: list[tuple] = []
+        # Each entry: (server_name, description, trigger_keywords, discovered_tools)
+        # discovered_tools is a list of MCP Tool objects (populated by eager connect).
 
         if mcp_server_configs and _HAS_MCP and _MCPToolFactory is not None and _HAS_TOOLS:
             self._register_mcp_tools(mcp_server_configs, mcp_eager_connect)
@@ -398,6 +402,13 @@ class ROFSession:
 
         Uses a temporary ToolRegistry internally so MCPToolFactory's
         duplicate-detection logic works correctly.
+
+        ``self._mcp_tool_meta`` entries have the shape:
+            (server_name, description, keywords, discovered_tools)
+        where ``discovered_tools`` is the raw list of MCP Tool objects from
+        ``tools/list`` (populated only when ``eager_connect=True``; empty list
+        otherwise).  The planner uses this to show the LLM each individual
+        tool name + description so it generates precise ``ensure`` goals.
         """
         try:
             from rof_framework.tools.registry.tool_registry import ToolRegistry  # type: ignore
@@ -417,17 +428,23 @@ class ROFSession:
             self._tools.append(mcp_tool)
 
             # Build meta for the planner hint.
-            # If eager_connect discovered the tool list, grab descriptions.
+            # If eager_connect discovered the tool list, grab per-tool info.
             cfg = mcp_tool._config
             description = getattr(cfg, "description", "") or ""
             keywords = list(mcp_tool.trigger_keywords)
 
+            # _mcp_tools is populated by eager connect (tools/list discovery).
+            # Each element is an MCP Tool object with .name and .description.
+            discovered_tools = list(mcp_tool._mcp_tools)
+
             # Use the server name as the identifier shown to the planner.
-            self._mcp_tool_meta.append((cfg.name, description, keywords))
+            self._mcp_tool_meta.append((cfg.name, description, keywords, discovered_tools))
 
             info(
                 f"MCP tool registered: {bold(cyan(mcp_tool.name))}  "
-                f"({len(keywords)} trigger keyword(s))"
+                f"({len(keywords)} trigger keyword(s)"
+                + (f", {len(discovered_tools)} sub-tool(s) discovered" if discovered_tools else "")
+                + ")"
             )
 
         if mcp_tools:
@@ -449,12 +466,19 @@ class ROFSession:
             print(f"  {dim('No MCP servers connected.')}")
             return
         print(f"  {bold('Connected MCP servers:')}")
-        for server_name, description, keywords in self._mcp_tool_meta:
+        for entry in self._mcp_tool_meta:
+            server_name, description, keywords = entry[0], entry[1], entry[2]
+            discovered_tools = entry[3] if len(entry) > 3 else []
             kw_preview = "  /  ".join(f'"{k}"' for k in keywords[:4])
             suffix = f"  {dim('+' + str(len(keywords) - 4) + ' more')}" if len(keywords) > 4 else ""
             print(f"    {bold(cyan(server_name))}: {kw_preview}{suffix}")
             if description:
                 print(f"      {dim(description)}")
+            for t in discovered_tools:
+                t_name = getattr(t, "name", "")
+                t_desc = (getattr(t, "description", "") or "")[:80]
+                if t_name:
+                    print(f"      {dim('↳')} {t_name:<24} {dim(t_desc)}")
 
     # Context-manager support so callers can use `with ROFSession(...) as s:`
     def __enter__(self) -> "ROFSession":

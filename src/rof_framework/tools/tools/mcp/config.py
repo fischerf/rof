@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Optional, Union
 
 __all__ = [
     "MCPTransport",
@@ -97,6 +97,34 @@ class MCPServerConfig:
         Arbitrary extra HTTP headers (e.g. ``{"X-Api-Key": "..."}``).
         Merged with any ``Authorization`` header derived from ``auth_bearer``.
 
+    ssl_verify:
+        Controls SSL certificate verification for HTTP transport.
+
+        - ``True`` (default) — verify using the system/default CA bundle.
+        - ``False`` — disable verification entirely.  **Use only for
+          development or when connecting to a trusted internal host.**
+          A warning is emitted each time a connection is opened.
+        - A ``str`` path — path to a custom CA bundle file or directory
+          (e.g. ``"/etc/ssl/certs/my-corp-ca.pem"`` or the path exported
+          by ``certifi.where()``).  Use this for servers signed by an
+          internal/corporate CA that is not in the system trust store.
+
+        Examples::
+
+            # Corporate GitLab with self-signed / internal CA cert:
+            cfg = MCPServerConfig.http(
+                name="gitlab-issues",
+                url="https://gitlab.corp.example.com/mcp",
+                ssl_verify="/path/to/corp-ca-bundle.pem",
+            )
+
+            # Disable verification for a local dev instance (not for prod):
+            cfg = MCPServerConfig.http(
+                name="dev-mcp",
+                url="https://localhost:8443/mcp",
+                ssl_verify=False,
+            )
+
     -- routing --
 
     trigger_keywords:
@@ -152,6 +180,9 @@ class MCPServerConfig:
 
     auth_headers: dict[str, str] = field(default_factory=dict)
     """Arbitrary extra HTTP headers."""
+
+    ssl_verify: Union[bool, str] = True
+    """SSL verification: True (default), False (disable), or path to a CA bundle."""
 
     # ── routing ───────────────────────────────────────────────────────────
     trigger_keywords: list[str] = field(default_factory=list)
@@ -233,6 +264,7 @@ class MCPServerConfig:
         connect_timeout: float = 30.0,
         call_timeout: Optional[float] = 60.0,
         namespace_tools: bool = True,
+        ssl_verify: Union[bool, str] = True,
     ) -> "MCPServerConfig":
         """
         Convenience factory for HTTP servers.
@@ -243,6 +275,13 @@ class MCPServerConfig:
                 name="sentry",
                 url="https://mcp.sentry.io/mcp",
                 auth_bearer="sntrys_...",
+            )
+
+            # Internal GitLab with a corporate CA certificate:
+            cfg = MCPServerConfig.http(
+                name="gitlab-issues",
+                url="https://gitlab.corp.example.com/mcp",
+                ssl_verify="/etc/ssl/certs/corp-ca.pem",
             )
         """
         return cls(
@@ -255,6 +294,7 @@ class MCPServerConfig:
             connect_timeout=connect_timeout,
             call_timeout=call_timeout,
             namespace_tools=namespace_tools,
+            ssl_verify=ssl_verify,
         )
 
     def effective_headers(self) -> dict[str, str]:

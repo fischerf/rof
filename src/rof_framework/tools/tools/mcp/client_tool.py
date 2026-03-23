@@ -52,12 +52,90 @@ import asyncio
 import concurrent.futures as _cf
 import json
 import logging
+import os
 import re
 import threading
-from typing import Any, Optional
+from typing import Any, Callable, Optional, Union
 
 from rof_framework.core.interfaces.tool_provider import ToolProvider, ToolRequest, ToolResponse
 from rof_framework.tools.tools.mcp.config import MCPServerConfig, MCPTransport
+
+# ---------------------------------------------------------------------------
+# SSL helper
+# ---------------------------------------------------------------------------
+
+
+def _make_http_client_factory(
+    ssl_verify: Union[bool, str],
+) -> "Callable[..., Any]":
+    """
+    Return an ``httpx_client_factory`` compatible with ``streamablehttp_client``
+    that honours the given *ssl_verify* setting.
+
+    Parameters
+    ----------
+    ssl_verify:
+        - ``True``  — default CA verification (no custom factory needed, but
+          we still return one for a uniform code path).
+        - ``False`` — disable certificate verification entirely.  A warning
+          is logged each time the factory is invoked.
+        - ``str``   — path to a CA bundle file or directory used as the
+          ``verify`` argument passed to ``httpx.AsyncClient``.
+    """
+    import httpx
+
+    def _factory(
+        headers: "dict[str, str] | None" = None,
+        timeout: "httpx.Timeout | None" = None,
+        auth: "httpx.Auth | None" = None,
+    ) -> "httpx.AsyncClient":
+        if ssl_verify is False:
+            logger.warning(
+                "MCPClientTool: SSL certificate verification is DISABLED. "
+                "Only use this for trusted internal hosts."
+            )
+        kwargs: dict[str, Any] = {
+            "follow_redirects": True,
+            "verify": ssl_verify,
+        }
+        if timeout is None:
+            kwargs["timeout"] = httpx.Timeout(30.0, read=300.0)
+        else:
+            kwargs["timeout"] = timeout
+        if headers is not None:
+            kwargs["headers"] = headers
+        if auth is not None:
+            kwargs["auth"] = auth
+        return httpx.AsyncClient(**kwargs)
+
+    return _factory
+
+
+def _make_stdio_env(extra: dict[str, str]) -> dict[str, str]:
+    """
+    Build the environment dict for a stdio subprocess.
+
+    The MCP SDK's ``get_default_environment()`` returns a minimal allowlist of
+    safe variables (PATH, TEMP, USERPROFILE, …).  When callers supply their own
+    ``env`` dict via ``MCPServerConfig.env``, the SDK passes *only* that dict
+    to the subprocess — silently dropping PATH, GITLAB_TOKEN, and everything
+    else the process needs.
+
+    When the caller is explicitly providing custom env vars (i.e. ``extra`` is
+    non-empty) it means they are deliberately configuring the subprocess
+    environment, so we start from the **full parent** ``os.environ`` instead of
+    the SDK's restricted allowlist.  This ensures:
+      - The subprocess inherits PATH, TEMP, USERPROFILE, and all other vars
+        the OS / runtime needs to start correctly.
+      - Any vars already set in the shell (GITLAB_TOKEN, GITLAB_URL, …) are
+        forwarded automatically — no re-declaration needed.
+      - Keys in ``extra`` override whatever the parent env provides
+        (last-write wins), so ``--mcp-ssl-no-verify`` still takes effect.
+    """
+    env = dict(os.environ)
+    env.update(extra)
+    return env
+
 
 logger = logging.getLogger("rof.tools.mcp")
 
@@ -297,7 +375,7 @@ class MCPClientTool(ToolProvider):
             params = StdioServerParameters(
                 command=cfg.command,
                 args=cfg.args,
-                env=cfg.env if cfg.env else None,
+                env=_make_stdio_env(cfg.env) if cfg.env else None,
             )
             async with stdio_client(params) as (read, write):
                 async with ClientSession(read, write) as session:
@@ -318,7 +396,14 @@ class MCPClientTool(ToolProvider):
             from mcp.client.streamable_http import streamablehttp_client
 
             headers = cfg.effective_headers()
-            async with streamablehttp_client(cfg.url, headers=headers if headers else None) as (
+            http_factory = (
+                _make_http_client_factory(cfg.ssl_verify) if cfg.ssl_verify is not True else None
+            )
+            async with streamablehttp_client(
+                cfg.url,
+                headers=headers if headers else None,
+                **({"httpx_client_factory": http_factory} if http_factory else {}),
+            ) as (
                 read,
                 write,
                 _,
@@ -364,7 +449,7 @@ class MCPClientTool(ToolProvider):
         params = StdioServerParameters(
             command=cfg.command,
             args=cfg.args,
-            env=cfg.env if cfg.env else None,
+            env=_make_stdio_env(cfg.env) if cfg.env else None,
         )
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
@@ -390,7 +475,14 @@ class MCPClientTool(ToolProvider):
 
         cfg = self._config
         headers = cfg.effective_headers()
-        async with streamablehttp_client(cfg.url, headers=headers if headers else None) as (
+        http_factory = (
+            _make_http_client_factory(cfg.ssl_verify) if cfg.ssl_verify is not True else None
+        )
+        async with streamablehttp_client(
+            cfg.url,
+            headers=headers if headers else None,
+            **({"httpx_client_factory": http_factory} if http_factory else {}),
+        ) as (
             read,
             write,
             _,
@@ -524,13 +616,18 @@ class MCPClientTool(ToolProvider):
         except (json.JSONDecodeError, TypeError):
             parsed = text_output
 
+        result_text: str = parsed if isinstance(parsed, str) else json.dumps(parsed)
         return ToolResponse(
             success=True,
             output={
                 "MCPResult": {
                     "server": self._config.name,
                     "tool": mcp_tool_name,
-                    "result": (parsed if isinstance(parsed, str) else json.dumps(parsed)),
+                    "result": result_text,
+                    # "content" is the attribute FileSaveTool looks for — expose
+                    # the result text under that key so the two tools compose
+                    # without requiring an extra bridging step in the plan.
+                    "content": result_text,
                     "success": True,
                 }
             },
@@ -607,6 +704,12 @@ class MCPClientTool(ToolProvider):
           1. ``__mcp_args__`` escape hatch.
           2. Flat (non-entity) dict – passed through as-is.
           3. Merged entity attribute dict (strips ``__``-prefixed keys).
+
+        After merging, values are coerced to match the target MCP tool's
+        parameter schema.  The most common mismatch is ``project_id`` arriving
+        as an ``int`` (the RL planner writes ``Task has project_id of 303.``)
+        while the tool is annotated ``project_id: str``.  Any value whose
+        corresponding parameter is typed ``str`` is silently stringified.
         """
         inp = request.input
 
@@ -618,7 +721,8 @@ class MCPClientTool(ToolProvider):
         }
 
         if not entity_entries:
-            return {k: v for k, v in inp.items() if not k.startswith("__")}
+            raw = {k: v for k, v in inp.items() if not k.startswith("__")}
+            return self._coerce_arguments(raw)
 
         merged: dict[str, Any] = {}
         for entity_data in entity_entries.values():
@@ -626,7 +730,64 @@ class MCPClientTool(ToolProvider):
                 if attr_key.startswith("__"):
                     continue
                 merged[attr_key] = attr_val
-        return merged
+        return self._coerce_arguments(merged)
+
+    def _coerce_arguments(self, args: dict[str, Any]) -> dict[str, Any]:
+        """
+        Coerce argument values to match the resolved MCP tool's parameter types.
+
+        Looks up the Pydantic/JSON-schema for the tool currently targeted by
+        ``_resolve_mcp_tool_name`` and converts values where the schema says
+        ``"type": "string"`` but the snapshot delivered an int or float.
+
+        Falls back to the unmodified dict when schema information is unavailable
+        so existing behaviour is preserved.
+        """
+        if not self._mcp_tools:
+            return args
+
+        # Find the tool whose parameters best match the current arg keys.
+        # We try each known tool and pick the one that shares the most keys.
+        best_tool_def = None
+        best_overlap = -1
+        arg_keys = set(args.keys())
+        for tool_def in self._mcp_tools:
+            schema: dict[str, Any] = getattr(tool_def, "inputSchema", None) or {}
+            props: dict[str, Any] = schema.get("properties", {})
+            overlap = len(arg_keys & set(props.keys()))
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_tool_def = tool_def
+
+        if best_tool_def is None:
+            return args
+
+        schema = getattr(best_tool_def, "inputSchema", None) or {}
+        props = schema.get("properties", {})
+
+        coerced: dict[str, Any] = {}
+        for key, val in args.items():
+            prop_schema = props.get(key, {})
+            expected_type = prop_schema.get("type", "")
+            if expected_type == "string" and not isinstance(val, str):
+                coerced[key] = str(val)
+            elif expected_type == "integer" and isinstance(val, str) and val.isdigit():
+                coerced[key] = int(val)
+            elif expected_type == "number" and isinstance(val, str):
+                try:
+                    coerced[key] = float(val)
+                except ValueError:
+                    coerced[key] = val
+            else:
+                coerced[key] = val
+
+        logger.debug(
+            "MCPClientTool[%s]: coerced args %s → %s",
+            self._config.name,
+            {k: type(v).__name__ for k, v in args.items()},
+            {k: type(v).__name__ for k, v in coerced.items()},
+        )
+        return coerced
 
     def __repr__(self) -> str:
         status = "connected" if self._connected else "disconnected"

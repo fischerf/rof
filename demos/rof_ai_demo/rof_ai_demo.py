@@ -325,6 +325,15 @@ def _build_mcp_configs(args: argparse.Namespace) -> list:
       Token (optional): passed via  --mcp-token TOKEN  (applied to ALL HTTP
       servers that don't have an inline token; for per-server tokens use the
       programmatic API directly).
+
+    --mcp-ssl-no-verify
+      Disable SSL certificate verification for all MCP servers.
+      For HTTP servers: sets ssl_verify=False on the httpx client.
+      For stdio servers: injects NODE_TLS_REJECT_UNAUTHORIZED=0 and
+      PYTHONHTTPSVERIFY=0 into the subprocess environment so that
+      Node.js- and Python-based MCP servers also skip cert checks.
+      Use only when connecting to trusted internal hosts with self-signed
+      or corporate-CA certificates not in the system trust store.
     """
     if not _HAS_MCP:
         raw_stdio = getattr(args, "mcp_stdio", None) or []
@@ -340,6 +349,7 @@ def _build_mcp_configs(args: argparse.Namespace) -> list:
     configs: list = []
     mcp_token: str = getattr(args, "mcp_token", "") or ""
     mcp_keywords: list[str] = list(getattr(args, "mcp_keywords", None) or [])
+    ssl_no_verify: bool = bool(getattr(args, "mcp_ssl_no_verify", False))
 
     # ── stdio servers  ────────────────────────────────────────────────────
     # argparse nargs="+" collects everything after the flag into one flat
@@ -352,11 +362,32 @@ def _build_mcp_configs(args: argparse.Namespace) -> list:
         name = entry[0]
         command = entry[1]
         cmd_args = entry[2:]
+
+        # When SSL verification is disabled, inject env vars that tell the
+        # subprocess runtime to skip cert checks too.
+        #   NODE_TLS_REJECT_UNAUTHORIZED=0  – Node.js / npx MCP servers
+        #   PYTHONHTTPSVERIFY=0             – Python-based MCP servers (urllib)
+        #   REQUESTS_CA_BUNDLE=""           – requests / urllib3 (Python)
+        #   GITLAB_SSL_VERIFY=0             – gitlab_client.py (uses httpx)
+        stdio_env: dict[str, str] = {}
+        if ssl_no_verify:
+            stdio_env = {
+                "NODE_TLS_REJECT_UNAUTHORIZED": "0",
+                "PYTHONHTTPSVERIFY": "0",
+                "REQUESTS_CA_BUNDLE": "",
+                "GITLAB_SSL_VERIFY": "0",
+            }
+            warn(
+                f"MCP stdio '{name}': SSL verification DISABLED "
+                "(NODE_TLS_REJECT_UNAUTHORIZED=0).  Use only for trusted hosts."
+            )
+
         try:
             cfg = MCPServerConfig.stdio(  # type: ignore[union-attr]
                 name=name,
                 command=command,
                 args=cmd_args,
+                env=stdio_env,
                 trigger_keywords=mcp_keywords if mcp_keywords else [],
             )
             configs.append(cfg)
@@ -372,12 +403,15 @@ def _build_mcp_configs(args: argparse.Namespace) -> list:
             continue
         name = entry[0]
         url = entry[1]
+        if ssl_no_verify:
+            warn(f"MCP HTTP '{name}': SSL verification DISABLED.  Use only for trusted hosts.")
         try:
             cfg = MCPServerConfig.http(  # type: ignore[union-attr]
                 name=name,
                 url=url,
                 auth_bearer=mcp_token,
                 trigger_keywords=mcp_keywords if mcp_keywords else [],
+                ssl_verify=not ssl_no_verify,
             )
             configs.append(cfg)
             info(
@@ -458,6 +492,16 @@ def _parse_args() -> argparse.Namespace:
               Custom trigger keywords for all MCP servers:
                 --mcp-keywords "read file" "list directory"
                 (If omitted, keywords are auto-discovered from the server.)
+
+              Disable SSL certificate verification (corporate/self-signed CAs):
+                --mcp-ssl-no-verify
+                For HTTP servers: skips httpx certificate checks.
+                For stdio servers: injects NODE_TLS_REJECT_UNAUTHORIZED=0 and
+                PYTHONHTTPSVERIFY=0 into the subprocess env so Node.js- and
+                Python-based MCP servers also skip cert verification.
+                Use only for trusted internal hosts.
+                Example (GitLab behind a corporate CA):
+                  --mcp-stdio gitlab-issues npx -y @gitlab/mcp-server --mcp-ssl-no-verify
 
             GitHub Copilot tips:
             First run   : python rof_ai_demo.py --provider github_copilot
@@ -678,6 +722,21 @@ def _parse_args() -> argparse.Namespace:
             "Static trigger keywords forwarded to ALL MCP servers.  "
             "When omitted, keywords are auto-discovered from each server's tool list.  "
             'Example: --mcp-keywords "read file" "list directory"'
+        ),
+    )
+    mcp.add_argument(
+        "--mcp-ssl-no-verify",
+        dest="mcp_ssl_no_verify",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable SSL certificate verification for ALL MCP servers.  "
+            "For HTTP servers: skips httpx certificate checks.  "
+            "For stdio servers: injects NODE_TLS_REJECT_UNAUTHORIZED=0 and "
+            "PYTHONHTTPSVERIFY=0 into the subprocess environment so Node.js- "
+            "and Python-based MCP servers also skip cert checks.  "
+            "Use only when connecting to trusted internal hosts whose certificates "
+            "are signed by a corporate/internal CA not in the system trust store."
         ),
     )
 

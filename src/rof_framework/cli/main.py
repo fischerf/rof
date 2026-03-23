@@ -820,6 +820,133 @@ the user provides. Output only the .rl source.\
 """
 
 
+# ── File-save attribute keys recognised as "saved to disk" ───────────────────
+_FILE_ATTRS = {"file_path", "saved_to", "output_file", "filename"}
+# ── Attribute keys whose values are long prose (wrap them nicely) ─────────────
+_PROSE_ATTRS = {
+    "summary",
+    "result",
+    "content",
+    "description",
+    "text",
+    "report",
+    "answer",
+    "response",
+    "analysis",
+    "output",
+}
+# ── Width for wrapped prose output ───────────────────────────────────────────
+_WRAP_WIDTH = 100
+
+
+def _is_file_attr(key: str) -> bool:
+    """Return True when *key* is a known file-output attribute."""
+    return key in _FILE_ATTRS
+
+
+def _has_file_saved(attrs: dict) -> bool:
+    """Return True when any attribute in *attrs* indicates a saved file."""
+    return any(_is_file_attr(k) for k in attrs)
+
+
+def _print_entity_state(
+    ent_name: str,
+    attrs: dict,
+    preds: list,
+    desc: str,
+    failed_goals: list[dict] | None = None,
+) -> None:
+    """
+    Pretty-print a single entity's state.
+
+    Rules
+    -----
+    * If the entity has a file-save attribute (``file_path``, ``saved_to``, …)
+      show **only** that location line (suppress all other attributes).
+    * Long prose attributes (``summary``, ``result``, …) are word-wrapped.
+    * If the entity has *no* attributes and *no* predicates, print ``...``
+      and, when *failed_goals* is given, append a short failure hint.
+    """
+    header = f"  {bold(cyan(ent_name))}" + (f"  {dim(repr(desc))}" if desc else "")
+    print(header)
+
+    # ── No state at all ───────────────────────────────────────────────────────
+    if not attrs and not preds:
+        print(f"    {dim('...')}")
+        if failed_goals:
+            for g in failed_goals:
+                hint = g.get("error") or g.get("result") or g.get("expr", "")
+                if hint:
+                    snippet = str(hint)[:160].replace("\n", " ")
+                    print(f"    {red('↳')} {dim(snippet)}")
+        return
+
+    # ── File-save entity: show only location ──────────────────────────────────
+    if _has_file_saved(attrs):
+        for k in _FILE_ATTRS:
+            if k in attrs:
+                path_val = attrs[k]
+                bytes_val = attrs.get("bytes_written")
+                size_hint = f"  {dim(f'({bytes_val} bytes)')}" if bytes_val else ""
+                print(f"    {green('📄')} {bold(str(path_val))}{size_hint}")
+        return
+
+    # ── Normal entity ─────────────────────────────────────────────────────────
+    indent = "    "
+    for k, v in attrs.items():
+        str_v = str(v)
+        if k in _PROSE_ATTRS and len(str_v) > 80:
+            # Word-wrap long prose values
+            label = f"{blue(k)} ="
+            first_indent = indent + label + " "
+            cont_indent = indent + " " * (len(k) + 3)
+            lines = textwrap.wrap(
+                str_v, width=_WRAP_WIDTH, initial_indent=first_indent, subsequent_indent=cont_indent
+            )
+            for line in lines:
+                print(green(line))
+        else:
+            print(f"{indent}{blue(k)} = {green(repr(v))}")
+    for p in preds:
+        print(f"{indent}{dim('is')} {yellow(p)}")
+
+
+def _print_result_section(snap: dict, failed_goals: list[dict] | None = None) -> None:
+    """
+    Print the «Final state» section from a snapshot dict.
+
+    *failed_goals* is a list of goal dicts (with at least ``status`` and
+    ``expr``) used to surface short failure hints for empty entities.
+    """
+    _section("Final state")
+    entities = snap.get("entities", {})
+    if not entities:
+        print(f"  {dim('(no entities in snapshot)')}")
+        return
+
+    # Build a map of entity-name → list of failed goal dicts for hint lookup
+    fail_map: dict[str, list[dict]] = {}
+    for g in failed_goals or []:
+        if g.get("status") in ("FAILED", "ERROR"):
+            expr = g.get("expr", "")
+            # Heuristic: associate failure with any entity name mentioned
+            for ent in entities:
+                if ent.lower() in expr.lower():
+                    fail_map.setdefault(ent, []).append(g)
+
+    for ent_name, ent in entities.items():
+        attrs = ent.get("attributes", {})
+        preds = ent.get("predicates", [])
+        desc = ent.get("description", "")
+        _print_entity_state(
+            ent_name,
+            attrs,
+            preds,
+            desc,
+            failed_goals=fail_map.get(ent_name),
+        )
+
+
 def _print_stats(acc: Any) -> None:
     """Print a Stats section from a UsageAccumulator (human output only)."""
     _section("Stats")
@@ -1422,23 +1549,15 @@ def cmd_run(args: argparse.Namespace) -> int:
     if result.error:
         print(f"  {red('error:')} {result.error}")
 
-    _section("Final state")
     snap = result.snapshot
-    for ent_name, ent in snap.get("entities", {}).items():
-        attrs = ent.get("attributes", {})
-        preds = ent.get("predicates", [])
-        desc = ent.get("description", "")
-        print(f"  {bold(cyan(ent_name))}" + (f"  {dim(repr(desc))}" if desc else ""))
-        for k, v in attrs.items():
-            print(f"    {blue(k)} = {green(repr(v))}")
-        for p in preds:
-            print(f"    {dim('is')} {yellow(p)}")
-        if not attrs and not preds:
-            print(f"    {dim('(no state)')}")
+    all_goals: list[dict] = snap.get("goals", [])
+    failed_goals = [g for g in all_goals if g.get("status") in ("FAILED", "ERROR")]
+
+    _print_result_section(snap, failed_goals=failed_goals)
 
     if verbose:
         _section("Goal results")
-        for g in snap.get("goals", []):
+        for g in all_goals:
             status = g["status"]
             colour = green if status == "ACHIEVED" else (red if status == "FAILED" else dim)
             print(f"  {colour('●')} {g['expr']}")
@@ -1837,7 +1956,14 @@ def cmd_pipeline_run(args: argparse.Namespace) -> int:
         ela = getattr(step, "elapsed_s", "?")
         print(f"  {mark} {bold(name)}  {dim(f'{ela}s')}")
         if not ok and hasattr(step, "error") and step.error:
-            print(f"    {red(step.error)}")
+            print(f"    {red('↳')} {dim(step.error[:160])}")
+
+    # ── Final snapshot ────────────────────────────────────────────────────
+    final_snap = getattr(result, "final_snapshot", None) or {}
+    if final_snap:
+        all_goals: list[dict] = final_snap.get("goals", [])
+        failed_goals = [g for g in all_goals if g.get("status") in ("FAILED", "ERROR")]
+        _print_result_section(final_snap, failed_goals=failed_goals)
 
     print()
     return 0 if result.success else 1
