@@ -21,10 +21,13 @@ Exports
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import re
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
@@ -136,6 +139,71 @@ _TOOL_TRIGGER_STRIP = re.compile(
     r"save (?:file|csv|results|data|output)|write (?:file|csv|data))\b",
     re.IGNORECASE,
 )
+
+# URL regex used by _fetch_urls_from_snapshot
+_URL_RE = re.compile(
+    r'https?://[^\s\'"<>\]\)]+',
+    re.IGNORECASE,
+)
+
+# Max bytes to read from a fetched URL (512 KB)
+_URL_FETCH_MAX_BYTES = 524_288
+
+# Domains that are unlikely to return readable text (skip silently)
+_URL_SKIP_DOMAINS: frozenset = frozenset(
+    {
+        "localhost",
+        "127.0.0.1",
+    }
+)
+
+
+def _fetch_url_text(url: str, timeout: float = 15.0) -> str:
+    """
+    Fetch *url* and return its text content (HTML stripped to plain text).
+    Returns an empty string on any error so callers can skip silently.
+    """
+    try:
+        from urllib.parse import urlparse
+
+        host = urlparse(url).hostname or ""
+        if any(skip in host for skip in _URL_SKIP_DOMAINS):
+            return ""
+
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": ("Mozilla/5.0 (compatible; ROF-URLEnricher/1.0)"),
+                "Accept": "text/html,text/plain,*/*",
+            },
+        )
+        # Use an SSL context that doesn't verify certs so corporate proxies work
+        import ssl
+
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            raw = resp.read(_URL_FETCH_MAX_BYTES)
+            charset = "utf-8"
+            ct = resp.headers.get_content_charset()
+            if ct:
+                charset = ct
+            text = raw.decode(charset, errors="replace")
+
+        # Strip HTML tags and decode entities
+        text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.S | re.I)
+        text = re.sub(r"<script[^>]*>.*?</script>", " ", text, flags=re.S | re.I)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = html.unescape(text)
+        # Collapse whitespace
+        text = re.sub(r"\s{3,}", "\n\n", text)
+        return text.strip()[:8000]  # keep first 8 000 chars for context
+
+    except Exception:
+        return ""
+
 
 # Language-detection heuristics used by _save_fallback
 _LANG_HINTS: dict[str, tuple[str, list[str]]] = {
@@ -361,6 +429,9 @@ class ROFSession:
             mcp_hint=_mcp_hint,
         )
 
+        # ── URL-enrichment settings ───────────────────────────────────────
+        self._url_enrich_timeout: float = 15.0
+
         # ── Generated tools registry ──────────────────────────────────────
         # key = tool name (str), value = ToolProvider instance.
         self._generated_tools: dict[str, ToolProvider] = {}
@@ -373,8 +444,19 @@ class ROFSession:
             output_mode=output_mode,
             system_preamble=(
                 "You are a RelateLang workflow executor. "
-                "Interpret the context and respond with valid RelateLang statements. "
-                "Assign result attributes to entities to record your conclusions."
+                "Interpret the context and respond ONLY with valid RelateLang statements — "
+                "no prose, no markdown, no explanation outside of RelateLang.\n"
+                "Rules:\n"
+                "1. Assign ALL conclusions as entity attributes using:\n"
+                '   <Entity> has <attribute> of "<value>".\n'
+                "2. When a Report or Result entity is present in the context AND the goal "
+                "   is analysis/synthesis, you MUST write the full answer as:\n"
+                '   Report has content of "<full analysis text here>".\n'
+                "   This is REQUIRED — FileSaveTool reads the `content` attribute to save "
+                "   the file. Do NOT omit it.\n"
+                "3. If UrlContent entities appear in the context, use their `text` attribute "
+                "   as additional source material for the analysis.\n"
+                "4. Keep every string value on one line (escape newlines as \\n if needed)."
             ),
             system_preamble_json=(
                 "You are a RelateLang workflow executor. "
@@ -382,6 +464,9 @@ class ROFSession:
                 "object — no prose, no markdown, no text outside the JSON. "
                 'Required schema: {"attributes": [{"entity": "...", "name": "...", "value": ...}], '
                 '"predicates": [{"entity": "...", "value": "..."}], "reasoning": "..."}. '
+                "When a Report or Result entity is in context and the goal is analysis, "
+                'include {"entity": "Report", "name": "content", "value": "<full analysis>"} '
+                "in the attributes array. "
                 "Use `reasoning` for chain-of-thought. Leave arrays empty if nothing applies."
             ),
         )
@@ -694,6 +779,104 @@ class ROFSession:
         later_lower = later_goal_expr.lower()
         return any(tok.lower() in later_lower for tok in failed_tokens)
 
+    # ======================================================================
+    # URL enrichment
+    # ======================================================================
+
+    def _collect_urls_from_snapshot(self, snapshot: dict) -> list[str]:
+        """
+        Scan all entity attributes in *snapshot* for HTTP/HTTPS URLs.
+        Returns a deduplicated list preserving first-seen order.
+        """
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for ent_data in snapshot.get("entities", {}).values():
+            for val in ent_data.get("attributes", {}).values():
+                for url in _URL_RE.findall(str(val)):
+                    # Trim trailing punctuation that is not part of the URL
+                    url = url.rstrip(".,;:\"'")
+                    if url not in seen:
+                        seen.add(url)
+                        ordered.append(url)
+        return ordered
+
+    def _fetch_url_contents(self, snapshot: dict) -> dict[str, str]:
+        """
+        Fetch all URLs found in *snapshot* entity attributes.
+
+        Returns a mapping of ``url → text`` for every URL that yielded
+        non-empty content.  Empty / failed fetches are silently omitted.
+        """
+        urls = self._collect_urls_from_snapshot(snapshot)
+        results: dict[str, str] = {}
+        for idx, url in enumerate(urls, start=1):
+            info(f"Fetching URL {idx}/{len(urls)}: {url[:80]}…")
+            text = _fetch_url_text(url, timeout=self._url_enrich_timeout)
+            if text:
+                results[url] = text
+                step("URL", f"fetched {len(text)} chars from link {idx}")
+            else:
+                warn(f"  ↳ Could not fetch or empty response: {url[:80]}")
+        return results
+
+    def _build_seeded_ast(
+        self,
+        goal_expr: str,
+        snapshot: dict,
+        url_contents: dict[str, str],
+    ) -> Any:
+        """
+        Build a WorkflowAST for a single *goal_expr* retry that is pre-seeded
+        with:
+
+        * All entity attributes and predicates from *snapshot* (so the LLM
+          has the full accumulated graph state as context — including MCPResult,
+          Report, etc.)
+        * One ``UrlContent<N>`` entity per successfully fetched URL, carrying
+          the page text as a ``text`` attribute.
+
+        Because every ``orch.run()`` call creates a brand-new WorkflowGraph
+        from the AST, we must embed all context directly in the AST rather
+        than relying on a shared mutable graph.
+        """
+        from rof_framework.rof_core import Attribute as _Attr  # type: ignore
+        from rof_framework.rof_core import Definition as _Def  # type: ignore
+        from rof_framework.rof_core import Goal as _Goal  # type: ignore
+        from rof_framework.rof_core import Predicate as _Pred  # type: ignore
+        from rof_framework.rof_core import WorkflowAST as _AST  # type: ignore
+
+        ast = _AST()
+
+        # ── Replay all accumulated entity state from the snapshot ─────────
+        skip_entities = {"RoutingTrace"}  # noisy, not useful for LLM context
+        for ent_name, ent_data in snapshot.get("entities", {}).items():
+            if any(ent_name.startswith(prefix) for prefix in skip_entities):
+                continue
+            desc = ent_data.get("description", "")
+            ast.definitions.append(_Def(entity=ent_name, description=desc))
+            for attr_name, attr_val in ent_data.get("attributes", {}).items():
+                ast.attributes.append(_Attr(entity=ent_name, name=attr_name, value=attr_val))
+            for pred in ent_data.get("predicates", []):
+                ast.predicates.append(_Pred(entity=ent_name, value=pred))
+
+        # ── Inject fetched URL content as UrlContent<N> entities ──────────
+        for idx, (url, text) in enumerate(url_contents.items(), start=1):
+            ent_name = f"UrlContent{idx}"
+            # Sanitise: strip quotes and collapse newlines so the value fits
+            # safely inside a RelateLang string attribute
+            safe_text = text[:4000].replace('"', "'").replace("\n", " ").replace("\r", "")
+            safe_url = url.replace('"', "'")
+            ast.definitions.append(
+                _Def(entity=ent_name, description="Fetched content from linked URL")
+            )
+            ast.attributes.append(_Attr(entity=ent_name, name="source_url", value=safe_url))
+            ast.attributes.append(_Attr(entity=ent_name, name="text", value=safe_text))
+
+        # ── The single goal to (re-)execute ───────────────────────────────
+        ast.goals.append(_Goal(goal_expr=goal_expr))
+
+        return ast
+
     def _build_fallback_ast(
         self,
         original_goal_expr: str,
@@ -744,6 +927,21 @@ class ROFSession:
         if not failed_steps:
             return result
 
+        # ── URL enrichment: fetch any links found in the result snapshot ──
+        # We do this once up-front for the whole retry pass.  The fetched
+        # text is embedded directly into the seeded AST for each analysis
+        # retry — NOT via orch.run() — because each orch.run() creates a
+        # brand-new WorkflowGraph from the AST and throws the old graph away.
+        _analysis_keywords = {"analyse", "analysis", "write report", "summarise", "compose report"}
+        _has_analysis_retry = any(
+            any(kw in s.goal_expr.lower() for kw in _analysis_keywords) for s in failed_steps
+        )
+        _url_contents: dict[str, str] = {}
+        if _has_analysis_retry:
+            _url_contents = self._fetch_url_contents(result.snapshot)
+            if _url_contents:
+                info(f"URL enrichment: {len(_url_contents)} link(s) ready for context injection")
+
         warn(
             f"{len(failed_steps)} step(s) failed — starting retry loop "
             f"(max {self._step_retries} retry/step, "
@@ -777,14 +975,30 @@ class ROFSession:
 
             # ── Retry loop ────────────────────────────────────────────────
             retry_succeeded = False
+            _is_analysis = any(kw in goal_expr.lower() for kw in _analysis_keywords)
             for attempt in range(1, self._step_retries + 1):
                 warn(f"Retry {attempt}/{self._step_retries}: '{goal_expr[:70]}'")
 
-                single_rl = f"ensure {goal_expr}.\n"
-                try:
-                    single_ast = RLParser().parse(single_rl)
-                except Exception:
-                    break
+                # For analysis goals, build a seeded AST that carries the full
+                # accumulated graph state + any fetched URL content so the LLM
+                # receives the complete context in the brand-new WorkflowGraph.
+                # For all other goals, fall back to a plain single-goal AST.
+                if _is_analysis and (result.snapshot.get("entities") or _url_contents):
+                    try:
+                        single_ast = self._build_seeded_ast(
+                            goal_expr, result.snapshot, _url_contents
+                        )
+                    except Exception as exc:
+                        warn(f"  ↳ Seeded AST build failed ({exc}), falling back to plain retry")
+                        try:
+                            single_ast = RLParser().parse(f"ensure {goal_expr}.\n")
+                        except Exception:
+                            break
+                else:
+                    try:
+                        single_ast = RLParser().parse(f"ensure {goal_expr}.\n")
+                    except Exception:
+                        break
 
                 retry_result = orch.run(single_ast)
                 self._try_register_generated_tools(retry_result.snapshot, orch)

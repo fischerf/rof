@@ -67,9 +67,23 @@ Rules:
 - NO markdown fences (no ```lua or ```python).
 - NO prose, NO explanation before or after the code.
 - The code must be complete and runnable as-is.
-- For interactive programs (questionnaires, games, menus): use print() /
-  io.write() for prompts and input() / io.read() for answers.
 - Prefer clear, readable code with comments.
+
+## Interactive vs Non-Interactive
+
+NON-INTERACTIVE (default — used with CodeRunnerTool):
+- The script runs fully automated, no human present.
+- NEVER use input(), sys.stdin.read(), sys.stdin.readline(), or any
+  blocking read from stdin.
+- All parameters (URLs, filenames, paths, counts, …) come from the
+  context variables embedded in the script — hard-code sensible defaults
+  derived from the task description.
+- Print progress and results to stdout so the runner can capture them.
+
+INTERACTIVE (only when explicitly requested — used with LLMPlayerTool):
+- Use print() / io.write() for prompts and input() / io.read() for answers.
+- Only generate interactive code when the task explicitly says
+  "interactive", "questionnaire", "game", "menu", or "play".
 """
 
 
@@ -277,6 +291,25 @@ class AICodeGenTool(ToolProvider):
 
         return "python"  # sensible default
 
+    # Keywords that indicate the script will be driven interactively by LLMPlayerTool
+    _INTERACTIVE_GOAL_HINTS: frozenset = frozenset(
+        {
+            "interactive",
+            "questionnaire",
+            "game",
+            "play",
+            "menu",
+            "adventure",
+            "let llm play",
+            "llm player",
+        }
+    )
+
+    def _is_interactive_goal(self, goal: str) -> bool:
+        """Return True when the goal explicitly requests an interactive program."""
+        goal_lower = goal.lower()
+        return any(kw in goal_lower for kw in self._INTERACTIVE_GOAL_HINTS)
+
     def _build_codegen_prompt(self, goal: str, context: dict, lang: str) -> str:
         """Assemble the prompt for the code-generation LLM call."""
         attrs: list[str] = []
@@ -290,11 +323,37 @@ class AICodeGenTool(ToolProvider):
 
         attr_block = "\n".join(attrs) if attrs else "  (none)"
 
+        interactive = self._is_interactive_goal(goal)
+
+        if interactive:
+            mode_instruction = (
+                "This is an INTERACTIVE program — use print()/input() "
+                "(or io.write()/io.read() in Lua) freely for user prompts and answers."
+            )
+        else:
+            mode_instruction = (
+                "This is a NON-INTERACTIVE script that will be executed automatically "
+                "by a headless runner (no terminal, no human present).\n"
+                "CRITICAL RULES for non-interactive scripts:\n"
+                "  1. NEVER call input(), sys.stdin.read(), sys.stdin.readline(), "
+                "raw_input(), or ANY other blocking stdin read.\n"
+                "  2. NEVER prompt the user for confirmation, folder choice, or any "
+                "other runtime parameter.\n"
+                "  3. Derive ALL parameters (output paths, URLs, filenames, counts) "
+                "from the context variables listed below or from sensible hardcoded "
+                "defaults.\n"
+                "  4. Print progress and results to stdout so they can be captured.\n"
+                "  5. If a network request or file operation fails, print the error "
+                "and continue — do NOT abort the whole script."
+            )
+
         return (
             f"Task: {goal}\n"
-            f"\n"
+            "\n"
             f"Context from workflow:\n{attr_block}\n"
-            f"\n"
+            "\n"
+            f"{mode_instruction}\n"
+            "\n"
             f"Write complete, runnable {lang} code that fulfils this task.\n"
             f"Output ONLY the {lang} source code.\n"
         )

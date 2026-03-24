@@ -10,3 +10,7 @@ demos/rof_ai_demo/rof_output/
 src/rof_providers/
 .coverage
 demos/rof_bot/.env
+tools/gitlab_mcp/knowledge/
+knowledge_store/
+start_ai_demo.bat
+rof_output/
