@@ -143,6 +143,7 @@ try:
     from rof_framework.tools.tools.mcp import MCPServerConfig  # type: ignore
 except ImportError:
     MCPServerConfig = None  # type: ignore[assignment,misc]
+from agent import run_agent  # noqa: E402
 from session import ROFSession  # noqa: E402
 from telemetry import _COMMS_DIR_NAME, _STATS  # noqa: E402
 from wizard import _setup_wizard  # noqa: E402
@@ -924,6 +925,60 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
 
+    # ------------------------------------------------------------------ #
+    # Agent mode options                                                  #
+    # ------------------------------------------------------------------ #
+    agent = p.add_argument_group(
+        "Agent mode (file-watching)",
+        (
+            "In agent mode the demo watches a plain-text file for commands written by "
+            "an external actor (e.g. a OneDrive-synced file edited from Teams / Notepad).  "
+            "Each new, previously-unseen command is fed directly into the ROF pipeline.  "
+            "After the command is consumed the watch file is cleared automatically.  "
+            "All console output is tee'd to a log file so a remote viewer can read results."
+        ),
+    )
+    agent.add_argument(
+        "--agent",
+        action="store_true",
+        default=False,
+        help=(
+            "Activate agent mode.  The demo watches --agent-watch for commands instead "
+            "of opening the interactive REPL."
+        ),
+    )
+    agent.add_argument(
+        "--agent-watch",
+        dest="agent_watch",
+        metavar="PATH",
+        default="",
+        help=(
+            "Path to the file that the agent polls for incoming commands.  "
+            "Defaults to <output-dir>/agent_input.txt."
+        ),
+    )
+    agent.add_argument(
+        "--agent-log",
+        dest="agent_log",
+        metavar="PATH",
+        default="",
+        help=(
+            "Path to the file where all console output is written during agent mode.  "
+            "Defaults to <output-dir>/agent_output.txt."
+        ),
+    )
+    agent.add_argument(
+        "--agent-poll",
+        dest="agent_poll",
+        type=float,
+        default=2.0,
+        metavar="SECONDS",
+        help=(
+            "How often (in seconds) the agent checks the watch file for a new command.  "
+            "Default: 2.0"
+        ),
+    )
+
     return p.parse_args()
 
 
@@ -1073,8 +1128,38 @@ def main() -> None:
     elif not _HAS_AUDIT:
         info(f"Audit log     : {dim('unavailable (governance package not installed)')}")
 
+    # ── Show active agent configuration ──────────────────────────────────
+    _agent_mode: bool = getattr(args, "agent", False)
+    _agent_watch_path: Optional[Path] = None
+    _agent_log_path: Optional[Path] = None
+    _agent_poll: float = 2.0
+    if _agent_mode:
+        _agent_watch_str: str = getattr(args, "agent_watch", "").strip()
+        _agent_watch_path = Path(_agent_watch_str) if _agent_watch_str else None
+        if _agent_watch_path is None:
+            err("Agent mode requires --agent-watch <PATH> (or the default path must be set).")
+            sys.exit(1)
+
+        _agent_log_str: str = getattr(args, "agent_log", "").strip()
+        _agent_log_path = (
+            Path(_agent_log_str) if _agent_log_str else output_dir / "agent_output.txt"
+        )
+        _agent_poll = max(0.1, float(getattr(args, "agent_poll", 2.0)))
+
+        info(f"Agent mode    : {bold(cyan('active'))}")
+        info(f"  watch file  : {dim(str(_agent_watch_path))}")
+        info(f"  log  file   : {dim(str(_agent_log_path))}")
+        info(f"  poll        : {dim(str(_agent_poll) + ' s')}")
+
     # ── Run ──────────────────────────────────────────────────────────────
-    if args.one_shot:
+    if _agent_mode and _agent_watch_path is not None and _agent_log_path is not None:
+        run_agent(
+            session=session,
+            watch_file=_agent_watch_path,
+            log_file=_agent_log_path,
+            poll_interval=_agent_poll,
+        )
+    elif args.one_shot:
         try:
             session.run(args.one_shot)
         except Exception as e:
