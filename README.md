@@ -648,7 +648,7 @@ ROF is **not** a replacement for:
   OrchestratorConfig
       Controls the Orchestrator execution loop.
       output_mode: "auto" | "json" | "rl"
-        "auto"  → use "json" if provider.supports_structured_output(), else "rl"
+        "auto"  → use "json" if provider.supports_json_output(), else "rl"
         "json"  → enforce JSON schema output (structured, schema-validated)
         "rl"    → ask for RelateLang text output (legacy, regex fallback)
       system_preamble / system_preamble_json — swapped automatically by mode.
@@ -661,6 +661,20 @@ ROF is **not** a replacement for:
 ```
   LLMProvider (ABC)
   │   Unified interface — swap models without touching workflow code.
+  │
+  │   Key capability methods (override in concrete providers):
+  │     supports_structured_output() → True  server-side JSON schema enforcement
+  │                                           (OpenAI json_schema, Anthropic tool_use,
+  │                                            Gemini response_schema, Ollama format).
+  │     supports_json_output()       → True  provider reliably follows the ROF JSON
+  │                                           schema instruction — either via server-side
+  │                                           enforcement OR prompt injection.
+  │                                           The "auto" output-mode selector uses this
+  │                                           (not supports_structured_output) so capable
+  │                                           models (e.g. GPT-5.1) get json mode
+  │                                           even without a native schema API.
+  │                                           Default: delegates to supports_structured_output().
+  │     supports_tool_calling()      → True  native function/tool-call interface available.
   │
   ├── AnthropicProvider   (claude-opus-4-5, claude-sonnet-4-5, claude-haiku-3-5, …)
   │     Structured output via forced tool_use ("rof_graph_update").
@@ -708,6 +722,8 @@ ROF is **not** a replacement for:
   │   AuthError + ContextLimitError are never retried.
   │   Parse-retry: re-prompts with a mode-aware hint when the expected
   │     output (RL or JSON) is not returned — works in both output modes.
+  │     In JSON mode, a response whose only content is a non-empty "prose"
+  │     field is accepted as valid (no retry triggered).
   │
   PromptRenderer
   │   Assembles the final LLMRequest for a single Orchestrator step.
@@ -726,8 +742,10 @@ ROF is **not** a replacement for:
   │   JSON deltas are always re-emitted as RL statements so the audit
   │   snapshot stays in a single, uniform RelateLang format.
   │   → attribute_deltas  { "Customer": { "segment": "HighValue" } }
+  │     Note: a "prose" field in the JSON response is surfaced here as
+  │     attribute_deltas["__prose__"]["content"] for downstream inspection.
   │   → predicate_deltas  { "Customer": ["premium"] }
-  │   → is_valid_rl       True / False
+  │   → is_valid_rl       True / False (prose-only JSON counts as valid)
   │   → warnings          list of non-fatal parse notes
   │
   ParsedResponse
@@ -807,6 +825,18 @@ ROF is **not** a replacement for:
                 "vllm" | "github_copilot"
       llm = create_provider("anthropic", api_key="sk-ant-...",
                             model="claude-opus-4-5")
+
+  ROF_GRAPH_UPDATE_SCHEMA  (shared JSON schema in rof_framework.llm.providers.base)
+      The single structured-output schema used across all JSON-mode providers.
+      All four fields are present in every response:
+        attributes  array of {entity, name, value} — structured state updates
+        predicates  array of {entity, value}        — categorical conclusions
+        prose       string — free-form text deliverable (reports, summaries,
+                             recommendations, natural-language answers).
+                             The orchestrator stores this automatically as
+                             <ReportEntity>.content so FileSaveTool finds it.
+        reasoning   string — internal chain-of-thought scratchpad (audit only)
+      Required: attributes, predicates.  prose and reasoning default to "".
 ```
 
 ---
@@ -1716,7 +1746,7 @@ except BudgetExceededError as e:
     print(tracker.summary())        # stats up to the point of halt
 ```
 
-Custom and generic providers (e.g. `XYZChatAIProvider`) report their token
+Custom and generic providers (e.g. `AIProvider`) report their token
 counts by overriding `LLMProvider.extract_usage()` — the `TrackingProvider`
 calls this hook first and falls back to built-in raw-dict heuristics for the
 four bundled providers.

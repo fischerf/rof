@@ -7,6 +7,7 @@ Exports
 -------
   rof_core, rof_llm, rof_tools          – raw module references (rof_tools may be None)
   _HAS_TOOLS, _HAS_ROUTING              – feature-availability flags
+  _HAS_AUDIT                            – True when governance.audit is available
 
   # rof_core symbols
   EventBus, LLMProvider, LLMRequest, Orchestrator, OrchestratorConfig,
@@ -19,6 +20,10 @@ Exports
   # rof_tools symbols (only when _HAS_TOOLS is True)
   AICodeGenTool, FileSaveTool, HumanInLoopMode, LLMPlayerTool,
   create_default_registry
+
+  # governance.audit symbols (only when _HAS_AUDIT is True)
+  AuditConfig, AuditSubscriber, AuditSink,
+  JsonLinesSink, NullSink, StdoutSink, create_sink
 """
 
 from __future__ import annotations
@@ -178,6 +183,33 @@ else:
     RoutingMemoryInspector = None  # type: ignore[assignment,misc]
 
 # ---------------------------------------------------------------------------
+# governance.audit – optional (bundled with rof_framework.governance)
+# ---------------------------------------------------------------------------
+_HAS_AUDIT: bool = False
+AuditConfig = None  # type: ignore[assignment,misc]
+AuditSubscriber = None  # type: ignore[assignment,misc]
+AuditSink = None  # type: ignore[assignment,misc]
+JsonLinesSink = None  # type: ignore[assignment,misc]
+NullSink = None  # type: ignore[assignment,misc]
+StdoutSink = None  # type: ignore[assignment,misc]
+create_sink = None  # type: ignore[assignment,misc]
+
+try:
+    from rof_framework.governance.audit import (  # type: ignore
+        AuditConfig,
+        AuditSink,
+        AuditSubscriber,
+        JsonLinesSink,
+        NullSink,
+        StdoutSink,
+        create_sink,
+    )
+
+    _HAS_AUDIT = True
+except ImportError:
+    pass
+
+# ---------------------------------------------------------------------------
 # MCP client layer – optional (pip install mcp>=1.0  or  pip install rof[mcp])
 # ---------------------------------------------------------------------------
 _HAS_MCP: bool = False
@@ -208,6 +240,7 @@ __all__ = [
     "_HAS_TOOLS",
     "_HAS_ROUTING",
     "_HAS_MCP",
+    "_HAS_AUDIT",
     # helpers
     "_try_import",
     "_load_generic_providers",
@@ -245,4 +278,12 @@ __all__ = [
     "MCPServerConfig",
     "MCPToolFactory",
     "MCPTransport",
+    # governance.audit (may be None when _HAS_AUDIT is False)
+    "AuditConfig",
+    "AuditSubscriber",
+    "AuditSink",
+    "JsonLinesSink",
+    "NullSink",
+    "StdoutSink",
+    "create_sink",
 ]

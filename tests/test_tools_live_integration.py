@@ -266,13 +266,38 @@ def _assert_run(result: RunResult, fixture_name: str) -> None:
 # ── Parametrized test: standalone fixtures ─────────────────────────────────────
 
 
+# Per-fixture delay overrides (seconds).  Fixtures that make multiple LLM
+# calls (ai_codegen generates + validates, llm_player runs a full game loop)
+# need a longer cooldown than single-call fixtures like validator or file_reader.
+_FIXTURE_DELAYS: dict[str, float] = {
+    "ai_codegen.rl": 12.0,
+    "llm_player.rl": 12.0,
+    "web_search.rl": 8.0,
+    "code_runner.rl": 8.0,
+    "rag_retrieval.rl": 8.0,
+    "api_call.rl": 6.0,
+    "database_query.rl": 6.0,
+    "human_in_loop.rl": 6.0,
+    "file_reader.rl": 4.0,
+    "validator.rl": 4.0,
+}
+
+
 @pytest.mark.parametrize("fixture_name", STANDALONE_FIXTURES)
-def test_fixture_standalone(fixture_name: str, orchestrator_factory):
+def test_fixture_standalone(fixture_name: str, orchestrator_factory, request):
     """
     Run each standalone fixture .rl file against the live LLM and full
     tool registry.  Asserts the Orchestrator completes without exception
     and returns a non-empty run result.
+
+    A per-fixture post-test delay is applied via ``pytest.mark.live_delay``
+    to stay within the provider quota (100 req / 5 min).
     """
+    # Apply the per-fixture delay as a dynamic marker so the autouse
+    # _live_integration_throttle fixture in conftest.py picks it up.
+    delay = _FIXTURE_DELAYS.get(fixture_name, 4.0)
+    request.node.add_marker(pytest.mark.live_delay(delay))
+
     result = _run_fixture(fixture_name, orchestrator_factory)
     _assert_run(result, fixture_name)
 
@@ -280,11 +305,16 @@ def test_fixture_standalone(fixture_name: str, orchestrator_factory):
 # ── Sequential test: lua_save → lua_run ────────────────────────────────────────
 
 
+@pytest.mark.live_delay(15)
 def test_lua_save_then_run(orchestrator_factory):
     """
     lua_save.rl saves a Lua script to disk via FileSaveTool; lua_run.rl then
     executes it via LuaRunTool.  These two scripts are designed to run in
     sequence with the snapshot from stage 1 seeding stage 2.
+
+    A 15-second post-test delay is applied because two LLM-backed fixtures
+    run in sequence within a single test, consuming more quota than a
+    single-fixture test.
     """
     # Stage 1: save the Lua script to disk
     result_save = _run_fixture("lua_save.rl", orchestrator_factory)

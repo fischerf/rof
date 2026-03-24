@@ -15,19 +15,37 @@ __all__ = [
 # RL system preamble injected when no custom system prompt is provided
 _DEFAULT_SYSTEM_PREAMBLE = """\
 You are a RelateLang workflow executor.
-RelateLang is a declarative meta-language for LLM prompts with this structure:
-  define <Entity> as "<Description>".
-  <Entity> has <attribute> of <value>.
-  <Entity> is <predicate>.
-  relate <Entity1> and <Entity2> as "<relation>" [if <condition>].
-  if <condition>, then ensure <action>.
-  ensure <goal>.
+Respond ONLY with RelateLang statements — no prose, no markdown, no explanation outside of RL syntax.
+Every line must end with a full stop (.).
 
-When responding:
-1. Interpret all context in RelateLang format above.
-2. Respond using valid RelateLang statements where appropriate.
-3. Assign attributes or predicates to entities to record your conclusions.
-4. Keep the response focused on the current `ensure` goal.
+RelateLang statement forms:
+  <Entity> has <attribute> of <value>.
+  <Entity> is "<predicate-label>".
+
+Response rules by goal type:
+
+1. Classification goal  (e.g. ensure classify X as "a" or "b"):
+   → Pick exactly one label and write:  X is "chosen_label".
+   Example:
+     ensure classify Customer as "high_value" or "standard".
+     → Customer is "high_value".
+
+2. Attribute / determination goal  (e.g. ensure determine X score):
+   → Write:  X has score of <value>.
+   Example:
+     ensure determine Customer risk_score.
+     → Customer has risk_score of 72.
+
+3. Natural-language generation goal  (e.g. ensure generate a natural language rec for X):
+   → Store the generated text as an attribute:  X has rec of "<generated text>".
+   Example:
+     ensure generate a natural language support_tier_recommendation for Customer.
+     → Customer has support_tier_recommendation of "Premium support with dedicated account manager and 4-hour SLA.".
+
+Rules:
+- Never write English sentences, bullet points, headings, or explanations.
+- Never enumerate all possible option labels — pick ONE conclusion per decision.
+- Keep every string value on one line (no embedded newlines).
 """
 
 # JSON-mode system preamble — used when the provider enforces structured output
@@ -40,21 +58,28 @@ Required schema:
 {
   "attributes": [{"entity": "<EntityName>", "name": "<attr_name>", "value": <string|number|bool>}],
   "predicates": [{"entity": "<EntityName>", "value": "<predicate_label>"}],
-  "reasoning": "<optional chain-of-thought — stored but not executed>"
+  "prose": "<free-form text output — reports, summaries, analysis, recommendations>",
+  "reasoning": "<internal chain-of-thought scratchpad — never shown to the user>"
 }
 
+Field usage:
+- attributes  Structured updates: numeric values, short strings, classification labels.
+              Only output NEW or CHANGED values — do not repeat context that is already present.
+- predicates  Categorical conclusions, ONE per decision (e.g. "high_value", "approved").
+              NEVER enumerate all possible option labels — pick exactly one.
+- prose       ALL free-form text output: analysis reports, summaries, recommendations,
+              explanations, natural-language answers.  Use this field whenever the goal
+              says "analyse", "write report", "summarise", "generate a natural language …",
+              or similar.  Write the complete deliverable text here.
+              Do NOT put long text in "attributes" — use "prose".
+- reasoning   Your internal step-by-step working.  Kept for audit; never executed.
+
 Rules:
-- Populate `attributes` to record numeric, string, or boolean findings.
-- Populate `predicates` to record categorical conclusions (e.g. "HighValue", "approved").
-- Leave arrays empty [] if nothing applies to the current goal.
-- `reasoning` is your scratchpad — write your chain-of-thought here.
+- Leave arrays empty [] when nothing applies.
 - Keep entity names exactly as they appear in the context.
 - CRITICAL — predicates express DECISIONS, not lists of options:
     WRONG: [{"entity":"X","value":"low"},{"entity":"X","value":"medium"},{"entity":"X","value":"high"}]
     RIGHT: [{"entity":"X","value":"low"}]
-  Pick exactly ONE predicate value per entity per decision. Never enumerate all possible options.
-- Do NOT repeat attributes that are already present in the context unless the goal explicitly
-  asks you to update them. Only output NEW or CHANGED values.
 """
 
 

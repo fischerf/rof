@@ -4,19 +4,21 @@
 
 ## Module structure
 
-The demo is split into seven focused modules that live side-by-side in
+The demo is split into nine focused modules that live side-by-side in
 `demos/rof_ai_demo/`.  `rof_ai_demo.py` is the thin entry-point; every
 other concern lives in its own file.
 
 | Module | Responsibility |
 |--------|---------------|
-| `imports.py` | Bootstrap: `_try_import`, all `rof_framework` imports, `_HAS_TOOLS` / `_HAS_ROUTING` / `_HAS_MCP` flags |
+| `imports.py` | Bootstrap: `_try_import`, all `rof_framework` imports, `_HAS_TOOLS` / `_HAS_ROUTING` / `_HAS_MCP` / `_HAS_AUDIT` flags |
 | `telemetry.py` | `_SessionStats`, `_STATS` singleton, `_StatsTracker`, `_CommsLogger`, `_attach_debug_hooks` |
 | `console.py` | ANSI colour helpers, `_box` / `_print_box`, `banner` / `section` / `step` / `warn` / `err` / `info`, headline bar |
 | `planner.py` | `_PLANNER_SYSTEM_BASE`, `_build_planner_system`, `_make_knowledge_hint`, `_make_mcp_hint`, `Planner` |
 | `session.py` | `ROFSession` — tool wiring, MCP registration, run loop, retry logic, RAG, routing memory, artifacts |
+| `output_layout.py` | Tool-aware result renderer — `render_result()`, 11 named layouts, `_SKIP_ATTRS`, `_TRUNCATE_ATTRS` |
+| `agent.py` | File-watching agent mode — `run_agent()`, `_Capture` stream proxy, command deduplication, log file writer |
 | `wizard.py` | `_setup_wizard`, `_print_config_box`, provider defaults, GitHub Copilot + generic provider paths |
-| `rof_ai_demo.py` | REPL, `_print_help`, `_parse_args` (all CLI flags including MCP), `_build_mcp_configs`, `main()` |
+| `rof_ai_demo.py` | REPL, `_print_help`, `_parse_args` (all CLI flags including MCP + agent), `_build_mcp_configs`, `main()` |
 
 ---
 
@@ -53,6 +55,45 @@ other concern lives in its own file.
 
 ---
 
+## Pipeline overview — output rendering
+
+After execution `session.run()` returns `(result, plan_ms, exec_ms)`.  The
+result section is rendered by `output_layout.render_result()` which
+automatically selects the right layout based on the snapshot content:
+
+| Layout | Triggered when snapshot contains… |
+|--------|-----------------------------------|
+| `web_search` | `WebSearchResults.query` |
+| `rag` | `RAGResults.query` |
+| `codegen` | `saved_to` + `filename` |
+| `code_run` | `stdout` or `returncode` |
+| `file_save` | `file_path` + `bytes_written` |
+| `file_read` | `path` + `format` + `char_count` |
+| `database` | `columns` + `rowcount` |
+| `api_call` | `APICallResult.status_code` |
+| `validator` | `is_valid` + `issue_count` |
+| `mcp` | `MCPResult.server` |
+| `generic` | *(fallback — any other shape)* |
+
+Two rendering modes are supported:
+
+| Mode | Used by | Output |
+|------|---------|--------|
+| `"cli"` | interactive REPL, `--one-shot` | ANSI-coloured, truncated at 120 chars per value |
+| `"agent"` | agent log file | Plain text, no ANSI, no pipeline scaffolding, truncated at 300 chars |
+
+Two global attribute filter sets apply across all layouts and all tools:
+
+| Set | Keys | Effect |
+|-----|------|--------|
+| `_SKIP_ATTRS` | `rl_context`, `raw` | Completely hidden — internal pipeline plumbing |
+| `_TRUNCATE_ATTRS` | `content`, `body`, `rows`, `stdout`, `stderr`, `text`, `snippet`, `result` | Shown but capped at the mode's truncation limit |
+
+**Extending:** add a new `_Layout` entry to `_LAYOUTS` in `output_layout.py`
+before the `generic` fallback.  No other files need to change.
+
+---
+
 ## Pipeline overview — with knowledge
 
 When `rof_tools` is installed every session has a live `RAGTool` registered
@@ -69,6 +110,9 @@ outcome.  See the **Failure handling** section for details.
 ---
 
 ## Quick start
+
+### Interactive REPL
+
 
 ```sh
 # Ollama (local)
@@ -91,6 +135,32 @@ python rof_ai_demo.py --provider ollama --model qwen2.5:7b \
 python rof_ai_demo.py --provider github_copilot \
     --mcp-stdio filesystem npx -y @modelcontextprotocol/server-filesystem /tmp
 ```
+
+### Agent mode
+
+Agent mode watches a plain-text file for commands written by an external
+actor (e.g. a OneDrive-synced file edited from Teams or Notepad) and
+executes each new command automatically.
+
+```sh
+# no Default watch file ("C:\Users\{UserName}\OneDrive\rof_input.txt")
+python rof_ai_demo.py --provider github_copilot --agent
+
+# Custom paths
+python rof_ai_demo.py --provider github_copilot \
+    --agent \
+    --agent-watch "C:\Users\{UserName}\OneDrive\rof_input.txt" \
+    --agent-log   "C:\Users\{UserName}\OneDrive\rof_output.txt" \
+    --agent-poll  3
+```
+
+Write any prompt into the watch file and save it.  The agent picks it up
+within `--agent-poll` seconds, executes the workflow, writes the result to
+the log file, then clears the watch file so you can send the next command.
+
+The log file always contains only the **latest completed run** — it is fully
+overwritten on each execution so the remote viewer sees a clean, consistent
+result rather than an ever-growing trace.
 
 ---
 
@@ -523,9 +593,10 @@ python rof_ai_demo.py --provider github_copilot
 | `knowledge` | Print RAGTool backend, document count, and persist path |
 | `mcp` | List all connected MCP servers and their trigger keywords |
 | `tools` | List every registered tool (built-in + MCP + generated) and its trigger keywords |
+| `audit` | Show audit log status: sink type, current file path, records written, dropped count, and active filters |
 | `verbose` | Toggle verbose / debug logging on and off |
 | `clear` | Clear the terminal screen |
-| `quit` / `exit` | Exit — routing memory and MCP sessions are cleaned up automatically |
+| `quit` / `exit` | Exit — routing memory, MCP sessions, and the audit log are all cleaned up automatically |
 
 > **Auto-save:** routing memory is always saved automatically when you `quit`
 > the REPL or when a `--one-shot` run finishes (including on error).  The
@@ -534,6 +605,11 @@ python rof_ai_demo.py --provider github_copilot
 > **MCP shutdown:** all MCP subprocess / HTTP sessions are closed cleanly on
 > exit whether you type `quit`, hit Ctrl-C, or use `--one-shot`.
 
+> **Audit shutdown:** the audit subscriber is always flushed and closed
+> automatically on exit (REPL `quit`, Ctrl-C, or `--one-shot`).  Any records
+> still in the write queue at that point are drained before the file is closed.
+> A warning is printed if any records were dropped due to a full queue.
+
 > **Knowledge persistence:** when `--rag-backend chromadb` is used, ChromaDB
 > manages its own disk writes — there is no separate save step.  The `knowledge`
 > command shows the current document count as reported by ChromaDB.
@@ -541,6 +617,29 @@ python rof_ai_demo.py --provider github_copilot
 ---
 
 ## All CLI flags
+
+### Agent mode options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--agent` | off | Activate agent mode. Watches `--agent-watch` for commands instead of opening the interactive REPL. |
+| `--agent-watch PATH` | `C:\Users\{UserName}\OneDrive\rof_input.txt` | File polled for incoming commands. Created automatically if it does not exist. After a command is consumed the file is cleared so the next command can be written. |
+| `--agent-log PATH` | `<output-dir>/agent_output.txt` | File where the result of each run is written. Fully overwritten after every completed run — always contains only the latest result. |
+| `--agent-poll SECONDS` | `2.0` | How often the watch file is checked. Uses file modification time so CPU usage is negligible between writes. |
+
+The agent log is rendered in `"agent"` mode by `output_layout.render_result()`:
+plain text, no ANSI colour codes, no pipeline scaffolding (no Stage 1/2
+headers, no RL source, no step trace).  Each log entry starts with:
+
+```
+Command : <the command that was executed>
+Time    : YYYY-MM-DD HH:MM  |  SUCCESS  |  plan NNNms  exec NNNms
+------------------------------------------------------------
+<tool-specific result>
+```
+
+The watch file and log file can be the same OneDrive / SharePoint path that
+is shared with a remote colleague — they write commands, you see results.
 
 ### Core options
 
@@ -572,6 +671,20 @@ python rof_ai_demo.py --provider github_copilot
 | `auto` | Uses `json` if the provider supports structured output, otherwise `rl`. Safe default. |
 | `json` | Enforce the `rof_graph_update` JSON schema. Works with OpenAI, Anthropic, Gemini, and Ollama (≥ 0.4, grammar-sampled). |
 | `rl` | Plain RelateLang text. Legacy / fallback mode. Use when targeting very old APIs or models that ignore schema constraints. |
+
+### Audit log options (`--audit-*`)
+
+Requires `rof_framework.governance.audit` (bundled with `rof_framework`).
+When the package is not present a warning is printed and auditing is silently
+disabled — the rest of the demo continues normally.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--audit-sink TYPE` | `jsonlines` | `jsonlines` — JSONL files on disk; `stdout` — one JSON line per event to stdout; `null` — disable auditing entirely |
+| `--audit-dir PATH` | `<output-dir>/audit_logs` | Directory for JSONL audit files (`jsonlines` sink only). Created automatically if it does not exist. |
+| `--audit-rotate MODE` | `run` | `run` — one file per process start; `day` — one file per UTC calendar day; `none` — single file named `audit.jsonl` |
+| `--audit-exclude EVENT …` | *(nothing excluded)* | Space-separated event names to suppress, e.g. `state.attribute_set state.predicate_added` |
+| `--audit-include EVENT …` | `*` (all events) | Whitelist of event names to record. When set, only the listed events are written; all others are ignored. |
 
 ### MCP options
 
@@ -617,7 +730,21 @@ env var as shown in its documentation.
 
 ## Output artifacts
 
-Every run writes files into `--output-dir` (default `./rof_output`):
+### Agent mode artifacts
+
+When running in agent mode (`--agent`), one additional file is written per
+completed run:
+
+| File | Description |
+|------|-------------|
+| `agent_output.txt` (or `--agent-log PATH`) | Clean plain-text result of the most recent run.  Overwritten on each run — always reflects the latest command. |
+
+The standard per-run artifacts (`rof_plan_*.rl`, `rof_run_*.json`, etc.) are
+still written to `--output-dir` as usual.
+
+### Run artifacts
+
+Every run writes the following files into `--output-dir` (default `./rof_output`):
 
 | File | Description |
 |------|-------------|
@@ -629,6 +756,7 @@ Every run writes files into `--output-dir` (default `./rof_output`):
 | `routing_memory.json` | Persisted learned routing confidence (Tier 3 EMA scores) |
 | `chroma_store/` | ChromaDB embedding database directory (only with `--rag-backend chromadb`) |
 | `comms_log/comms_<ts>.jsonl` | Full LLM request/response log (only with `--log-comms`) |
+| `audit_logs/audit_<ts>.jsonl` | Structured governance audit log — one JSON record per EventBus event (only when `--audit-sink jsonlines`, which is the default) |
 
 ---
 
@@ -655,6 +783,143 @@ python rof_ai_demo.py --provider github_copilot --github-token ghp_xxxxxxxxxxxx
 # Custom cache location
 python rof_ai_demo.py --provider github_copilot --copilot-cache /path/to/token.json
 ```
+
+---
+
+## Audit log (`rof_framework.governance.audit`)
+
+The audit subsystem records every `EventBus` event emitted during a session to
+a structured, append-only log.  It runs in a background daemon thread so it
+never blocks the planning or execution pipeline.
+
+### How it works
+
+```
+  EventBus.publish(event)
+        │
+        ▼  (wildcard "*" subscription)
+  AuditSubscriber._on_event()
+        │  builds AuditRecord { audit_id, timestamp, event_name,
+        │                       actor, level, run_id, payload }
+        │  puts dict on internal queue  (non-blocking, O(1))
+        │
+        ▼  (background daemon thread)
+  AuditSink.write(record_dict)
+        │
+        ├─► JsonLinesSink  →  audit_logs/audit_<ts>.jsonl
+        ├─► StdoutSink     →  stdout (one JSON line per event)
+        └─► NullSink       →  /dev/null  (disabled)
+```
+
+Each record in the JSONL file has this shape (schema_version=1):
+
+```json
+{
+  "schema_version": 1,
+  "audit_id":    "550e8400-e29b-41d4-a716-446655440000",
+  "timestamp":   "2025-07-24T12:34:56.789Z",
+  "event_name":  "step.completed",
+  "actor":       "orchestrator",
+  "level":       "INFO",
+  "run_id":      "a1b2c3d4-...",
+  "pipeline_id": null,
+  "payload":     { "goal": "generate python code", "output_mode": "json", ... }
+}
+```
+
+`level` is inferred automatically from the event name: `ERROR` for `*.failed`
+events, `WARN` for uncertain routing, `INFO` for everything else.
+
+### Quick start
+
+```sh
+# Default: JSONL files under ./rof_output/audit_logs/, one file per run
+python rof_ai_demo.py --provider github_copilot
+
+# Write to stdout instead (container / CI friendly)
+python rof_ai_demo.py --provider github_copilot --audit-sink stdout
+
+# Rotate by calendar day instead of per-run (long-lived services)
+python rof_ai_demo.py --provider github_copilot --audit-rotate day
+
+# Custom directory
+python rof_ai_demo.py --provider github_copilot --audit-dir /var/log/rof/audit
+
+# Suppress noisy low-value events
+python rof_ai_demo.py --provider github_copilot \
+    --audit-exclude state.attribute_set state.predicate_added
+
+# Record only the high-signal lifecycle events
+python rof_ai_demo.py --provider github_copilot \
+    --audit-include run.started run.completed run.failed \
+                    step.started step.completed step.failed \
+                    tool.executed routing.decided
+
+# Disable auditing entirely
+python rof_ai_demo.py --provider github_copilot --audit-sink null
+```
+
+### Startup output
+
+When auditing is active the demo prints a one-line summary in the startup
+banner:
+
+```
+  Audit log     : jsonlines  →  ./rof_output/audit_logs  rotate=run
+```
+
+For a `stdout` sink:
+
+```
+  Audit log     : stdout
+```
+
+When disabled:
+
+```
+  Audit log     : disabled (null sink)
+```
+
+### REPL `audit` command
+
+Type `audit` at the `rof>` prompt at any time to inspect the live state of
+the audit subscriber:
+
+```
+── Audit log ──────────────────────────────────────────────────────
+  Sink        : JsonLinesSink  →  audit_logs/audit_2025-07-24T12-00-00.jsonl
+  State       : open  247 written
+  Exclude     : state.attribute_set, state.predicate_added
+```
+
+### Actor inference
+
+The `actor` field in every record is derived automatically from the event name
+prefix so you can filter records by subsystem without parsing `event_name`:
+
+| Event prefix | `actor` value |
+|---|---|
+| `run.*`, `step.*`, `goal.*` | `orchestrator` |
+| `state.*` | `graph` |
+| `pipeline.*`, `stage.*`, `fanout.*` | `pipeline` |
+| `tool.*` | `tool` |
+| `llm.*` | `llm` |
+| `routing.*` | `router` |
+| *(anything else)* | `unknown` |
+
+### Ingesting audit logs
+
+The JSONL format is natively supported by most log aggregators without any
+adapter configuration:
+
+| Tool | How to ingest |
+|------|---------------|
+| **Elasticsearch / ELK** | Filebeat `log` input type pointing at `audit_logs/*.jsonl` |
+| **Datadog** | Agent file tail with `autodiscovery`, or `datadog-agent` log config |
+| **Splunk** | Universal Forwarder `monitor` stanza on the `audit_logs/` directory |
+| **Fluentd / Fluent Bit** | `tail` input plugin with `format json` |
+| **AWS CloudWatch** | CloudWatch Logs Agent or unified agent file source |
+| **Vector** | `file` source with `codec: json` |
 
 ---
 
@@ -780,6 +1045,203 @@ Search the web for the latest news about RelateLang
 # MCP (requires --mcp-stdio or --mcp-http at startup)
 List the files in /tmp using the filesystem MCP server
 Read the contents of /tmp/hello.txt
+```
+
+---
+
+### GitLab MCP prompts
+
+Start the demo with the GitLab MCP server connected:
+
+```sh
+# MCP only
+python rof_ai_demo.py --provider ollama \
+    --mcp-stdio gitlab-issues python D:/Github/rof/tools/gitlab_mcp/server.py \
+    --mcp-ssl-no-verify
+
+# MCP + knowledge base (resolves project names, explains labels, provides domain context)
+python rof_ai_demo.py --provider ollama \
+    --mcp-stdio gitlab-issues python D:/Github/rof/tools/gitlab_mcp/server.py \
+    --mcp-ssl-no-verify \
+    --rag-backend chromadb \
+    --rag-persist-dir ./knowledge_store \
+    --knowledge-dir D:/Github/rof/tools/gitlab_mcp/knowledge
+```
+
+#### MCP only — listing and reading
+
+```
+# Show who you are logged in as
+Who am I on GitLab?
+
+# List all your open issues
+List all my open GitLab issues.
+
+# List issues filtered by label
+List my open issues labelled gDoing.
+
+# List issues filtered by label, limit result
+List my open issues labelled gTodo, show the 5 most recent.
+
+# List issues in a specific project
+List my open issues in project signatureservices/cryptomodule.
+
+# Read a single issue with its full comment thread
+Read issue 447 in project secdocs/secdocs-server-mvn.
+
+# Discover which projects you have access to
+Find all projects in the signatureservices namespace.
+
+# Find a project by keyword
+Find all projects matching "secdocs".
+```
+
+#### MCP — read and save raw issue to file
+
+```
+# Save a single issue (title + description + comments) to a markdown file
+Read issue 447 in project secdocs/secdocs-server-mvn and save it to a file.
+
+# Save the full list of open issues to a text file
+List all my open GitLab issues and save the list to open_issues.txt.
+
+# Save filtered issues to file
+List my open issues labelled gDoing and save them to doing_issues.md.
+```
+
+#### MCP + analysis — read, analyse, save report
+
+These prompts fetch a live issue via MCP, then have the LLM write a
+structured analysis report, then save it to disk with `FileSaveTool`:
+
+```
+# Analyse the single most recent open issue and write a report
+Analyse the last GitLab issue and write a report to file.
+
+# Full analysis of a specific issue
+Read issue 447 in project secdocs/secdocs-server-mvn, analyse it and write a report to file.
+
+# Analyse what needs to be done to close an issue
+Read issue 108 in project signatureservices/msos and explain what needs to be done to close it. Save the result to a markdown file.
+
+# Root-cause analysis
+Read issue 700 in project signatureservices/cryptomodule and write a root-cause analysis report to file.
+
+# Prioritisation report across all open issues
+List all my open issues, analyse their priority and urgency, and write a prioritisation report to open_issues_priority.md.
+
+# Sprint planning input
+List all my open gTodo issues, group them by project, estimate effort for each, and save a sprint planning summary to sprint_plan.md.
+
+# Status summary of all in-progress work
+List my open issues labelled gDoing and write a concise status report for a team standup. Save to standup_notes.md.
+```
+
+#### MCP + web search — enrich issue with external context
+
+Combine `MCPClientTool` (live issue) with `WebSearchTool` (external docs
+or CVE data) and an LLM synthesis step:
+
+```
+# Look up a referenced external spec while reading the issue
+Read issue 684 in project signatureservices/cryptomodule, search the web for information about the referenced DSS proxy issue DSS-3629, and write a combined analysis report to file.
+
+# Enrich with external standard / RFC
+Read issue 698 in project signatureservices/cryptomodule about post-quantum cryptography, search the web for the current BSI post-quantum recommendations, and write a gap analysis report to file.
+
+# Security advisory lookup
+Read issue 696 in project signatureservices/cryptomodule about DiagnosticData missing in VerifyCertificate, search the web for DSS DiagnosticData API documentation, and write a technical analysis to file.
+```
+
+#### MCP + code generation — script from issue context
+
+Use the live issue as input data, then generate and run a Python script
+that processes it:
+
+```
+# Generate a changelog entry from issue data
+List my closed issues and generate a Python script that formats them as a CHANGELOG.md entry. Run the script and save the output.
+
+# Issue metrics
+List all my open issues and generate a Python script that counts them by project and label, prints a summary table, and saves it as issues_summary.csv. Run the script.
+
+# Export issues to CSV
+List all my open issues and generate a Python script that writes them to a CSV file with columns: project, issue_id, title, labels, url. Run the script.
+```
+
+#### MCP + knowledge base — name resolution and domain context
+
+These require `--knowledge-dir D:/Github/rof/tools/gitlab_mcp/knowledge`
+(or an already-seeded ChromaDB store).  RAGTool resolves project names and
+explains domain terminology without a live API call:
+
+```
+# Resolve project name → ID, then list issues
+List my open issues in the KGS content service project.
+
+# Resolve by alias
+What are my open issues in the storage backend project?
+
+# Explain a label seen on issues
+What does the gDoing label mean?
+
+# Understand a domain term
+What is ILM in the context of our projects?
+
+# Domain term + live issues
+What is TR-ESOR and do I have any open issues related to it?
+```
+
+#### MCP + knowledge base + analysis + save — full pipeline
+
+The richest pattern: RAGTool resolves context, MCPClientTool fetches live
+data, the LLM synthesises everything, FileSaveTool persists the result:
+
+```
+# Read and domain-annotate a specific issue
+Read issue 447 in secdocs/secdocs-server-mvn, retrieve domain background about XAIP and SDO-Filter from the knowledge base, and write a technical analysis report to xaip_sdo_analysis.md.
+
+# Full issue triage with domain context
+Read issue 705 in signatureservices/cryptomodule, retrieve background about container image delivery from the knowledge base, analyse the scope and effort, and save an implementation plan to container_image_plan.md.
+
+# Cross-reference: live issue + knowledge base + web
+Read issue 684 in signatureservices/cryptomodule, retrieve what we know about DSS from the knowledge base, search the web for the DSS-3629 ticket, and write a complete impact analysis to dss_proxy_analysis.md.
+
+# Weekly team report: all gDoing issues with domain context
+List my open issues labelled gDoing, retrieve the gDoing workflow definition from the knowledge base, and write a structured weekly progress report to weekly_progress.md.
+
+# Onboarding document for a new team member
+Find all projects in the signatureservices namespace, retrieve the project overview and domain glossary from the knowledge base, and write a project onboarding guide to onboarding_guide.md.
+
+# Risk register from open bugs
+List my open issues labelled gBug, retrieve domain context about affected components from the knowledge base, and produce a risk register with severity and mitigation notes. Save to risk_register.md.
+```
+
+#### MCP — issue lifecycle actions
+
+```
+# Post a comment on an issue
+Post a comment on issue 447 in secdocs/secdocs-server-mvn saying the initial findings have been documented.
+
+# Re-label an issue
+Set the label on issue 5 in signatureservices/secdocs-kgs-content-service to gDoing.
+
+# Close an issue with a closing comment
+Close issue 683 in signatureservices/cryptomodule with a comment saying the log message has been improved and the fix is merged.
+
+# Reopen an issue
+Reopen issue 683 in signatureservices/cryptomodule.
+```
+
+> **Tip — one-shot mode:**  any of the above prompts can be run non-interactively
+> with `--one-shot "..."`.  The session exits automatically after the run
+> and saves the plan and run-summary JSON to `--output-dir`.
+
+```sh
+python rof_ai_demo.py --provider ollama \
+    --mcp-stdio gitlab-issues python D:/Github/rof/tools/gitlab_mcp/server.py \
+    --mcp-ssl-no-verify \
+    --one-shot "List all my open GitLab issues and save the list to open_issues.md."
 ```
 
 ### How AICodeGenTool + execution tools work together

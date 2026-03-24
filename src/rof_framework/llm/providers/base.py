@@ -52,6 +52,11 @@ ROF_GRAPH_UPDATE_SCHEMA: dict = {
     "properties": {
         "attributes": {
             "type": "array",
+            "description": (
+                "Structured entity attribute updates.  Each item sets one "
+                "attribute on one entity.  Use for numeric values, short "
+                "string values, booleans, and classification labels."
+            ),
             "items": {
                 "type": "object",
                 "properties": {
@@ -72,6 +77,12 @@ ROF_GRAPH_UPDATE_SCHEMA: dict = {
         },
         "predicates": {
             "type": "array",
+            "description": (
+                "Categorical / boolean conclusions about an entity.  "
+                "Each item asserts that an entity satisfies a label "
+                "(e.g. 'high_value', 'approved').  Pick exactly ONE "
+                "value per decision — never enumerate all options."
+            ),
             "items": {
                 "type": "object",
                 "properties": {
@@ -82,7 +93,27 @@ ROF_GRAPH_UPDATE_SCHEMA: dict = {
                 "additionalProperties": False,
             },
         },
-        "reasoning": {"type": "string"},
+        "prose": {
+            "type": "string",
+            "description": (
+                "Free-form text output for goals that require a natural-language "
+                "answer: analysis reports, recommendations, summaries, "
+                "explanations, or any other multi-sentence output.  "
+                "Write the full text here when the goal says 'analyse', "
+                "'write report', 'summarise', 'generate a natural language …', "
+                "or similar.  Leave empty string when the goal only needs "
+                "structured attribute/predicate updates."
+            ),
+        },
+        "reasoning": {
+            "type": "string",
+            "description": (
+                "Internal chain-of-thought scratchpad.  Write your step-by-step "
+                "reasoning here.  This field is stored for audit but never "
+                "executed.  Keep it separate from 'prose' — 'prose' is the "
+                "deliverable the user sees; 'reasoning' is your working."
+            ),
+        },
     },
     "required": ["attributes", "predicates"],
     "additionalProperties": False,
@@ -92,8 +123,12 @@ ROF_GRAPH_UPDATE_SCHEMA: dict = {
 _ROF_TOOL_DEFINITION: dict = {
     "name": "rof_graph_update",
     "description": (
-        "Record attribute and predicate updates to the RelateLang workflow graph. "
-        "Always call this tool to respond — never return plain text."
+        "Record the results of each workflow goal into the RelateLang graph. "
+        "Always call this tool to respond — never return plain text. "
+        "Use 'attributes' for structured values, 'predicates' for categorical "
+        "conclusions, 'prose' for any free-form text output (reports, "
+        "summaries, recommendations, analysis), and 'reasoning' for your "
+        "internal chain-of-thought."
     ),
     "input_schema": ROF_GRAPH_UPDATE_SCHEMA,
 }
