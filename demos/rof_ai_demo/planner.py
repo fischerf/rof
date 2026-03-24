@@ -104,9 +104,22 @@ Use these EXACT phrases in ensure statements to activate tools:
    a. Non-interactive scripts (no user input): add a CodeRunnerTool goal.
       ensure generate python code for <description>.
       ensure run python code.
-   b. Interactive programs (games, menus, questionnaires): add a LLMPlayerTool goal.
+      CRITICAL: CodeRunnerTool runs scripts headlessly — there is NO terminal and
+      NO human present. The generated script MUST NOT contain any call to:
+        input(), raw_input(), sys.stdin.read(), sys.stdin.readline(),
+        getpass.getpass(), io.read() (Lua), readline.createInterface() (JS),
+        or ANY other blocking stdin read.
+      All parameters (paths, URLs, counts, filenames) must be hard-coded or
+      derived from the context variables — NEVER prompted at runtime.
+      If you need user confirmation, skip it and proceed automatically.
+      Violation = CodeRunnerTool will detect the interactive call and FAIL
+      immediately instead of timing out.
+   b. Interactive programs (games, menus, questionnaires, anything that needs
+      a human to answer prompts): add a LLMPlayerTool goal INSTEAD.
       ensure generate python code for <description>.
       ensure play game with llm player and record choices.
+      Use this path ONLY when the task explicitly says "interactive",
+      "questionnaire", "game", "menu", "play", or "adventure".
    c. When the user asks to SAVE or EXPORT derived data written by the script,
       include the file-saving logic inside the generate goal description — the
       script itself will write the file when CodeRunnerTool executes it.
@@ -128,6 +141,17 @@ Use these EXACT phrases in ensure statements to activate tools:
     LLMPlayerTool executes the script itself — CodeRunnerTool would run it a second
     time. Choose one execution tool per generated script, never both.
 
+14. Choosing between CodeRunnerTool and LLMPlayerTool:
+    - Use CodeRunnerTool  when: the task is fully automatic (download files,
+      process data, generate a CSV, run calculations, call an API, …).
+      The script MUST be non-interactive (no input() calls).
+    - Use LLMPlayerTool   when: the task explicitly asks for interactivity
+      (a game, a questionnaire, a menu, or anything requiring human responses).
+      The script MAY use input() freely because LLMPlayerTool drives stdin.
+    - When in doubt: default to CodeRunnerTool + non-interactive script.
+      Only switch to LLMPlayerTool when the word "interactive", "game",
+      "questionnaire", "play", "menu", or "adventure" appears in the request.
+
 11. LLM-only analysis/synthesis goals (no tool trigger):
     Use goal phrases that contain NONE of these words: retrieve, search, knowledge,
     query, database, generate, run, execute, play, save, write, export, read, fetch.
@@ -135,19 +159,35 @@ Use these EXACT phrases in ensure statements to activate tools:
     "write analysis based on context", "summarise findings".
     These phrases reach the LLM directly — no tool is invoked.
 
-12. When a RAGTool goal is followed by an LLM analysis goal:
-    a. The LLM goal phrase must not contain any RAGTool trigger word (see rule 11).
-    b. The output entity name and a `content` attribute MUST be declared so that
-       a subsequent FileSaveTool goal can find the text:
+12. When ANY data-fetching goal (RAGTool, MCPClientTool, WebSearchTool, …) is
+    followed by an LLM analysis goal:
+    a. The LLM goal phrase must not contain any tool trigger word (see rule 11).
+    b. ALWAYS define an output entity with a `file_path` attribute BEFORE the
+       analysis goal when the result must be saved, so FileSaveTool can find it:
          define Report as "...".
-         Report has file_path of "output.txt".
-       Then the LLM analysis goal will write:
-         Report has content of "<full report text>".
+         Report has file_path of "output.md".
+       The LLM analysis step MUST write the full answer as:
+         Report has content of "<full analysis text>".
        FileSaveTool reads `content` from `Report` and `file_path` from `Report`.
     c. NEVER use "synthesise the retrieved knowledge documents" as a goal phrase —
        it contains "retrieved" which routes back to RAGTool.
        WRONG:  ensure synthesise the retrieved knowledge documents and answer the question.
        RIGHT:  ensure analyse context and write report.
+    d. When the fetched content contains hyperlinks or URLs (e.g. an issue
+       description linking to a spec PDF), the system will automatically fetch
+       those URLs and inject their text as UrlContent entities into the context
+       before the analysis step runs. You do NOT need to add extra goals for
+       this — just ensure the analysis goal is present.
+
+13. The LLM analysis step MUST always write its full answer as a RelateLang
+    attribute — NEVER as prose. Specifically:
+    a. If a Report/Result entity is in scope:
+         Report has content of "<complete analysis text — escape inner quotes with '>".
+    b. If no output entity exists yet, define one inline:
+         define AnalysisResult as "Analysis output".
+         AnalysisResult has content of "<complete analysis text>".
+    c. The executor (system preamble) enforces this — the LLM will be retried
+       until valid RelateLang with at least one attribute update is produced.
 
 ## Examples
 
@@ -190,6 +230,22 @@ Task has topic of "artificial intelligence news".
 Task has output_file of "ai_news.csv".
 ensure retrieve web_information about latest artificial intelligence news.
 ensure generate python code for reading the SearchResult entities from the graph snapshot and writing ai_news.csv with columns title, url, snippet.
+ensure run python code.
+
+### Request: "Search the web for PDF documents about X and save them to disk"
+define Task as "Download PDFs from web search results".
+Task has topic of "X".
+Task has output_dir of "downloads".
+ensure retrieve web_information about X PDF documents.
+ensure generate python code for iterating all SearchResult urls whose url ends with .pdf or whose title contains PDF, downloading each file with requests using a 60-second timeout and SSL verify=False, saving to the output_dir folder, printing progress and skipping errors — no input() calls.
+ensure run python code.
+
+### Request: "Search the web for TR-ESOR v1.3 PDFs and save them to disk"
+define Task as "Download TR-ESOR v1.3 PDFs".
+Task has topic of "TR-ESOR v1.3 PDF".
+Task has output_dir of "tr_esor_v1_3_pdfs".
+ensure retrieve web_information about TR-ESOR v1.3 PDF documents.
+ensure generate python code for iterating all SearchResult urls whose url ends with .pdf, downloading each file with requests using a 60-second timeout and SSL verify=False, saving each to the tr_esor_v1_3_pdfs folder with a sanitized filename, printing progress to stdout and skipping failures — no input() calls, no prompts.
 ensure run python code.
 
 ### Request: "Find the top 5 stocks influenced by tech news and export them to stocks.csv"
@@ -423,6 +479,25 @@ def _make_mcp_hint(mcp_tools: list) -> str:
         'define Result as "Saved issue details".',
         'Result has file_path of "top_issue.txt".',
         "ensure list my issues.",
+        "ensure save file.",
+        "",
+        '### Request: "read issue 10 of project 123, analyse what to do, save to markdown"',
+        'define Task as "Read and analyse GitLab issue".',
+        'Task has project_id of "123".',
+        "Task has issue_iid of 10.",
+        'define Report as "Issue 10 analysis report".',
+        'Report has file_path of "issue_10_analysis.md".',
+        "ensure read issue.",
+        "ensure analyse context and write report.",
+        "ensure save file.",
+        "",
+        '### Request: "read issue 7 and explain what needs to be done, save as markdown"',
+        'define Task as "Read and explain GitLab issue".',
+        "Task has issue_iid of 7.",
+        'define Report as "Issue 7 action plan".',
+        'Report has file_path of "issue_7_action_plan.md".',
+        "ensure read issue.",
+        "ensure analyse context and write report.",
         "ensure save file.",
         "",
     ]

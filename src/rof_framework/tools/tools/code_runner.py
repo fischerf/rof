@@ -121,6 +121,42 @@ class CodeRunnerTool(ToolProvider):
             "execute program",
         ]
 
+    # Patterns that indicate a script will block waiting for stdin input.
+    # Checked before execution so we fail fast instead of timing out.
+    _INTERACTIVE_PATTERNS: tuple = (
+        # Python
+        r"\binput\s*\(",
+        r"\braw_input\s*\(",
+        r"\bsys\.stdin\.read\b",
+        r"\bsys\.stdin\.readline\b",
+        r"\bsys\.stdin\.readlines\b",
+        r"\bgetpass\.getpass\s*\(",
+        # Lua
+        r"\bio\.read\s*\(",
+        r"\bio\.lines\s*\(",
+        r"\bos\.execute\s*\(\s*['\"]read\b",
+        # JavaScript / Node
+        r"\bprocess\.stdin\.on\b",
+        r"\breadline\.createInterface\b",
+        r"\bprompt\s*\(",
+        # Shell
+        r"\bread\s+\b",
+    )
+
+    @classmethod
+    def _has_interactive_calls(cls, code: str) -> list[str]:
+        """
+        Return a list of matched patterns if *code* contains blocking stdin
+        reads that would cause a headless runner to hang.  Empty list → clean.
+        """
+        import re as _re
+
+        found: list[str] = []
+        for pattern in cls._INTERACTIVE_PATTERNS:
+            if _re.search(pattern, code):
+                found.append(pattern)
+        return found
+
     def execute(self, request: ToolRequest) -> ToolResponse:
         # ── 1. Direct-call style (tests / programmatic) ───────────────────
         code = request.input.get("code", "")
@@ -171,6 +207,25 @@ class CodeRunnerTool(ToolProvider):
             )
         if not code.strip():
             return ToolResponse(success=False, error="Empty code provided.")
+
+        # ── Interactive-code guard ────────────────────────────────────────
+        # Detect blocking stdin calls before launching the subprocess so we
+        # fail immediately with a useful message instead of timing out.
+        interactive_hits = self._has_interactive_calls(code)
+        if interactive_hits:
+            patterns_str = ", ".join(f"`{p}`" for p in interactive_hits[:3])
+            return ToolResponse(
+                success=False,
+                error=(
+                    "CodeRunnerTool detected interactive stdin calls in the generated code "
+                    f"({patterns_str}). "
+                    "A headless runner has no terminal — the script would hang. "
+                    "Fix: re-generate the code as a NON-INTERACTIVE script (no input() calls, "
+                    "all parameters hard-coded or derived from context). "
+                    "If the script genuinely needs a human in the loop, use LLMPlayerTool "
+                    "('play game with llm player') instead of CodeRunnerTool."
+                ),
+            )
 
         try:
             lang = RunnerLanguage(lang_str)

@@ -211,6 +211,7 @@ Both categories use the same three environment variables — no provider-specifi
 | `ROF_TEST_API_KEY` | No* | API key forwarded to the provider | `sk-...` |
 | `ROF_TEST_MODEL` | No | Model override; uses the provider's own default when omitted | `gpt-4o-mini` |
 | `ROF_TEST_BASE_URL` | No | Base URL override for local providers (e.g. Ollama / vLLM) | `http://localhost:11434` |
+| `ROF_TEST_RATE_DELAY` | No | Seconds to sleep **after** each live test (default: `4`). Set to `0` to disable. | `5`, `0` |
 
 \* Not required for `ollama` or other key-free providers. For generic providers the key is forwarded via the `api_key_kwarg` field declared in `PROVIDER_REGISTRY` — the test harness reads this automatically; you do not need to know the internal field name.
 
@@ -342,6 +343,61 @@ ROF_TEST_PROVIDER=<registry-key> ROF_TEST_API_KEY=<KEY> \
 | Tools | `test_tools_live_integration.py` | varies | Every built-in tool against a real LLM |
 | Generic Providers | `test_generic_providers.py` | 5 | Registry-contract smoke tests for generic providers |
 
+### Rate-limit throttling
+
+Many hosted LLM providers enforce a quota of **100 requests per 5 minutes**. The test suite respects this automatically through a `conftest.py` autouse fixture (`_live_integration_throttle`) that inserts a configurable sleep **after** every `live_integration`-marked test.
+
+#### How it works
+
+1. After each live test completes the fixture checks whether the test was **skipped** (no quota consumed → no sleep).
+2. It then resolves the delay in this order:
+   - `@pytest.mark.live_delay(N)` on the individual test or class → `N` seconds
+   - `ROF_TEST_RATE_DELAY` environment variable → parsed as `float`
+   - Built-in default → **4 seconds**
+3. Non-live tests are completely unaffected (the fixture is a no-op for them).
+
+#### Default delays by test type
+
+| Test type | Default delay | Rationale |
+|---|---|---|
+| Single-goal `run` (e.g. `customer_segmentation`) | **6 s** | ~2 LLM calls |
+| Multi-goal `run` (e.g. `loan_approval`) | **12 s** | ~4–6 LLM calls |
+| 2-stage pipeline | **15 s** | ~4–6 LLM calls |
+| 3-stage pipeline | **20 s** | ~6–9 LLM calls |
+| 6-stage pipeline | **30 s** | ~12–18 LLM calls |
+| Sequential two-fixture test (`lua_save → lua_run`) | **15 s** | 2 fixtures in one test |
+| Per-tool parametrized fixtures | **4–12 s** | varies by tool |
+
+#### Overriding the delay
+
+**For a single test** — use the `@pytest.mark.live_delay` marker:
+
+```python
+@pytest.mark.live_integration
+@pytest.mark.live_delay(30)   # sleep 30 s after this test
+def test_my_heavy_pipeline(live_llm):
+    ...
+```
+
+**Globally** — set the environment variable before running:
+
+```powershell
+# Windows PowerShell
+$env:ROF_TEST_RATE_DELAY = "6"
+pytest tests/ -v -m live_integration
+```
+
+```bash
+# Linux/macOS
+ROF_TEST_RATE_DELAY=6 pytest tests/ -v -m live_integration
+```
+
+**Disable throttling** (only safe for local/unlimited providers such as Ollama):
+
+```bash
+ROF_TEST_RATE_DELAY=0 pytest tests/ -v -m live_integration
+```
+
 ### Running live tests — command reference
 
 ```bash
@@ -376,10 +432,11 @@ pytest tests/ -v -m "not live_integration"
 | Generic providers | varies | Check the provider's pricing page |
 
 **Best practices:**
-1. Use **Ollama** (local, free) for regular development.
+1. Use **Ollama** (local, free) for regular development — also set `ROF_TEST_RATE_DELAY=0` since there is no quota.
 2. Use cheap models for paid providers (`gpt-4o-mini`, `claude-3-5-haiku-20241022`).
 3. Run live tests selectively, not on every commit.
 4. Monitor your API usage dashboards.
+5. If you hit HTTP 429 errors, increase `ROF_TEST_RATE_DELAY` (e.g. `8` or `10`).
 
 ### Troubleshooting live tests
 
@@ -393,6 +450,9 @@ pytest tests/ -v -m "not live_integration"
 | Timeout errors | Use a faster/smaller model |
 | Ollama connection refused | Start Ollama: `ollama serve` |
 | Model not found | Check available models with `ollama list` or the provider's docs |
+| HTTP 429 / rate limit errors | Increase `ROF_TEST_RATE_DELAY` (e.g. `export ROF_TEST_RATE_DELAY=8`) |
+| Tests run too slowly | Set `ROF_TEST_RATE_DELAY=0` for unlimited providers (Ollama); or run a single suite with `-k` |
+| `live_delay` marker warning | Ensure `conftest.py` is present — it registers the marker via `pytest_configure` |
 
 For extended documentation on the built-in provider live tests, see `tests/LIVE_TESTS_GUIDE.md`.
 
@@ -475,13 +535,14 @@ class TestExampleComponent:
 
 ### Using the shared live fixtures
 
-`conftest.py` provides three session-scoped fixtures available to every test module:
+`conftest.py` provides three session-scoped fixtures and one autouse fixture available to every test module:
 
-| Fixture | Type | Description |
+| Fixture / Hook | Type | Description |
 |---|---|---|
 | `live_llm` | `LLMProvider` | Real provider resolved from `ROF_TEST_PROVIDER`; skips if not set |
 | `generic_providers` | `dict[str, dict]` | Full `rof_providers.PROVIDER_REGISTRY`; empty dict when package not installed |
 | `generic_provider_names` | `list[str]` | Sorted list of registry keys |
+| `_live_integration_throttle` | autouse | Post-test sleep for every `live_integration` test; respects `live_delay` marker and `ROF_TEST_RATE_DELAY` |
 
 Example — a test that runs for every registered generic provider without naming any of them:
 
@@ -506,7 +567,30 @@ def test_provider_responds(live_llm):
     assert result.content.strip()
 ```
 
+Example — a pipeline test that overrides the default throttle delay:
+
+```python
+import pytest
+
+@pytest.mark.live_integration
+@pytest.mark.live_delay(25)   # this test makes ~8 LLM calls
+def test_three_stage_pipeline(live_llm):
+    pipeline = _build_pipeline("pipeline.yaml", live_llm)
+    result = pipeline.run()
+    assert result.success
+```
+
 ### Adding a new generic provider to `rof_providers`
+
+When implementing a new provider, decide which capability methods to override on the `LLMProvider` ABC:
+
+| Method | Default | Override to `True` when… |
+|---|---|---|
+| `supports_structured_output()` | `False` | API enforces JSON schema server-side (OpenAI `json_schema`, Anthropic `tool_use`, Gemini `response_schema`) |
+| `supports_json_output()` | delegates to `supports_structured_output()` | Model reliably follows the ROF JSON schema instruction via prompt injection, even without server-side enforcement. The orchestrator's `auto` mode selects `json` output when this returns `True`. |
+| `supports_tool_calling()` | — (abstract) | Native function/tool-call interface is available |
+
+The `AIProvider` is a reference example: it sets `supports_json_output() → True` while keeping `supports_structured_output() → False`, because GPT-5.1 follows the injected schema reliably even though the endpoint has no native `response_format` parameter.
 
 1. Implement the provider class in `src/rof_providers/`.
 2. Export it from `src/rof_providers/__init__.py`.
@@ -550,7 +634,7 @@ ROF_TEST_PROVIDER=my_provider ROF_TEST_API_KEY=<key> \
 | `rof_cli` | **74%** ✓ | > 75% |
 | `rof_pipeline` | ~65% | > 75% |
 | `rof_routing` | varies | > 80% (sections without optional deps skip gracefully) |
-| `rof_providers` | varies | > 80% (covered by `test_generic_providers.py`) |
+| `rof_providers` | **63 tests** ✓ | > 80% (covered by `test_generic_providers.py`) |
 | `rof_framework.tools.tools.mcp` | **121 tests** ✓ | > 90% (all paths exercised offline) |
 
 ---
@@ -600,11 +684,21 @@ jobs:
           pip install rof-providers   # optional — enables generic provider live tests
       - name: Run live integration tests
         env:
-          ROF_TEST_PROVIDER: ${{ vars.ROF_TEST_PROVIDER }}
-          ROF_TEST_API_KEY:  ${{ secrets.ROF_TEST_API_KEY }}
-          ROF_TEST_MODEL:    ${{ vars.ROF_TEST_MODEL }}
+          ROF_TEST_PROVIDER:    ${{ vars.ROF_TEST_PROVIDER }}
+          ROF_TEST_API_KEY:     ${{ secrets.ROF_TEST_API_KEY }}
+          ROF_TEST_MODEL:       ${{ vars.ROF_TEST_MODEL }}
+          # Increase inter-test delay in CI to stay within the 100 req/5 min quota.
+          # Adjust based on your provider's actual limit.
+          ROF_TEST_RATE_DELAY:  "6"
         run: python -m pytest tests/ -v -m live_integration --no-cov
 ```
+
+> **CI tip:** Pipeline tests make many LLM calls per test.  If the CI job still
+> hits HTTP 429 errors, raise `ROF_TEST_RATE_DELAY` further (e.g. `"10"`) or
+> narrow the run to cheaper suites:
+> ```bash
+> pytest tests/test_cli.py -v -m live_integration --no-cov
+> ```
 
 ---
 
@@ -632,6 +726,8 @@ jobs:
 - Use `-x` to stop at the first failure.
 - Use `pytest-xdist` for parallel execution: `pip install pytest-xdist && pytest -n auto`.
 - Skip coverage during development: `pytest --no-cov`.
+- Live tests include intentional inter-test delays (see [Rate-limit throttling](#rate-limit-throttling)).
+  Set `ROF_TEST_RATE_DELAY=0` when using a local/unlimited provider such as Ollama to skip the delays entirely.
 
 ---
 

@@ -21,10 +21,13 @@ Exports
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import re
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
@@ -46,7 +49,7 @@ from console import (
 # ---------------------------------------------------------------------------
 # Feature flags and optional symbols from imports.py
 # ---------------------------------------------------------------------------
-from imports import _HAS_MCP, _HAS_ROUTING, _HAS_TOOLS
+from imports import _HAS_AUDIT, _HAS_MCP, _HAS_ROUTING, _HAS_TOOLS  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # rof_framework core – always required
@@ -110,6 +113,7 @@ if _HAS_MCP:
     except ImportError:
         pass
 
+from output_layout import render_result
 from planner import (
     Planner,
     _make_knowledge_hint,
@@ -136,6 +140,71 @@ _TOOL_TRIGGER_STRIP = re.compile(
     r"save (?:file|csv|results|data|output)|write (?:file|csv|data))\b",
     re.IGNORECASE,
 )
+
+# URL regex used by _fetch_urls_from_snapshot
+_URL_RE = re.compile(
+    r'https?://[^\s\'"<>\]\)]+',
+    re.IGNORECASE,
+)
+
+# Max bytes to read from a fetched URL (512 KB)
+_URL_FETCH_MAX_BYTES = 524_288
+
+# Domains that are unlikely to return readable text (skip silently)
+_URL_SKIP_DOMAINS: frozenset = frozenset(
+    {
+        "localhost",
+        "127.0.0.1",
+    }
+)
+
+
+def _fetch_url_text(url: str, timeout: float = 15.0) -> str:
+    """
+    Fetch *url* and return its text content (HTML stripped to plain text).
+    Returns an empty string on any error so callers can skip silently.
+    """
+    try:
+        from urllib.parse import urlparse
+
+        host = urlparse(url).hostname or ""
+        if any(skip in host for skip in _URL_SKIP_DOMAINS):
+            return ""
+
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": ("Mozilla/5.0 (compatible; ROF-URLEnricher/1.0)"),
+                "Accept": "text/html,text/plain,*/*",
+            },
+        )
+        # Use an SSL context that doesn't verify certs so corporate proxies work
+        import ssl
+
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            raw = resp.read(_URL_FETCH_MAX_BYTES)
+            charset = "utf-8"
+            ct = resp.headers.get_content_charset()
+            if ct:
+                charset = ct
+            text = raw.decode(charset, errors="replace")
+
+        # Strip HTML tags and decode entities
+        text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.S | re.I)
+        text = re.sub(r"<script[^>]*>.*?</script>", " ", text, flags=re.S | re.I)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = html.unescape(text)
+        # Collapse whitespace
+        text = re.sub(r"\s{3,}", "\n\n", text)
+        return text.strip()[:8000]  # keep first 8 000 chars for context
+
+    except Exception:
+        return ""
+
 
 # Language-detection heuristics used by _save_fallback
 _LANG_HINTS: dict[str, tuple[str, list[str]]] = {
@@ -220,6 +289,7 @@ class ROFSession:
         llm_fallback_on_tool_failure: bool = True,
         mcp_server_configs: Optional[list] = None,
         mcp_eager_connect: bool = False,
+        audit_subscriber: Optional[Any] = None,
     ) -> None:
         self._llm = _attach_debug_hooks(llm, debug, log_comms, comms_log_path)
         self._output_dir = output_dir
@@ -361,11 +431,17 @@ class ROFSession:
             mcp_hint=_mcp_hint,
         )
 
+        # ── URL-enrichment settings ───────────────────────────────────────
+        self._url_enrich_timeout: float = 15.0
+
         # ── Generated tools registry ──────────────────────────────────────
         # key = tool name (str), value = ToolProvider instance.
         self._generated_tools: dict[str, ToolProvider] = {}
 
-        # ── Orchestrator config ───────────────────────────────────────────
+        # ── Audit subscriber ──────────────────────────────────────────────
+        # Stored so close() / __exit__ can flush and close it cleanly.
+        self._audit_subscriber: Optional[Any] = audit_subscriber
+
         self._orch_config = OrchestratorConfig(
             max_iterations=20,
             auto_save_state=False,
@@ -373,16 +449,46 @@ class ROFSession:
             output_mode=output_mode,
             system_preamble=(
                 "You are a RelateLang workflow executor. "
-                "Interpret the context and respond with valid RelateLang statements. "
-                "Assign result attributes to entities to record your conclusions."
+                "Interpret the context and respond ONLY with valid RelateLang statements — "
+                "no prose, no markdown, no explanation outside of RelateLang.\n"
+                "Rules:\n"
+                "1. Assign ALL conclusions as entity attributes using:\n"
+                '   <Entity> has <attribute> of "<value>".\n'
+                "2. When a Report or Result entity is present in the context AND the goal "
+                "   is analysis/synthesis, you MUST write the full answer as:\n"
+                '   Report has content of "<full analysis text here>".\n'
+                "   This is REQUIRED — FileSaveTool reads the `content` attribute to save "
+                "   the file. Do NOT omit it.\n"
+                "3. If UrlContent entities appear in the context, use their `text` attribute "
+                "   as additional source material for the analysis.\n"
+                "4. Keep every string value on one line (escape newlines as \\n if needed)."
             ),
             system_preamble_json=(
                 "You are a RelateLang workflow executor. "
                 "Interpret the RelateLang context and respond ONLY with a valid JSON "
-                "object — no prose, no markdown, no text outside the JSON. "
-                'Required schema: {"attributes": [{"entity": "...", "name": "...", "value": ...}], '
-                '"predicates": [{"entity": "...", "value": "..."}], "reasoning": "..."}. '
-                "Use `reasoning` for chain-of-thought. Leave arrays empty if nothing applies."
+                "object — no prose, no markdown, no text outside the JSON.\n\n"
+                "Required schema:\n"
+                '  {"attributes": [{"entity": "...", "name": "...", "value": ...}],\n'
+                '   "predicates": [{"entity": "...", "value": "..."}],\n'
+                '   "prose": "...",\n'
+                '   "reasoning": "..."}\n\n'
+                "Field usage:\n"
+                "  attributes — structured updates: numeric values, short strings, "
+                "classification labels. Do NOT put long text here.\n"
+                "  predicates — categorical conclusions, ONE per decision "
+                '(e.g. {"entity":"Customer","value":"high_value"}).\n'
+                "  prose      — ALL free-form text output: analysis reports, summaries, "
+                "recommendations, explanations, natural-language answers. "
+                "Use this field whenever the goal says 'analyse', 'write report', "
+                "'summarise', 'generate a natural language …', or similar. "
+                "Write the COMPLETE deliverable text here — this is what gets saved to file.\n"
+                "  reasoning  — your internal chain-of-thought scratchpad (never shown to the user).\n\n"
+                "Rules:\n"
+                "  • Leave arrays empty [] when nothing applies.\n"
+                "  • NEVER put report/analysis text in 'attributes' — use 'prose'.\n"
+                "  • If UrlContent entities appear in the context, use their 'text' "
+                "attribute as source material when writing 'prose'.\n"
+                "  • Never enumerate all option labels in 'predicates' — pick exactly ONE conclusion."
             ),
         )
 
@@ -460,6 +566,20 @@ class ROFSession:
             self._mcp_factory = None
             info("MCP sessions closed.")
 
+    def close_audit(self) -> None:
+        """Flush all queued audit records, stop the writer thread, and close the sink."""
+        if self._audit_subscriber is not None:
+            self._audit_subscriber.close()
+            dropped = getattr(self._audit_subscriber, "dropped_count", 0)
+            if dropped:
+                warn(f"Audit: {dropped} record(s) were dropped (queue was full).")
+            self._audit_subscriber = None
+
+    @property
+    def audit_subscriber(self) -> Optional[Any]:
+        """The active AuditSubscriber, or None when auditing is disabled."""
+        return self._audit_subscriber
+
     def mcp_summary(self) -> None:
         """Print a short summary of connected MCP servers and their keywords."""
         if not self._mcp_tool_meta:
@@ -486,6 +606,7 @@ class ROFSession:
 
     def __exit__(self, *_: Any) -> None:
         self.close_mcp()
+        self.close_audit()
 
     # ======================================================================
     # Main run entry-point
@@ -590,9 +711,7 @@ class ROFSession:
         resolved_mode = self._orch_config.output_mode
         if resolved_mode == "auto":
             try:
-                resolved_mode = (
-                    "json (auto)" if self._llm.supports_structured_output() else "rl (auto)"
-                )
+                resolved_mode = "json (auto)" if self._llm.supports_json_output() else "rl (auto)"
             except Exception:
                 resolved_mode = "auto"
 
@@ -625,56 +744,19 @@ class ROFSession:
 
         self._save_run_artifacts(result.run_id, rl_src, result)
 
-        # ── Entity state ───────────────────────────────────────────────────
-        entities = result.snapshot.get("entities", {})
-        if entities:
-            non_trace = {k: v for k, v in entities.items() if not k.startswith("RoutingTrace")}
-            if non_trace:
-                print()
-                print(f"  {bold('Entity state:')}")
-                for ename, edata in non_trace.items():
-                    attrs = edata.get("attributes", {})
-                    preds = edata.get("predicates", [])
-                    parts: list[str] = []
-                    for k, v in attrs.items():
-                        parts.append(f"{dim(k)}={cyan(repr(v))}")
-                    for p in preds:
-                        parts.append(f"{dim('is')}={yellow(repr(p))}")
-                    entity_line = ", ".join(parts) or dim("(empty)")
-                    print(f"    {bold(cyan(ename))}: {entity_line}")
+        # ── Result (entity state + routing decisions) ──────────────────────
+        print(
+            render_result(
+                result.snapshot,
+                mode="cli",
+                command=user_prompt,
+                success=result.success,
+                plan_ms=plan_ms,
+                exec_ms=exec_ms,
+            )
+        )
 
-        # ── Routing decisions ──────────────────────────────────────────────
-        if self._use_routing:
-            traces = {k: v for k, v in entities.items() if k.startswith("RoutingTrace")}
-            if traces:
-                print()
-                print(f"  {bold('Routing decisions:')}")
-                for tname, tdata in traces.items():
-                    a = tdata.get("attributes", {})
-                    uncertain_mark = (
-                        yellow("  \u26a0 uncertain") if a.get("is_uncertain") == "True" else ""
-                    )
-                    conf_raw = a.get("composite", "?")
-                    try:
-                        conf_f = float(conf_raw)
-                        conf_col = (green if conf_f >= 0.7 else yellow if conf_f >= 0.4 else red)(
-                            f"{conf_f:.3f}"
-                        )
-                    except (TypeError, ValueError):
-                        conf_col = str(conf_raw)
-                    print(
-                        f"    {cyan(a.get('goal_pattern', tname))}: "
-                        f"tool={bold(a.get('tool_selected', '?'))}  "
-                        f"conf={conf_col}  "
-                        f"tier={dim(a.get('dominant_tier', '?'))}  "
-                        f"sat={a.get('satisfaction', '?')}"
-                        f"{uncertain_mark}"
-                    )
-
-        print()
-        print_headline()
-
-        return result
+        return result, plan_ms, exec_ms
 
     # ======================================================================
     # Step retry + LLM fallback
@@ -693,6 +775,104 @@ class ROFSession:
             return False
         later_lower = later_goal_expr.lower()
         return any(tok.lower() in later_lower for tok in failed_tokens)
+
+    # ======================================================================
+    # URL enrichment
+    # ======================================================================
+
+    def _collect_urls_from_snapshot(self, snapshot: dict) -> list[str]:
+        """
+        Scan all entity attributes in *snapshot* for HTTP/HTTPS URLs.
+        Returns a deduplicated list preserving first-seen order.
+        """
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for ent_data in snapshot.get("entities", {}).values():
+            for val in ent_data.get("attributes", {}).values():
+                for url in _URL_RE.findall(str(val)):
+                    # Trim trailing punctuation that is not part of the URL
+                    url = url.rstrip(".,;:\"'")
+                    if url not in seen:
+                        seen.add(url)
+                        ordered.append(url)
+        return ordered
+
+    def _fetch_url_contents(self, snapshot: dict) -> dict[str, str]:
+        """
+        Fetch all URLs found in *snapshot* entity attributes.
+
+        Returns a mapping of ``url → text`` for every URL that yielded
+        non-empty content.  Empty / failed fetches are silently omitted.
+        """
+        urls = self._collect_urls_from_snapshot(snapshot)
+        results: dict[str, str] = {}
+        for idx, url in enumerate(urls, start=1):
+            info(f"Fetching URL {idx}/{len(urls)}: {url[:80]}…")
+            text = _fetch_url_text(url, timeout=self._url_enrich_timeout)
+            if text:
+                results[url] = text
+                step("URL", f"fetched {len(text)} chars from link {idx}")
+            else:
+                warn(f"  ↳ Could not fetch or empty response: {url[:80]}")
+        return results
+
+    def _build_seeded_ast(
+        self,
+        goal_expr: str,
+        snapshot: dict,
+        url_contents: dict[str, str],
+    ) -> Any:
+        """
+        Build a WorkflowAST for a single *goal_expr* retry that is pre-seeded
+        with:
+
+        * All entity attributes and predicates from *snapshot* (so the LLM
+          has the full accumulated graph state as context — including MCPResult,
+          Report, etc.)
+        * One ``UrlContent<N>`` entity per successfully fetched URL, carrying
+          the page text as a ``text`` attribute.
+
+        Because every ``orch.run()`` call creates a brand-new WorkflowGraph
+        from the AST, we must embed all context directly in the AST rather
+        than relying on a shared mutable graph.
+        """
+        from rof_framework.rof_core import Attribute as _Attr  # type: ignore
+        from rof_framework.rof_core import Definition as _Def  # type: ignore
+        from rof_framework.rof_core import Goal as _Goal  # type: ignore
+        from rof_framework.rof_core import Predicate as _Pred  # type: ignore
+        from rof_framework.rof_core import WorkflowAST as _AST  # type: ignore
+
+        ast = _AST()
+
+        # ── Replay all accumulated entity state from the snapshot ─────────
+        skip_entities = {"RoutingTrace"}  # noisy, not useful for LLM context
+        for ent_name, ent_data in snapshot.get("entities", {}).items():
+            if any(ent_name.startswith(prefix) for prefix in skip_entities):
+                continue
+            desc = ent_data.get("description", "")
+            ast.definitions.append(_Def(entity=ent_name, description=desc))
+            for attr_name, attr_val in ent_data.get("attributes", {}).items():
+                ast.attributes.append(_Attr(entity=ent_name, name=attr_name, value=attr_val))
+            for pred in ent_data.get("predicates", []):
+                ast.predicates.append(_Pred(entity=ent_name, value=pred))
+
+        # ── Inject fetched URL content as UrlContent<N> entities ──────────
+        for idx, (url, text) in enumerate(url_contents.items(), start=1):
+            ent_name = f"UrlContent{idx}"
+            # Sanitise: strip quotes and collapse newlines so the value fits
+            # safely inside a RelateLang string attribute
+            safe_text = text[:4000].replace('"', "'").replace("\n", " ").replace("\r", "")
+            safe_url = url.replace('"', "'")
+            ast.definitions.append(
+                _Def(entity=ent_name, description="Fetched content from linked URL")
+            )
+            ast.attributes.append(_Attr(entity=ent_name, name="source_url", value=safe_url))
+            ast.attributes.append(_Attr(entity=ent_name, name="text", value=safe_text))
+
+        # ── The single goal to (re-)execute ───────────────────────────────
+        ast.goals.append(_Goal(goal_expr=goal_expr))
+
+        return ast
 
     def _build_fallback_ast(
         self,
@@ -740,9 +920,30 @@ class ROFSession:
         achieved: set[str] = {s.goal_expr for s in all_steps if s.status == _GoalStatus.ACHIEVED}
         blocked: set[str] = set()
 
+        # accumulated_snapshot is kept up-to-date throughout the retry loop so
+        # that each retry/fallback run sees the entity attributes written by
+        # every previously-succeeded step (e.g. AICodeGenTool writing 'saved_to'
+        # so that a subsequent LLMPlayerTool retry can find the script path).
+        accumulated_snapshot = self._deep_merge_snapshots({}, result.snapshot)
+
         failed_steps = [s for s in all_steps if s.status == _GoalStatus.FAILED]
         if not failed_steps:
             return result
+
+        # ── URL enrichment: fetch any links found in the result snapshot ──
+        # We do this once up-front for the whole retry pass.  The fetched
+        # text is embedded directly into the seeded AST for each analysis
+        # retry — NOT via orch.run() — because each orch.run() creates a
+        # brand-new WorkflowGraph from the AST and throws the old graph away.
+        _analysis_keywords = {"analyse", "analysis", "write report", "summarise", "compose report"}
+        _has_analysis_retry = any(
+            any(kw in s.goal_expr.lower() for kw in _analysis_keywords) for s in failed_steps
+        )
+        _url_contents: dict[str, str] = {}
+        if _has_analysis_retry:
+            _url_contents = self._fetch_url_contents(accumulated_snapshot)
+            if _url_contents:
+                info(f"URL enrichment: {len(_url_contents)} link(s) ready for context injection")
 
         warn(
             f"{len(failed_steps)} step(s) failed — starting retry loop "
@@ -777,14 +978,26 @@ class ROFSession:
 
             # ── Retry loop ────────────────────────────────────────────────
             retry_succeeded = False
+            _is_analysis = any(kw in goal_expr.lower() for kw in _analysis_keywords)
             for attempt in range(1, self._step_retries + 1):
                 warn(f"Retry {attempt}/{self._step_retries}: '{goal_expr[:70]}'")
 
-                single_rl = f"ensure {goal_expr}.\n"
+                # Always build a seeded AST so the retry receives the full
+                # accumulated entity context (including 'saved_to' written by a
+                # previously-succeeded AICodeGenTool, URL content for analysis
+                # goals, etc.).  A plain bare `ensure …` AST loses all that
+                # context and is the primary cause of LLMPlayerTool not finding
+                # the generated script on retry.
                 try:
-                    single_ast = RLParser().parse(single_rl)
-                except Exception:
-                    break
+                    single_ast = self._build_seeded_ast(
+                        goal_expr, accumulated_snapshot, _url_contents
+                    )
+                except Exception as exc:
+                    warn(f"  ↳ Seeded AST build failed ({exc}), falling back to plain retry")
+                    try:
+                        single_ast = RLParser().parse(f"ensure {goal_expr}.\n")
+                    except Exception:
+                        break
 
                 retry_result = orch.run(single_ast)
                 self._try_register_generated_tools(retry_result.snapshot, orch)
@@ -793,6 +1006,11 @@ class ROFSession:
                     all_steps.append(retry_step)
 
                 if retry_step and retry_step.status == _GoalStatus.ACHIEVED:
+                    # Merge this retry's entity output into the accumulated
+                    # snapshot so subsequent retries/fallbacks can see it.
+                    accumulated_snapshot = self._deep_merge_snapshots(
+                        accumulated_snapshot, retry_result.snapshot
+                    )
                     step("RETRY", f"succeeded on attempt {attempt}: '{goal_expr[:60]}'")
                     achieved.add(goal_expr)
                     retry_succeeded = True
@@ -809,7 +1027,7 @@ class ROFSession:
             if self._llm_fallback_on_tool_failure:
                 warn(f"All retries exhausted for '{goal_expr[:60]}' — trying LLM fallback")
                 fallback_ast, fallback_src = self._build_fallback_ast(
-                    goal_expr, error_msg, result.snapshot
+                    goal_expr, error_msg, accumulated_snapshot
                 )
                 if fallback_ast is not None:
                     step("FALLBK", f"LLM fallback: '{goal_expr[:50]}'")
@@ -821,6 +1039,10 @@ class ROFSession:
                     if fallback_step:
                         all_steps.append(fallback_step)
                     if fallback_step and fallback_step.status == _GoalStatus.ACHIEVED:
+                        # Merge fallback entity output into the accumulated snapshot.
+                        accumulated_snapshot = self._deep_merge_snapshots(
+                            accumulated_snapshot, fallback_result.snapshot
+                        )
                         step("FALLBK", f"LLM fallback succeeded for '{goal_expr[:50]}'")
                         achieved.add(goal_expr)
                     else:
@@ -834,9 +1056,62 @@ class ROFSession:
             run_id=result.run_id,
             success=final_success,
             steps=[s for s in all_steps if s is not None],
-            snapshot=result.snapshot,
+            snapshot=accumulated_snapshot,
             error=result.error,
         )
+
+    @staticmethod
+    def _deep_merge_snapshots(base: dict, overlay: dict) -> dict:
+        """
+        Return a new snapshot dict that is *base* deep-merged with *overlay*.
+
+        Only the ``entities`` sub-dict is merged deeply (attribute-level);
+        the ``goals`` and ``relations`` lists are taken from *overlay* when
+        present, falling back to *base*.  All other top-level keys are taken
+        from *overlay* first.
+
+        This is used to accumulate entity state across multiple ``orch.run()``
+        calls inside ``_execute_with_retry`` so that attributes written by an
+        earlier step (e.g. ``saved_to`` from AICodeGenTool) are visible to
+        later retries (e.g. LLMPlayerTool looking for the script path).
+        """
+        import copy
+
+        merged: dict = copy.deepcopy(base)
+
+        for key, overlay_val in overlay.items():
+            if key == "entities" and isinstance(overlay_val, dict):
+                base_entities: dict = merged.setdefault("entities", {})
+                for ent_name, ent_data in overlay_val.items():
+                    if not isinstance(ent_data, dict):
+                        base_entities[ent_name] = copy.deepcopy(ent_data)
+                        continue
+                    if ent_name not in base_entities or not isinstance(
+                        base_entities[ent_name], dict
+                    ):
+                        base_entities[ent_name] = copy.deepcopy(ent_data)
+                        continue
+                    # Merge attributes dict
+                    base_ent = base_entities[ent_name]
+                    overlay_attrs = ent_data.get("attributes", {})
+                    if overlay_attrs:
+                        base_ent.setdefault("attributes", {}).update(copy.deepcopy(overlay_attrs))
+                    # Merge predicates list (union, preserve order)
+                    overlay_preds = ent_data.get("predicates", [])
+                    if overlay_preds:
+                        existing_preds: list = base_ent.setdefault("predicates", [])
+                        for p in overlay_preds:
+                            if p not in existing_preds:
+                                existing_preds.append(p)
+                    # Keep description from overlay if present
+                    if ent_data.get("description"):
+                        base_ent["description"] = ent_data["description"]
+            else:
+                # For goals, relations, and any other top-level key take the
+                # overlay value directly (goals list reflects the latest run).
+                merged[key] = copy.deepcopy(overlay_val)
+
+        return merged
 
     # ======================================================================
     # Generated-tool auto-registration
