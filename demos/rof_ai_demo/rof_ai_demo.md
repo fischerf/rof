@@ -10,7 +10,7 @@ other concern lives in its own file.
 
 | Module | Responsibility |
 |--------|---------------|
-| `imports.py` | Bootstrap: `_try_import`, all `rof_framework` imports, `_HAS_TOOLS` / `_HAS_ROUTING` / `_HAS_MCP` flags |
+| `imports.py` | Bootstrap: `_try_import`, all `rof_framework` imports, `_HAS_TOOLS` / `_HAS_ROUTING` / `_HAS_MCP` / `_HAS_AUDIT` flags |
 | `telemetry.py` | `_SessionStats`, `_STATS` singleton, `_StatsTracker`, `_CommsLogger`, `_attach_debug_hooks` |
 | `console.py` | ANSI colour helpers, `_box` / `_print_box`, `banner` / `section` / `step` / `warn` / `err` / `info`, headline bar |
 | `planner.py` | `_PLANNER_SYSTEM_BASE`, `_build_planner_system`, `_make_knowledge_hint`, `_make_mcp_hint`, `Planner` |
@@ -523,9 +523,10 @@ python rof_ai_demo.py --provider github_copilot
 | `knowledge` | Print RAGTool backend, document count, and persist path |
 | `mcp` | List all connected MCP servers and their trigger keywords |
 | `tools` | List every registered tool (built-in + MCP + generated) and its trigger keywords |
+| `audit` | Show audit log status: sink type, current file path, records written, dropped count, and active filters |
 | `verbose` | Toggle verbose / debug logging on and off |
 | `clear` | Clear the terminal screen |
-| `quit` / `exit` | Exit — routing memory and MCP sessions are cleaned up automatically |
+| `quit` / `exit` | Exit — routing memory, MCP sessions, and the audit log are all cleaned up automatically |
 
 > **Auto-save:** routing memory is always saved automatically when you `quit`
 > the REPL or when a `--one-shot` run finishes (including on error).  The
@@ -533,6 +534,11 @@ python rof_ai_demo.py --provider github_copilot
 
 > **MCP shutdown:** all MCP subprocess / HTTP sessions are closed cleanly on
 > exit whether you type `quit`, hit Ctrl-C, or use `--one-shot`.
+
+> **Audit shutdown:** the audit subscriber is always flushed and closed
+> automatically on exit (REPL `quit`, Ctrl-C, or `--one-shot`).  Any records
+> still in the write queue at that point are drained before the file is closed.
+> A warning is printed if any records were dropped due to a full queue.
 
 > **Knowledge persistence:** when `--rag-backend chromadb` is used, ChromaDB
 > manages its own disk writes — there is no separate save step.  The `knowledge`
@@ -572,6 +578,20 @@ python rof_ai_demo.py --provider github_copilot
 | `auto` | Uses `json` if the provider supports structured output, otherwise `rl`. Safe default. |
 | `json` | Enforce the `rof_graph_update` JSON schema. Works with OpenAI, Anthropic, Gemini, and Ollama (≥ 0.4, grammar-sampled). |
 | `rl` | Plain RelateLang text. Legacy / fallback mode. Use when targeting very old APIs or models that ignore schema constraints. |
+
+### Audit log options (`--audit-*`)
+
+Requires `rof_framework.governance.audit` (bundled with `rof_framework`).
+When the package is not present a warning is printed and auditing is silently
+disabled — the rest of the demo continues normally.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--audit-sink TYPE` | `jsonlines` | `jsonlines` — JSONL files on disk; `stdout` — one JSON line per event to stdout; `null` — disable auditing entirely |
+| `--audit-dir PATH` | `<output-dir>/audit_logs` | Directory for JSONL audit files (`jsonlines` sink only). Created automatically if it does not exist. |
+| `--audit-rotate MODE` | `run` | `run` — one file per process start; `day` — one file per UTC calendar day; `none` — single file named `audit.jsonl` |
+| `--audit-exclude EVENT …` | *(nothing excluded)* | Space-separated event names to suppress, e.g. `state.attribute_set state.predicate_added` |
+| `--audit-include EVENT …` | `*` (all events) | Whitelist of event names to record. When set, only the listed events are written; all others are ignored. |
 
 ### MCP options
 
@@ -629,6 +649,7 @@ Every run writes files into `--output-dir` (default `./rof_output`):
 | `routing_memory.json` | Persisted learned routing confidence (Tier 3 EMA scores) |
 | `chroma_store/` | ChromaDB embedding database directory (only with `--rag-backend chromadb`) |
 | `comms_log/comms_<ts>.jsonl` | Full LLM request/response log (only with `--log-comms`) |
+| `audit_logs/audit_<ts>.jsonl` | Structured governance audit log — one JSON record per EventBus event (only when `--audit-sink jsonlines`, which is the default) |
 
 ---
 
@@ -655,6 +676,143 @@ python rof_ai_demo.py --provider github_copilot --github-token ghp_xxxxxxxxxxxx
 # Custom cache location
 python rof_ai_demo.py --provider github_copilot --copilot-cache /path/to/token.json
 ```
+
+---
+
+## Audit log (`rof_framework.governance.audit`)
+
+The audit subsystem records every `EventBus` event emitted during a session to
+a structured, append-only log.  It runs in a background daemon thread so it
+never blocks the planning or execution pipeline.
+
+### How it works
+
+```
+  EventBus.publish(event)
+        │
+        ▼  (wildcard "*" subscription)
+  AuditSubscriber._on_event()
+        │  builds AuditRecord { audit_id, timestamp, event_name,
+        │                       actor, level, run_id, payload }
+        │  puts dict on internal queue  (non-blocking, O(1))
+        │
+        ▼  (background daemon thread)
+  AuditSink.write(record_dict)
+        │
+        ├─► JsonLinesSink  →  audit_logs/audit_<ts>.jsonl
+        ├─► StdoutSink     →  stdout (one JSON line per event)
+        └─► NullSink       →  /dev/null  (disabled)
+```
+
+Each record in the JSONL file has this shape (schema_version=1):
+
+```json
+{
+  "schema_version": 1,
+  "audit_id":    "550e8400-e29b-41d4-a716-446655440000",
+  "timestamp":   "2025-07-24T12:34:56.789Z",
+  "event_name":  "step.completed",
+  "actor":       "orchestrator",
+  "level":       "INFO",
+  "run_id":      "a1b2c3d4-...",
+  "pipeline_id": null,
+  "payload":     { "goal": "generate python code", "output_mode": "json", ... }
+}
+```
+
+`level` is inferred automatically from the event name: `ERROR` for `*.failed`
+events, `WARN` for uncertain routing, `INFO` for everything else.
+
+### Quick start
+
+```sh
+# Default: JSONL files under ./rof_output/audit_logs/, one file per run
+python rof_ai_demo.py --provider github_copilot
+
+# Write to stdout instead (container / CI friendly)
+python rof_ai_demo.py --provider github_copilot --audit-sink stdout
+
+# Rotate by calendar day instead of per-run (long-lived services)
+python rof_ai_demo.py --provider github_copilot --audit-rotate day
+
+# Custom directory
+python rof_ai_demo.py --provider github_copilot --audit-dir /var/log/rof/audit
+
+# Suppress noisy low-value events
+python rof_ai_demo.py --provider github_copilot \
+    --audit-exclude state.attribute_set state.predicate_added
+
+# Record only the high-signal lifecycle events
+python rof_ai_demo.py --provider github_copilot \
+    --audit-include run.started run.completed run.failed \
+                    step.started step.completed step.failed \
+                    tool.executed routing.decided
+
+# Disable auditing entirely
+python rof_ai_demo.py --provider github_copilot --audit-sink null
+```
+
+### Startup output
+
+When auditing is active the demo prints a one-line summary in the startup
+banner:
+
+```
+  Audit log     : jsonlines  →  ./rof_output/audit_logs  rotate=run
+```
+
+For a `stdout` sink:
+
+```
+  Audit log     : stdout
+```
+
+When disabled:
+
+```
+  Audit log     : disabled (null sink)
+```
+
+### REPL `audit` command
+
+Type `audit` at the `rof>` prompt at any time to inspect the live state of
+the audit subscriber:
+
+```
+── Audit log ──────────────────────────────────────────────────────
+  Sink        : JsonLinesSink  →  audit_logs/audit_2025-07-24T12-00-00.jsonl
+  State       : open  247 written
+  Exclude     : state.attribute_set, state.predicate_added
+```
+
+### Actor inference
+
+The `actor` field in every record is derived automatically from the event name
+prefix so you can filter records by subsystem without parsing `event_name`:
+
+| Event prefix | `actor` value |
+|---|---|
+| `run.*`, `step.*`, `goal.*` | `orchestrator` |
+| `state.*` | `graph` |
+| `pipeline.*`, `stage.*`, `fanout.*` | `pipeline` |
+| `tool.*` | `tool` |
+| `llm.*` | `llm` |
+| `routing.*` | `router` |
+| *(anything else)* | `unknown` |
+
+### Ingesting audit logs
+
+The JSONL format is natively supported by most log aggregators without any
+adapter configuration:
+
+| Tool | How to ingest |
+|------|---------------|
+| **Elasticsearch / ELK** | Filebeat `log` input type pointing at `audit_logs/*.jsonl` |
+| **Datadog** | Agent file tail with `autodiscovery`, or `datadog-agent` log config |
+| **Splunk** | Universal Forwarder `monitor` stanza on the `audit_logs/` directory |
+| **Fluentd / Fluent Bit** | `tail` input plugin with `format json` |
+| **AWS CloudWatch** | CloudWatch Logs Agent or unified agent file source |
+| **Vector** | `file` source with `codec: json` |
 
 ---
 

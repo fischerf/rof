@@ -49,7 +49,7 @@ from console import (
 # ---------------------------------------------------------------------------
 # Feature flags and optional symbols from imports.py
 # ---------------------------------------------------------------------------
-from imports import _HAS_MCP, _HAS_ROUTING, _HAS_TOOLS
+from imports import _HAS_AUDIT, _HAS_MCP, _HAS_ROUTING, _HAS_TOOLS  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # rof_framework core – always required
@@ -288,6 +288,7 @@ class ROFSession:
         llm_fallback_on_tool_failure: bool = True,
         mcp_server_configs: Optional[list] = None,
         mcp_eager_connect: bool = False,
+        audit_subscriber: Optional[Any] = None,
     ) -> None:
         self._llm = _attach_debug_hooks(llm, debug, log_comms, comms_log_path)
         self._output_dir = output_dir
@@ -436,7 +437,10 @@ class ROFSession:
         # key = tool name (str), value = ToolProvider instance.
         self._generated_tools: dict[str, ToolProvider] = {}
 
-        # ── Orchestrator config ───────────────────────────────────────────
+        # ── Audit subscriber ──────────────────────────────────────────────
+        # Stored so close() / __exit__ can flush and close it cleanly.
+        self._audit_subscriber: Optional[Any] = audit_subscriber
+
         self._orch_config = OrchestratorConfig(
             max_iterations=20,
             auto_save_state=False,
@@ -561,6 +565,20 @@ class ROFSession:
             self._mcp_factory = None
             info("MCP sessions closed.")
 
+    def close_audit(self) -> None:
+        """Flush all queued audit records, stop the writer thread, and close the sink."""
+        if self._audit_subscriber is not None:
+            self._audit_subscriber.close()
+            dropped = getattr(self._audit_subscriber, "dropped_count", 0)
+            if dropped:
+                warn(f"Audit: {dropped} record(s) were dropped (queue was full).")
+            self._audit_subscriber = None
+
+    @property
+    def audit_subscriber(self) -> Optional[Any]:
+        """The active AuditSubscriber, or None when auditing is disabled."""
+        return self._audit_subscriber
+
     def mcp_summary(self) -> None:
         """Print a short summary of connected MCP servers and their keywords."""
         if not self._mcp_tool_meta:
@@ -587,6 +605,7 @@ class ROFSession:
 
     def __exit__(self, *_: Any) -> None:
         self.close_mcp()
+        self.close_audit()
 
     # ======================================================================
     # Main run entry-point

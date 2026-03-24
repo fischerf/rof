@@ -135,7 +135,7 @@ from console import (  # noqa: E402
     warn,
     yellow,
 )
-from imports import _HAS_MCP  # noqa: E402
+from imports import _HAS_AUDIT, _HAS_MCP  # noqa: E402
 
 # MCPServerConfig is only available when the mcp package is installed.
 # Import it lazily so the demo degrades gracefully when mcp is absent.
@@ -170,6 +170,7 @@ _HELP_COMMANDS = (
     ("knowledge", "Print RAGTool backend and document count"),
     ("mcp", "List connected MCP servers and their trigger keywords"),
     ("tools", "List all registered tools and their trigger keywords"),
+    ("audit", "Show audit log status (sink type, output path, drop count)"),
     ("verbose", "Toggle verbose / debug logging"),
     ("clear", "Clear the terminal"),
     ("quit / exit", "Exit the REPL"),
@@ -273,6 +274,43 @@ def _repl(session: ROFSession) -> None:
             session.mcp_summary()
             continue
 
+        if low == "audit":
+            section("Audit log")
+            sub = session.audit_subscriber
+            if sub is None:
+                print(f"  {dim('Auditing is disabled for this session.')}")
+            else:
+                sink = sub.sink
+                sink_name = bold(cyan(type(sink).__name__))
+                # JsonLinesSink exposes current_file (Path | None); other sinks don't.
+                current_file = getattr(sink, "current_file", None)
+                path_hint = f"  {dim('→')}  {dim(str(current_file))}" if current_file else ""
+                # For jsonlines also show write/drop counters from the sink itself
+                write_count = getattr(sink, "write_count", None)
+                sink_drop = getattr(sink, "drop_count", 0)
+                counts_hint = (
+                    f"  {dim(str(write_count) + ' written')}" if write_count is not None else ""
+                )
+                state = green("open") if sub.is_open else dim("closed")
+                sub_dropped = sub.dropped_count
+                total_dropped = sub_dropped + sink_drop
+                drop_hint = (
+                    f"  {yellow(str(total_dropped) + ' record(s) dropped')}"
+                    if total_dropped
+                    else ""
+                )
+                print(f"  Sink        : {sink_name}{path_hint}")
+                print(f"  State       : {state}{counts_hint}{drop_hint}")
+                cfg = sub.config
+                excl = cfg.exclude_events
+                incl = cfg.include_events
+                if incl != ["*"]:
+                    print(f"  Include     : {dim(', '.join(incl))}")
+                if excl:
+                    print(f"  Exclude     : {dim(', '.join(excl))}")
+                print()
+            continue
+
         if low == "tools":
             section("Registered tools")
             for t in session._tools:
@@ -300,6 +338,7 @@ def _repl(session: ROFSession) -> None:
     print()
     session.save_routing_memory()
     session.close_mcp()
+    session.close_audit()
     print_headline()
     print()
     print(f"  {dim('Goodbye.')}  {dim(chr(0x1F44B))}")
@@ -813,6 +852,78 @@ def _parse_args() -> argparse.Namespace:
         help="Copilot Chat API base URL override for GitHub Enterprise Server.",
     )
 
+    # ------------------------------------------------------------------ #
+    # Audit / governance options                                          #
+    # ------------------------------------------------------------------ #
+    audit = p.add_argument_group(
+        "Audit log options (rof_framework.governance.audit)",
+        (
+            "Record every EventBus event to a structured audit log.  "
+            "Three sink types are available: 'jsonlines' (default, files on disk), "
+            "'stdout' (one JSON line per event to stdout), and 'null' (disabled)."
+        ),
+    )
+    audit.add_argument(
+        "--audit-sink",
+        dest="audit_sink",
+        choices=["jsonlines", "stdout", "null"],
+        default="jsonlines",
+        help=(
+            "Audit sink type.  "
+            "'jsonlines' writes JSONL files under --audit-dir (default).  "
+            "'stdout' emits one JSON line per event to stdout.  "
+            "'null' disables auditing entirely."
+        ),
+    )
+    audit.add_argument(
+        "--audit-dir",
+        dest="audit_dir",
+        metavar="PATH",
+        default="",
+        help=(
+            "Directory for JSONL audit files (jsonlines sink only).  "
+            "Defaults to <output-dir>/audit_logs.  "
+            "Created automatically if it does not exist."
+        ),
+    )
+    audit.add_argument(
+        "--audit-rotate",
+        dest="audit_rotate",
+        choices=["day", "run", "none"],
+        default="run",
+        help=(
+            "When to start a new audit file (jsonlines sink only).  "
+            "'day' — one file per UTC calendar day.  "
+            "'run' — one file per process start (default).  "
+            "'none' — a single file named audit.jsonl."
+        ),
+    )
+    audit.add_argument(
+        "--audit-exclude",
+        dest="audit_exclude",
+        nargs="+",
+        metavar="EVENT",
+        default=None,
+        help=(
+            "Space-separated list of EventBus event names to suppress from the audit log.  "
+            "Useful for filtering high-frequency, low-value events such as "
+            "'state.attribute_set' or 'state.predicate_added'.  "
+            "Example: --audit-exclude state.attribute_set state.predicate_added"
+        ),
+    )
+    audit.add_argument(
+        "--audit-include",
+        dest="audit_include",
+        nargs="+",
+        metavar="EVENT",
+        default=None,
+        help=(
+            "Whitelist of EventBus event names to record.  "
+            "When omitted, all events are recorded (subject to --audit-exclude).  "
+            "Example: --audit-include run.started run.completed step.failed tool.executed"
+        ),
+    )
+
     return p.parse_args()
 
 
@@ -824,6 +935,42 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     llm, output_dir = _setup_wizard(args)
+
+    # ── Audit subscriber ─────────────────────────────────────────────────
+    # Built before ROFSession so we can pass it in.  The subscriber attaches
+    # to the session's EventBus and records every event to the chosen sink.
+    _audit_subscriber = None
+    _audit_sink_type: str = getattr(args, "audit_sink", "jsonlines")
+
+    if _HAS_AUDIT and _audit_sink_type != "null":
+        # Lazy import — only needed here; already guarded by _HAS_AUDIT.
+        from rof_framework.governance.audit import AuditConfig, create_sink  # type: ignore
+
+        _audit_dir_str: str = getattr(args, "audit_dir", "").strip()
+        _audit_dir: str = _audit_dir_str if _audit_dir_str else str(output_dir / "audit_logs")
+
+        _audit_cfg = AuditConfig(
+            sink_type=_audit_sink_type,
+            output_dir=_audit_dir,
+            rotate_by=getattr(args, "audit_rotate", "run"),
+            include_events=(getattr(args, "audit_include", None) or ["*"]),
+            exclude_events=(getattr(args, "audit_exclude", None) or []),
+        )
+        _audit_sink = create_sink(_audit_cfg)
+
+        # AuditSubscriber needs the EventBus, which lives inside ROFSession.
+        # We create the subscriber after the session is built (see below),
+        # then pass it back so the session can close it on exit.
+        # Store config + sink for deferred wiring.
+        _pending_audit = (_audit_cfg, _audit_sink)
+    else:
+        _pending_audit = None
+
+    if not _HAS_AUDIT and _audit_sink_type != "null":
+        warn(
+            "Audit logging requested but rof_framework.governance.audit is not available.  "
+            "Auditing is disabled for this session."
+        )
 
     debug: bool = getattr(args, "debug", False)
     log_comms: bool = getattr(args, "log_comms", False)
@@ -874,6 +1021,20 @@ def main() -> None:
         mcp_eager_connect=mcp_eager_connect,
     )
 
+    # ── Wire audit subscriber to the session's EventBus ──────────────────
+    # The EventBus is created inside ROFSession.__init__, so we attach the
+    # AuditSubscriber here, right after the session is ready.
+    if _pending_audit is not None:
+        _audit_cfg, _audit_sink = _pending_audit
+        from rof_framework.governance.audit import AuditSubscriber  # type: ignore
+
+        _audit_subscriber = AuditSubscriber(
+            bus=session._bus,
+            sink=_audit_sink,
+            config=_audit_cfg,
+        )
+        session._audit_subscriber = _audit_subscriber
+
     # ── Show active RAG configuration ────────────────────────────────────
     _rag_info = bold(cyan(rag_backend))
     if rag_backend == "chromadb" and rag_persist_dir:
@@ -889,6 +1050,29 @@ def main() -> None:
             + (f"  {dim('(eager connect)')} " if mcp_eager_connect else "")
         )
 
+    # ── Show audit configuration ──────────────────────────────────────────
+    if _pending_audit is not None:
+        _shown_cfg, _ = _pending_audit
+        _sink_label = bold(cyan(_shown_cfg.sink_type))
+        _audit_detail = ""
+        if _shown_cfg.sink_type == "jsonlines":
+            _audit_detail = (
+                f"  {dim('→')}  {dim(_shown_cfg.output_dir)}"
+                f"  {dim('rotate=' + _shown_cfg.rotate_by)}"
+            )
+        _excl = _shown_cfg.exclude_events
+        _incl = _shown_cfg.include_events
+        _filter_hint = ""
+        if _excl:
+            _filter_hint += f"  {dim('exclude=' + str(len(_excl)))}"
+        if _incl != ["*"]:
+            _filter_hint += f"  {dim('include=' + str(len(_incl)))}"
+        info(f"Audit log     : {_sink_label}{_audit_detail}{_filter_hint}")
+    elif _audit_sink_type == "null":
+        info(f"Audit log     : {dim('disabled (null sink)')}")
+    elif not _HAS_AUDIT:
+        info(f"Audit log     : {dim('unavailable (governance package not installed)')}")
+
     # ── Run ──────────────────────────────────────────────────────────────
     if args.one_shot:
         try:
@@ -899,6 +1083,7 @@ def main() -> None:
         finally:
             session.save_routing_memory()
             session.close_mcp()
+            session.close_audit()
     else:
         _repl(session)
 
