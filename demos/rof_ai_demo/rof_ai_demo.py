@@ -327,6 +327,8 @@ def _repl(session: ROFSession) -> None:
 
         try:
             session.run(prompt)  # returns (result, plan_ms, exec_ms) – unused in REPL
+            print_headline()
+            print()
         except KeyboardInterrupt:
             warn("Interrupted.")
         except Exception as e:
@@ -1162,6 +1164,8 @@ def main() -> None:
     elif args.one_shot:
         try:
             session.run(args.one_shot)  # returns (result, plan_ms, exec_ms) – unused here
+            print_headline()
+            print()
         except Exception as e:
             err(str(e))
             sys.exit(1)

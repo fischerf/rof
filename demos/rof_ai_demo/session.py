@@ -756,8 +756,6 @@ class ROFSession:
             )
         )
 
-        print_headline()
-
         return result, plan_ms, exec_ms
 
     # ======================================================================
