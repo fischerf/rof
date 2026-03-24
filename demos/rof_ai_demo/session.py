@@ -113,6 +113,7 @@ if _HAS_MCP:
     except ImportError:
         pass
 
+from output_layout import render_result
 from planner import (
     Planner,
     _make_knowledge_hint,
@@ -743,56 +744,21 @@ class ROFSession:
 
         self._save_run_artifacts(result.run_id, rl_src, result)
 
-        # ── Entity state ───────────────────────────────────────────────────
-        entities = result.snapshot.get("entities", {})
-        if entities:
-            non_trace = {k: v for k, v in entities.items() if not k.startswith("RoutingTrace")}
-            if non_trace:
-                print()
-                print(f"  {bold('Entity state:')}")
-                for ename, edata in non_trace.items():
-                    attrs = edata.get("attributes", {})
-                    preds = edata.get("predicates", [])
-                    parts: list[str] = []
-                    for k, v in attrs.items():
-                        parts.append(f"{dim(k)}={cyan(repr(v))}")
-                    for p in preds:
-                        parts.append(f"{dim('is')}={yellow(repr(p))}")
-                    entity_line = ", ".join(parts) or dim("(empty)")
-                    print(f"    {bold(cyan(ename))}: {entity_line}")
+        # ── Result (entity state + routing decisions) ──────────────────────
+        print(
+            render_result(
+                result.snapshot,
+                mode="cli",
+                command=user_prompt,
+                success=result.success,
+                plan_ms=plan_ms,
+                exec_ms=exec_ms,
+            )
+        )
 
-        # ── Routing decisions ──────────────────────────────────────────────
-        if self._use_routing:
-            traces = {k: v for k, v in entities.items() if k.startswith("RoutingTrace")}
-            if traces:
-                print()
-                print(f"  {bold('Routing decisions:')}")
-                for tname, tdata in traces.items():
-                    a = tdata.get("attributes", {})
-                    uncertain_mark = (
-                        yellow("  \u26a0 uncertain") if a.get("is_uncertain") == "True" else ""
-                    )
-                    conf_raw = a.get("composite", "?")
-                    try:
-                        conf_f = float(conf_raw)
-                        conf_col = (green if conf_f >= 0.7 else yellow if conf_f >= 0.4 else red)(
-                            f"{conf_f:.3f}"
-                        )
-                    except (TypeError, ValueError):
-                        conf_col = str(conf_raw)
-                    print(
-                        f"    {cyan(a.get('goal_pattern', tname))}: "
-                        f"tool={bold(a.get('tool_selected', '?'))}  "
-                        f"conf={conf_col}  "
-                        f"tier={dim(a.get('dominant_tier', '?'))}  "
-                        f"sat={a.get('satisfaction', '?')}"
-                        f"{uncertain_mark}"
-                    )
-
-        print()
         print_headline()
 
-        return result
+        return result, plan_ms, exec_ms
 
     # ======================================================================
     # Step retry + LLM fallback

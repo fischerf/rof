@@ -326,7 +326,7 @@ def _repl(session: ROFSession) -> None:
             continue
 
         try:
-            session.run(prompt)
+            session.run(prompt)  # returns (result, plan_ms, exec_ms) – unused in REPL
         except KeyboardInterrupt:
             warn("Interrupted.")
         except Exception as e:
@@ -391,7 +391,7 @@ def _build_mcp_configs(args: argparse.Namespace) -> list:
     mcp_keywords: list[str] = list(getattr(args, "mcp_keywords", None) or [])
     ssl_no_verify: bool = bool(getattr(args, "mcp_ssl_no_verify", False))
 
-    # ── stdio servers  ────────────────────────────────────────────────────
+    # ── Execute ───────────────────────────────────────────────────
     # argparse nargs="+" collects everything after the flag into one flat
     # list.  We allow multiple --mcp-stdio flags; each produces one entry in
     # args.mcp_stdio as a sublist  [NAME, CMD, ARG1, ARG2, …].
@@ -1161,7 +1161,7 @@ def main() -> None:
         )
     elif args.one_shot:
         try:
-            session.run(args.one_shot)
+            session.run(args.one_shot)  # returns (result, plan_ms, exec_ms) – unused here
         except Exception as e:
             err(str(e))
             sys.exit(1)

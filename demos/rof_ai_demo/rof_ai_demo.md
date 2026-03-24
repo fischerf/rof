@@ -4,7 +4,7 @@
 
 ## Module structure
 
-The demo is split into seven focused modules that live side-by-side in
+The demo is split into nine focused modules that live side-by-side in
 `demos/rof_ai_demo/`.  `rof_ai_demo.py` is the thin entry-point; every
 other concern lives in its own file.
 
@@ -15,8 +15,10 @@ other concern lives in its own file.
 | `console.py` | ANSI colour helpers, `_box` / `_print_box`, `banner` / `section` / `step` / `warn` / `err` / `info`, headline bar |
 | `planner.py` | `_PLANNER_SYSTEM_BASE`, `_build_planner_system`, `_make_knowledge_hint`, `_make_mcp_hint`, `Planner` |
 | `session.py` | `ROFSession` — tool wiring, MCP registration, run loop, retry logic, RAG, routing memory, artifacts |
+| `output_layout.py` | Tool-aware result renderer — `render_result()`, 11 named layouts, `_SKIP_ATTRS`, `_TRUNCATE_ATTRS` |
+| `agent.py` | File-watching agent mode — `run_agent()`, `_Capture` stream proxy, command deduplication, log file writer |
 | `wizard.py` | `_setup_wizard`, `_print_config_box`, provider defaults, GitHub Copilot + generic provider paths |
-| `rof_ai_demo.py` | REPL, `_print_help`, `_parse_args` (all CLI flags including MCP), `_build_mcp_configs`, `main()` |
+| `rof_ai_demo.py` | REPL, `_print_help`, `_parse_args` (all CLI flags including MCP + agent), `_build_mcp_configs`, `main()` |
 
 ---
 
@@ -53,6 +55,45 @@ other concern lives in its own file.
 
 ---
 
+## Pipeline overview — output rendering
+
+After execution `session.run()` returns `(result, plan_ms, exec_ms)`.  The
+result section is rendered by `output_layout.render_result()` which
+automatically selects the right layout based on the snapshot content:
+
+| Layout | Triggered when snapshot contains… |
+|--------|-----------------------------------|
+| `web_search` | `WebSearchResults.query` |
+| `rag` | `RAGResults.query` |
+| `codegen` | `saved_to` + `filename` |
+| `code_run` | `stdout` or `returncode` |
+| `file_save` | `file_path` + `bytes_written` |
+| `file_read` | `path` + `format` + `char_count` |
+| `database` | `columns` + `rowcount` |
+| `api_call` | `APICallResult.status_code` |
+| `validator` | `is_valid` + `issue_count` |
+| `mcp` | `MCPResult.server` |
+| `generic` | *(fallback — any other shape)* |
+
+Two rendering modes are supported:
+
+| Mode | Used by | Output |
+|------|---------|--------|
+| `"cli"` | interactive REPL, `--one-shot` | ANSI-coloured, truncated at 120 chars per value |
+| `"agent"` | agent log file | Plain text, no ANSI, no pipeline scaffolding, truncated at 300 chars |
+
+Two global attribute filter sets apply across all layouts and all tools:
+
+| Set | Keys | Effect |
+|-----|------|--------|
+| `_SKIP_ATTRS` | `rl_context`, `raw` | Completely hidden — internal pipeline plumbing |
+| `_TRUNCATE_ATTRS` | `content`, `body`, `rows`, `stdout`, `stderr`, `text`, `snippet`, `result` | Shown but capped at the mode's truncation limit |
+
+**Extending:** add a new `_Layout` entry to `_LAYOUTS` in `output_layout.py`
+before the `generic` fallback.  No other files need to change.
+
+---
+
 ## Pipeline overview — with knowledge
 
 When `rof_tools` is installed every session has a live `RAGTool` registered
@@ -69,6 +110,9 @@ outcome.  See the **Failure handling** section for details.
 ---
 
 ## Quick start
+
+### Interactive REPL
+
 
 ```sh
 # Ollama (local)
@@ -91,6 +135,32 @@ python rof_ai_demo.py --provider ollama --model qwen2.5:7b \
 python rof_ai_demo.py --provider github_copilot \
     --mcp-stdio filesystem npx -y @modelcontextprotocol/server-filesystem /tmp
 ```
+
+### Agent mode
+
+Agent mode watches a plain-text file for commands written by an external
+actor (e.g. a OneDrive-synced file edited from Teams or Notepad) and
+executes each new command automatically.
+
+```sh
+# Default watch file (C:\Users\FISCHERF\OneDrive - FUJITSU\teams.txt)
+python rof_ai_demo.py --provider github_copilot --agent
+
+# Custom paths
+python rof_ai_demo.py --provider github_copilot \
+    --agent \
+    --agent-watch "C:\Users\you\OneDrive\commands.txt" \
+    --agent-log   "C:\Users\you\OneDrive\rof_output.txt" \
+    --agent-poll  3
+```
+
+Write any prompt into the watch file and save it.  The agent picks it up
+within `--agent-poll` seconds, executes the workflow, writes the result to
+the log file, then clears the watch file so you can send the next command.
+
+The log file always contains only the **latest completed run** — it is fully
+overwritten on each execution so the remote viewer sees a clean, consistent
+result rather than an ever-growing trace.
 
 ---
 
@@ -548,6 +618,29 @@ python rof_ai_demo.py --provider github_copilot
 
 ## All CLI flags
 
+### Agent mode options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--agent` | off | Activate agent mode. Watches `--agent-watch` for commands instead of opening the interactive REPL. |
+| `--agent-watch PATH` | `C:\Users\FISCHERF\OneDrive - FUJITSU\teams.txt` | File polled for incoming commands. Created automatically if it does not exist. After a command is consumed the file is cleared so the next command can be written. |
+| `--agent-log PATH` | `<output-dir>/agent_output.txt` | File where the result of each run is written. Fully overwritten after every completed run — always contains only the latest result. |
+| `--agent-poll SECONDS` | `2.0` | How often the watch file is checked. Uses file modification time so CPU usage is negligible between writes. |
+
+The agent log is rendered in `"agent"` mode by `output_layout.render_result()`:
+plain text, no ANSI colour codes, no pipeline scaffolding (no Stage 1/2
+headers, no RL source, no step trace).  Each log entry starts with:
+
+```
+Command : <the command that was executed>
+Time    : YYYY-MM-DD HH:MM  |  SUCCESS  |  plan NNNms  exec NNNms
+------------------------------------------------------------
+<tool-specific result>
+```
+
+The watch file and log file can be the same OneDrive / SharePoint path that
+is shared with a remote colleague — they write commands, you see results.
+
 ### Core options
 
 | Flag | Default | Description |
@@ -637,7 +730,21 @@ env var as shown in its documentation.
 
 ## Output artifacts
 
-Every run writes files into `--output-dir` (default `./rof_output`):
+### Agent mode artifacts
+
+When running in agent mode (`--agent`), one additional file is written per
+completed run:
+
+| File | Description |
+|------|-------------|
+| `agent_output.txt` (or `--agent-log PATH`) | Clean plain-text result of the most recent run.  Overwritten on each run — always reflects the latest command. |
+
+The standard per-run artifacts (`rof_plan_*.rl`, `rof_run_*.json`, etc.) are
+still written to `--output-dir` as usual.
+
+### Run artifacts
+
+Every run writes the following files into `--output-dir` (default `./rof_output`):
 
 | File | Description |
 |------|-------------|

@@ -10,11 +10,10 @@ feeds it directly into the ROFSession as if the user had typed it in the
 interactive REPL.  After consuming the command the watch file is cleared so
 the external actor can write the next one.
 
-All console output produced during a workflow run is captured in memory and
-written to the log file in a single atomic write once the run has finished
-(success or failure).  Nothing is written to the log file while a command is
-still executing, so the remote viewer always sees a complete, consistent
-snapshot of each run.
+After each completed workflow run the result is rendered by
+``output_layout.render_result()`` in "agent" mode (clean plain text, no ANSI
+codes, no pipeline scaffolding) and written to the log file in one atomic
+write.  The log always contains only the latest run's output.
 
 Public entry point
 ------------------
@@ -372,8 +371,13 @@ def _agent_loop(
             cap_stderr.take()
 
             # ── Execute ───────────────────────────────────────────────────
+            result = None
+            plan_ms = 0
+            exec_ms = 0
+            run_success = False
             try:
-                session.run(command)
+                result, plan_ms, exec_ms = session.run(command)
+                run_success = result.success
             except KeyboardInterrupt:
                 warn("Agent: run interrupted by Ctrl-C.")
             except Exception as exc:
@@ -382,16 +386,30 @@ def _agent_loop(
 
                 _tb.print_exc()
 
-            # Print the headline stats (goes to terminal AND capture buffer).
+            # Print the headline stats to the terminal.
             print_headline()
             print()
 
-            # ── Flush captured output to the log file ─────────────────────
-            # take() is called AFTER print_headline() so the stats line is
-            # included in the log.  The file is fully overwritten so the
-            # viewer always sees only the latest run.
-            run_output = cap_stdout.take() + cap_stderr.take()
-            _write_log(log_file, run_output)
+            # Discard terminal output captured during the run – the log is
+            # built from the structured RunResult, not from screen-scraping.
+            cap_stdout.take()
+            cap_stderr.take()
+
+            # ── Write the log file ────────────────────────────────────────
+            # render_result() produces clean plain-text output (no ANSI
+            # codes, no pipeline scaffolding) directly from the snapshot.
+            if result is not None:
+                from output_layout import render_result  # local import avoids circular deps
+
+                log_text = render_result(
+                    result.snapshot,
+                    mode="agent",
+                    command=command,
+                    success=run_success,
+                    plan_ms=plan_ms,
+                    exec_ms=exec_ms,
+                )
+                _write_log(log_file, log_text)
 
             section("Agent – waiting for next command")
             info(
