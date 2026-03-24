@@ -17,6 +17,21 @@ Responsibilities
    installed) so provider-contract tests can iterate over all registered
    providers without hardcoding names.
 
+4. Rate-limit throttling for live integration tests.
+   The default quota is 100 requests per 5 minutes.  A post-test sleep is
+   inserted automatically between every ``live_integration``-marked test so
+   that the cumulative request rate stays within the quota.
+
+   Default inter-test delay : ``ROF_TEST_RATE_DELAY`` env var (seconds),
+                               falls back to 4 s when not set.
+   Per-test override        : ``@pytest.mark.live_delay(seconds)`` decorator.
+
+   Pipeline tests (which execute many LLM calls per test) should be
+   annotated with a longer delay, e.g.::
+
+       @pytest.mark.live_delay(20)
+       def test_pipeline_run_load_approval_live(self): ...
+
 Environment variables
 ---------------------
 ROF_TEST_PROVIDER
@@ -41,14 +56,19 @@ ROF_TEST_MODEL
 ROF_TEST_BASE_URL
     Optional base URL override (Ollama / vLLM).
 
+ROF_TEST_RATE_DELAY
+    Seconds to sleep after each ``live_integration`` test (default: 4).
+    Set to 0 to disable throttling (only safe when you have no quota).
+
 Example (PowerShell):
-    $env:ROF_TEST_PROVIDER = "openai"
-    $env:ROF_TEST_API_KEY  = "sk-..."
-    $env:ROF_TEST_MODEL    = "gpt-4o-mini"
+    $env:ROF_TEST_PROVIDER   = "openai"
+    $env:ROF_TEST_API_KEY    = "sk-..."
+    $env:ROF_TEST_MODEL      = "gpt-4o-mini"
+    $env:ROF_TEST_RATE_DELAY = "5"
     pytest tests/ -v -m live_integration
 
 Example (bash):
-    ROF_TEST_PROVIDER=anthropic ROF_TEST_API_KEY=sk-ant-... \\
+    ROF_TEST_PROVIDER=anthropic ROF_TEST_API_KEY=sk-ant-... ROF_TEST_RATE_DELAY=5 \\
         pytest tests/ -v -m live_integration
 
     # Generic provider from rof_providers (e.g. any registry key):
@@ -60,6 +80,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -271,3 +292,84 @@ def generic_providers() -> dict[str, dict[str, Any]]:
 def generic_provider_names(generic_providers: dict[str, dict[str, Any]]) -> list[str]:
     """Return a sorted list of generic provider names from the registry."""
     return sorted(generic_providers.keys())
+
+
+# ---------------------------------------------------------------------------
+# 6.  Rate-limit throttle for live integration tests
+# ---------------------------------------------------------------------------
+
+# Default inter-test delay in seconds.
+# 100 req / 5 min = 1 req / 3 s.  We use 4 s as the floor to leave headroom
+# for tests that make 2–3 LLM calls internally (e.g. multi-goal workflows).
+_DEFAULT_RATE_DELAY: float = 4.0
+
+# Marker name used by callers to override the delay for a single test.
+# Usage:  @pytest.mark.live_delay(20)
+_LIVE_DELAY_MARKER = "live_delay"
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Register the ``live_delay`` marker so pytest doesn't warn about it."""
+    config.addinivalue_line(
+        "markers",
+        "live_delay(seconds): override the post-test rate-limit sleep for a "
+        "single live_integration test.  Use for pipeline tests that make many "
+        "LLM calls and therefore need a longer cooldown.",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _live_integration_throttle(request: pytest.FixtureRequest) -> Any:
+    """
+    Autouse fixture that inserts a configurable sleep **after** every test
+    marked with ``live_integration``.
+
+    The delay is determined in this order:
+    1. ``@pytest.mark.live_delay(N)`` on the individual test / class.
+    2. The ``ROF_TEST_RATE_DELAY`` environment variable (float seconds).
+    3. The module-level default ``_DEFAULT_RATE_DELAY`` (4 s).
+
+    Tests that are *skipped* (e.g. because ``ROF_TEST_PROVIDER`` is not set)
+    still reach the ``yield`` but the skip exception is raised before any LLM
+    call is made, so no quota is consumed — we skip the sleep in that case by
+    checking the outcome after ``yield``.
+
+    The fixture is a no-op for tests that do NOT carry the
+    ``live_integration`` marker so non-live tests run at full speed.
+    """
+    is_live = request.node.get_closest_marker("live_integration") is not None
+    if not is_live:
+        yield
+        return
+
+    yield  # ← test body runs here
+
+    # Do not sleep when the test was skipped (no quota consumed).
+    rep = getattr(request.node, "rep_call", None)
+    if rep is not None and rep.skipped:
+        return
+
+    # Determine delay: marker > env var > default
+    delay_marker = request.node.get_closest_marker(_LIVE_DELAY_MARKER)
+    if delay_marker and delay_marker.args:
+        delay = float(delay_marker.args[0])
+    else:
+        try:
+            delay = float(os.environ.get("ROF_TEST_RATE_DELAY", _DEFAULT_RATE_DELAY))
+        except (TypeError, ValueError):
+            delay = _DEFAULT_RATE_DELAY
+
+    if delay > 0:
+        time.sleep(delay)
+
+
+@pytest.hookimpl(tryfirst=True, hookwrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> Any:  # type: ignore[override]
+    """
+    Attach the call-phase report to the test node so that
+    ``_live_integration_throttle`` can inspect whether the test was skipped.
+    """
+    outcome = yield
+    rep = outcome.get_result()
+    if rep.when == "call":
+        item.rep_call = rep  # type: ignore[attr-defined]

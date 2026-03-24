@@ -735,6 +735,7 @@ class TestArgParser:
 class TestRunLiveIntegration:
     """Live integration tests for 'run' command requiring real LLM."""
 
+    @pytest.mark.live_delay(6)
     def test_run_customer_segmentation_live(self):
         """Run customer_segmentation.rl with real LLM."""
         provider, api_key, model = _require_live_env()
@@ -759,6 +760,7 @@ class TestRunLiveIntegration:
         assert code == 0
         assert len(out) > 0
 
+    @pytest.mark.live_delay(12)
     def test_run_loan_approval_live(self):
         """Run loan_approval.rl with real LLM."""
         provider, api_key, model = _require_live_env()
@@ -787,6 +789,7 @@ class TestRunLiveIntegration:
         assert code in (0, 1), f"Unexpected exit code {code}; output: {out[:500]}"
         assert len(out) > 0
 
+    @pytest.mark.live_delay(6)
     def test_run_with_json_output_live(self):
         """Run with JSON output format using real LLM."""
         provider, api_key, model = _require_live_env()
@@ -821,6 +824,7 @@ class TestRunLiveIntegration:
 class TestDebugLiveIntegration:
     """Live integration tests for 'debug' command requiring real LLM."""
 
+    @pytest.mark.live_delay(6)
     def test_debug_customer_segmentation_live(self):
         """Debug customer_segmentation.rl with real LLM (non-interactive)."""
         provider, api_key, model = _require_live_env()
@@ -850,6 +854,7 @@ class TestDebugLiveIntegration:
 class TestPipelineLiveIntegration:
     """Live integration tests for 'pipeline run' command requiring real LLM."""
 
+    @pytest.mark.live_delay(20)
     def test_pipeline_run_load_approval_live(self):
         """Run load_approval pipeline with real LLM."""
         provider, api_key, model = _require_live_env()
@@ -871,6 +876,7 @@ class TestPipelineLiveIntegration:
         assert code == 0
         assert len(out) > 0
 
+    @pytest.mark.live_delay(20)
     def test_pipeline_run_with_json_output_live(self):
         """Run pipeline with JSON output using real LLM."""
         provider, api_key, model = _require_live_env()
@@ -893,6 +899,7 @@ class TestPipelineLiveIntegration:
         data = json.loads(out)
         assert isinstance(data, dict)
 
+    @pytest.mark.live_delay(30)
     def test_pipeline_run_fakenews_detection_live(self):
         """Run fakenews_detection pipeline with real LLM."""
         provider, api_key, model = _require_live_env()
@@ -1828,6 +1835,7 @@ class TestHelpAndDocumentation:
 class TestExtendedLiveIntegration:
     """Extended live integration tests with various configurations."""
 
+    @pytest.mark.live_delay(6)
     def test_run_with_different_models(self):
         """Test run command with different model specifications."""
         provider, api_key, model = _require_live_env()
@@ -1849,6 +1857,7 @@ class TestExtendedLiveIntegration:
         code, out = run_cli(*args)
         assert code == 0
 
+    @pytest.mark.live_delay(20)
     def test_pipeline_with_context_passing(self):
         """Test pipeline with context passing between stages."""
         provider, api_key, model = _require_live_env()
@@ -1869,6 +1878,7 @@ class TestExtendedLiveIntegration:
         # Output should indicate successful completion
         assert len(out) > 0
 
+    @pytest.mark.live_delay(6)
     def test_run_with_tool_calling_provider(self):
         """Test run with a provider that supports tool calling."""
         provider, api_key, model = _require_live_env()

@@ -802,6 +802,7 @@ class TestTopLevelFixturesLiveRun:
 
     # ── customer_segmentation.rl ─────────────────────────────────────────────
 
+    @pytest.mark.live_delay(6)
     def test_customer_segmentation_runs_without_exception(self, live_llm):
         source = (FIXTURES_DIR / "customer_segmentation.rl").read_text(encoding="utf-8")
         ast = RLParser().parse(source)
@@ -812,6 +813,7 @@ class TestTopLevelFixturesLiveRun:
         result = orch.run(ast)
         assert result is not None
 
+    @pytest.mark.live_delay(6)
     def test_customer_segmentation_produces_steps(self, live_llm):
         source = (FIXTURES_DIR / "customer_segmentation.rl").read_text(encoding="utf-8")
         ast = RLParser().parse(source)
@@ -822,6 +824,7 @@ class TestTopLevelFixturesLiveRun:
         result = orch.run(ast)
         assert len(result.steps) > 0, "Orchestrator produced no steps"
 
+    @pytest.mark.live_delay(6)
     def test_customer_segmentation_snapshot_contains_customer(self, live_llm):
         source = (FIXTURES_DIR / "customer_segmentation.rl").read_text(encoding="utf-8")
         ast = RLParser().parse(source)
@@ -838,6 +841,7 @@ class TestTopLevelFixturesLiveRun:
 
     # ── loan_approval.rl ─────────────────────────────────────────────────────
 
+    @pytest.mark.live_delay(12)
     def test_loan_approval_runs_without_exception(self, live_llm):
         source = (FIXTURES_DIR / "loan_approval.rl").read_text(encoding="utf-8")
         ast = RLParser().parse(source)
@@ -848,6 +852,7 @@ class TestTopLevelFixturesLiveRun:
         result = orch.run(ast)
         assert result is not None
 
+    @pytest.mark.live_delay(12)
     def test_loan_approval_produces_steps(self, live_llm):
         source = (FIXTURES_DIR / "loan_approval.rl").read_text(encoding="utf-8")
         ast = RLParser().parse(source)
@@ -858,6 +863,7 @@ class TestTopLevelFixturesLiveRun:
         result = orch.run(ast)
         assert len(result.steps) > 0, "Orchestrator produced no steps"
 
+    @pytest.mark.live_delay(12)
     def test_loan_approval_snapshot_contains_key_entities(self, live_llm):
         """Final snapshot must contain Applicant and LoanRequest."""
         source = (FIXTURES_DIR / "loan_approval.rl").read_text(encoding="utf-8")
@@ -876,6 +882,7 @@ class TestTopLevelFixturesLiveRun:
             f"Expected 'LoanRequest' in final snapshot; found: {list(entities.keys())}"
         )
 
+    @pytest.mark.live_delay(12)
     def test_loan_approval_llm_called_at_least_once(self, live_llm):
         """Orchestrator must invoke the LLM at least once for a multi-goal workflow."""
         source = (FIXTURES_DIR / "loan_approval.rl").read_text(encoding="utf-8")
@@ -1015,17 +1022,20 @@ class TestPipelineYamlLiveRun:
 
     # ── load_approval (3-stage) ──────────────────────────────────────────────
 
+    @pytest.mark.live_delay(20)
     def test_load_approval_pipeline_runs(self, live_llm):
         """Full 3-stage loan-approval pipeline must complete without raising."""
         pipeline = self._build_live_pipeline(PIPELINE_LOAD_APPROVAL / "pipeline.yaml", live_llm)
         result = pipeline.run()
         assert result is not None
 
+    @pytest.mark.live_delay(20)
     def test_load_approval_pipeline_has_three_steps(self, live_llm):
         pipeline = self._build_live_pipeline(PIPELINE_LOAD_APPROVAL / "pipeline.yaml", live_llm)
         result = pipeline.run()
         assert len(result.steps) == 3, f"Expected 3 stage results, got {len(result.steps)}"
 
+    @pytest.mark.live_delay(20)
     def test_load_approval_pipeline_stage_names(self, live_llm):
         """Completed PipelineResult must expose the three expected stage names."""
         pipeline = self._build_live_pipeline(PIPELINE_LOAD_APPROVAL / "pipeline.yaml", live_llm)
@@ -1035,6 +1045,7 @@ class TestPipelineYamlLiveRun:
         assert "analyse" in names, f"'analyse' not in stage names: {names}"
         assert "decide" in names, f"'decide' not in stage names: {names}"
 
+    @pytest.mark.live_delay(20)
     def test_load_approval_pipeline_final_snapshot_has_entities(self, live_llm):
         """Final snapshot must contain at least one entity from the workflow."""
         pipeline = self._build_live_pipeline(PIPELINE_LOAD_APPROVAL / "pipeline.yaml", live_llm)
@@ -1042,6 +1053,7 @@ class TestPipelineYamlLiveRun:
         entities = result.final_snapshot.get("entities", {})
         assert len(entities) > 0, "Final snapshot has no entities"
 
+    @pytest.mark.live_delay(20)
     def test_load_approval_pipeline_applicant_in_snapshot(self, live_llm):
         """Applicant entity must be present in the accumulated final snapshot."""
         pipeline = self._build_live_pipeline(PIPELINE_LOAD_APPROVAL / "pipeline.yaml", live_llm)
@@ -1051,12 +1063,14 @@ class TestPipelineYamlLiveRun:
             f"'Applicant' missing from final snapshot. Found: {list(entities.keys())}"
         )
 
+    @pytest.mark.live_delay(20)
     def test_load_approval_pipeline_result_has_pipeline_id(self, live_llm):
         """PipelineResult must carry a non-empty pipeline_id."""
         pipeline = self._build_live_pipeline(PIPELINE_LOAD_APPROVAL / "pipeline.yaml", live_llm)
         result = pipeline.run()
         assert result.pipeline_id, "PipelineResult.pipeline_id is empty"
 
+    @pytest.mark.live_delay(20)
     def test_load_approval_pipeline_elapsed_s_positive(self, live_llm):
         """elapsed_s must be a positive float."""
         pipeline = self._build_live_pipeline(PIPELINE_LOAD_APPROVAL / "pipeline.yaml", live_llm)
@@ -1149,6 +1163,7 @@ class TestPipelineYamlLiveRun:
 
     # ── output_mode (2-stage, mixed rl/json output_mode) ────────────────────
 
+    @pytest.mark.live_delay(15)
     def test_output_mode_pipeline_runs(self, live_llm):
         """2-stage output_mode pipeline must complete without raising."""
         pipeline = self._build_live_pipeline(PIPELINE_OUTPUT_MODE / "pipeline.yaml", live_llm)
@@ -1156,12 +1171,14 @@ class TestPipelineYamlLiveRun:
         self._skip_on_rate_limit(result)
         assert result is not None
 
+    @pytest.mark.live_delay(15)
     def test_output_mode_pipeline_has_two_steps(self, live_llm):
         pipeline = self._build_live_pipeline(PIPELINE_OUTPUT_MODE / "pipeline.yaml", live_llm)
         result = pipeline.run()
         self._skip_on_rate_limit(result)
         assert len(result.steps) == 2, f"Expected 2 stage results, got {len(result.steps)}"
 
+    @pytest.mark.live_delay(15)
     def test_output_mode_pipeline_stage_names(self, live_llm):
         pipeline = self._build_live_pipeline(PIPELINE_OUTPUT_MODE / "pipeline.yaml", live_llm)
         result = pipeline.run()
@@ -1170,6 +1187,7 @@ class TestPipelineYamlLiveRun:
         assert "extract" in names, f"'extract' not in stage names: {names}"
         assert "classify" in names, f"'classify' not in stage names: {names}"
 
+    @pytest.mark.live_delay(15)
     def test_output_mode_pipeline_snapshot_has_customer(self, live_llm):
         """Customer entity seeded in stage 1 must survive into the final snapshot."""
         pipeline = self._build_live_pipeline(PIPELINE_OUTPUT_MODE / "pipeline.yaml", live_llm)
@@ -1180,6 +1198,7 @@ class TestPipelineYamlLiveRun:
             f"'Customer' missing from final snapshot. Found: {list(entities.keys())}"
         )
 
+    @pytest.mark.live_delay(15)
     def test_output_mode_pipeline_context_injected_into_stage2(self, live_llm):
         """
         Stage 2 (classify) receives the accumulated snapshot from stage 1.
