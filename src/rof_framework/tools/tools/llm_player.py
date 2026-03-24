@@ -5,8 +5,25 @@ LLMPlayerTool – LLM interaction / script player.
 
 from __future__ import annotations
 
-import copy, csv, hashlib, io, json, logging, math, os, queue, re, shlex, shutil
-import subprocess, sys, tempfile, textwrap, threading, time, uuid
+import copy
+import csv
+import hashlib
+import io
+import json
+import logging
+import math
+import os
+import queue
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
+import threading
+import time
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -391,20 +408,43 @@ class LLMPlayerTool(ToolProvider):
                 f"Otherwise reply with ONLY the exact input the program is asking for. "
                 f"One line only, no explanation."
             )
-            try:
-                llm_resp = self._llm.complete(
-                    LLMRequest(
-                        prompt=prompt,
-                        system=system_prompt,
-                        max_tokens=20,
-                        temperature=0.7,
-                        output_mode="raw",  # single-word player input — not RL/JSON
-                    )
-                )
-            except Exception as exc:
-                raise RuntimeError(f"LLM call failed during play: {exc}") from exc
 
-            player_input = llm_resp.content.strip().splitlines()[0].strip()
+            # Retry the LLM call up to 3 times, doubling max_tokens each
+            # attempt, to handle cases where the first reply is empty or
+            # truncated (the most common cause of "list index out of range").
+            _llm_attempts = [(20, 0.7), (60, 0.7), (150, 0.8)]
+            player_input = ""
+            for _attempt, (_max_tok, _temp) in enumerate(_llm_attempts, 1):
+                try:
+                    llm_resp = self._llm.complete(
+                        LLMRequest(
+                            prompt=prompt,
+                            system=system_prompt,
+                            max_tokens=_max_tok,
+                            temperature=_temp,
+                            output_mode="raw",  # single-word player input — not RL/JSON
+                        )
+                    )
+                except Exception as exc:
+                    raise RuntimeError(f"LLM call failed during play: {exc}") from exc
+
+                _lines = llm_resp.content.strip().splitlines()
+                if _lines and _lines[0].strip():
+                    player_input = _lines[0].strip()
+                    break
+                # Blank response — warn and retry with more tokens
+                if _attempt < len(_llm_attempts):
+                    _t_warn(
+                        f"LLM returned empty response (attempt {_attempt}/"
+                        f"{len(_llm_attempts)}), retrying with max_tokens={_llm_attempts[_attempt][0]}…"
+                    )
+
+            # If all attempts yielded nothing, fall back to a safe empty line
+            # so the subprocess can continue rather than crashing the tool.
+            if not player_input:
+                _t_warn(
+                    "LLM returned empty response on all attempts — sending empty line to program."
+                )
 
             # If LLM responds with "ENTER", send empty line
             if player_input.upper() == "ENTER":
@@ -438,5 +478,3 @@ class LLMPlayerTool(ToolProvider):
 
         t.join(timeout=2.0)
         return proc.returncode if proc.returncode is not None else 0
-
-
