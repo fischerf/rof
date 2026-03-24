@@ -461,13 +461,29 @@ class ROFSession:
             system_preamble_json=(
                 "You are a RelateLang workflow executor. "
                 "Interpret the RelateLang context and respond ONLY with a valid JSON "
-                "object — no prose, no markdown, no text outside the JSON. "
-                'Required schema: {"attributes": [{"entity": "...", "name": "...", "value": ...}], '
-                '"predicates": [{"entity": "...", "value": "..."}], "reasoning": "..."}. '
-                "When a Report or Result entity is in context and the goal is analysis, "
-                'include {"entity": "Report", "name": "content", "value": "<full analysis>"} '
-                "in the attributes array. "
-                "Use `reasoning` for chain-of-thought. Leave arrays empty if nothing applies."
+                "object — no prose, no markdown, no text outside the JSON.\n\n"
+                "Required schema:\n"
+                '  {"attributes": [{"entity": "...", "name": "...", "value": ...}],\n'
+                '   "predicates": [{"entity": "...", "value": "..."}],\n'
+                '   "prose": "...",\n'
+                '   "reasoning": "..."}\n\n'
+                "Field usage:\n"
+                "  attributes — structured updates: numeric values, short strings, "
+                "classification labels. Do NOT put long text here.\n"
+                "  predicates — categorical conclusions, ONE per decision "
+                '(e.g. {"entity":"Customer","value":"high_value"}).\n'
+                "  prose      — ALL free-form text output: analysis reports, summaries, "
+                "recommendations, explanations, natural-language answers. "
+                "Use this field whenever the goal says 'analyse', 'write report', "
+                "'summarise', 'generate a natural language …', or similar. "
+                "Write the COMPLETE deliverable text here — this is what gets saved to file.\n"
+                "  reasoning  — your internal chain-of-thought scratchpad (never shown to the user).\n\n"
+                "Rules:\n"
+                "  • Leave arrays empty [] when nothing applies.\n"
+                "  • NEVER put report/analysis text in 'attributes' — use 'prose'.\n"
+                "  • If UrlContent entities appear in the context, use their 'text' "
+                "attribute as source material when writing 'prose'.\n"
+                "  • Never enumerate all option labels in 'predicates' — pick exactly ONE conclusion."
             ),
         )
 
@@ -675,9 +691,7 @@ class ROFSession:
         resolved_mode = self._orch_config.output_mode
         if resolved_mode == "auto":
             try:
-                resolved_mode = (
-                    "json (auto)" if self._llm.supports_structured_output() else "rl (auto)"
-                )
+                resolved_mode = "json (auto)" if self._llm.supports_json_output() else "rl (auto)"
             except Exception:
                 resolved_mode = "auto"
 
@@ -923,6 +937,12 @@ class ROFSession:
         achieved: set[str] = {s.goal_expr for s in all_steps if s.status == _GoalStatus.ACHIEVED}
         blocked: set[str] = set()
 
+        # accumulated_snapshot is kept up-to-date throughout the retry loop so
+        # that each retry/fallback run sees the entity attributes written by
+        # every previously-succeeded step (e.g. AICodeGenTool writing 'saved_to'
+        # so that a subsequent LLMPlayerTool retry can find the script path).
+        accumulated_snapshot = self._deep_merge_snapshots({}, result.snapshot)
+
         failed_steps = [s for s in all_steps if s.status == _GoalStatus.FAILED]
         if not failed_steps:
             return result
@@ -938,7 +958,7 @@ class ROFSession:
         )
         _url_contents: dict[str, str] = {}
         if _has_analysis_retry:
-            _url_contents = self._fetch_url_contents(result.snapshot)
+            _url_contents = self._fetch_url_contents(accumulated_snapshot)
             if _url_contents:
                 info(f"URL enrichment: {len(_url_contents)} link(s) ready for context injection")
 
@@ -979,22 +999,18 @@ class ROFSession:
             for attempt in range(1, self._step_retries + 1):
                 warn(f"Retry {attempt}/{self._step_retries}: '{goal_expr[:70]}'")
 
-                # For analysis goals, build a seeded AST that carries the full
-                # accumulated graph state + any fetched URL content so the LLM
-                # receives the complete context in the brand-new WorkflowGraph.
-                # For all other goals, fall back to a plain single-goal AST.
-                if _is_analysis and (result.snapshot.get("entities") or _url_contents):
-                    try:
-                        single_ast = self._build_seeded_ast(
-                            goal_expr, result.snapshot, _url_contents
-                        )
-                    except Exception as exc:
-                        warn(f"  ↳ Seeded AST build failed ({exc}), falling back to plain retry")
-                        try:
-                            single_ast = RLParser().parse(f"ensure {goal_expr}.\n")
-                        except Exception:
-                            break
-                else:
+                # Always build a seeded AST so the retry receives the full
+                # accumulated entity context (including 'saved_to' written by a
+                # previously-succeeded AICodeGenTool, URL content for analysis
+                # goals, etc.).  A plain bare `ensure …` AST loses all that
+                # context and is the primary cause of LLMPlayerTool not finding
+                # the generated script on retry.
+                try:
+                    single_ast = self._build_seeded_ast(
+                        goal_expr, accumulated_snapshot, _url_contents
+                    )
+                except Exception as exc:
+                    warn(f"  ↳ Seeded AST build failed ({exc}), falling back to plain retry")
                     try:
                         single_ast = RLParser().parse(f"ensure {goal_expr}.\n")
                     except Exception:
@@ -1007,6 +1023,11 @@ class ROFSession:
                     all_steps.append(retry_step)
 
                 if retry_step and retry_step.status == _GoalStatus.ACHIEVED:
+                    # Merge this retry's entity output into the accumulated
+                    # snapshot so subsequent retries/fallbacks can see it.
+                    accumulated_snapshot = self._deep_merge_snapshots(
+                        accumulated_snapshot, retry_result.snapshot
+                    )
                     step("RETRY", f"succeeded on attempt {attempt}: '{goal_expr[:60]}'")
                     achieved.add(goal_expr)
                     retry_succeeded = True
@@ -1023,7 +1044,7 @@ class ROFSession:
             if self._llm_fallback_on_tool_failure:
                 warn(f"All retries exhausted for '{goal_expr[:60]}' — trying LLM fallback")
                 fallback_ast, fallback_src = self._build_fallback_ast(
-                    goal_expr, error_msg, result.snapshot
+                    goal_expr, error_msg, accumulated_snapshot
                 )
                 if fallback_ast is not None:
                     step("FALLBK", f"LLM fallback: '{goal_expr[:50]}'")
@@ -1035,6 +1056,10 @@ class ROFSession:
                     if fallback_step:
                         all_steps.append(fallback_step)
                     if fallback_step and fallback_step.status == _GoalStatus.ACHIEVED:
+                        # Merge fallback entity output into the accumulated snapshot.
+                        accumulated_snapshot = self._deep_merge_snapshots(
+                            accumulated_snapshot, fallback_result.snapshot
+                        )
                         step("FALLBK", f"LLM fallback succeeded for '{goal_expr[:50]}'")
                         achieved.add(goal_expr)
                     else:
@@ -1048,9 +1073,62 @@ class ROFSession:
             run_id=result.run_id,
             success=final_success,
             steps=[s for s in all_steps if s is not None],
-            snapshot=result.snapshot,
+            snapshot=accumulated_snapshot,
             error=result.error,
         )
+
+    @staticmethod
+    def _deep_merge_snapshots(base: dict, overlay: dict) -> dict:
+        """
+        Return a new snapshot dict that is *base* deep-merged with *overlay*.
+
+        Only the ``entities`` sub-dict is merged deeply (attribute-level);
+        the ``goals`` and ``relations`` lists are taken from *overlay* when
+        present, falling back to *base*.  All other top-level keys are taken
+        from *overlay* first.
+
+        This is used to accumulate entity state across multiple ``orch.run()``
+        calls inside ``_execute_with_retry`` so that attributes written by an
+        earlier step (e.g. ``saved_to`` from AICodeGenTool) are visible to
+        later retries (e.g. LLMPlayerTool looking for the script path).
+        """
+        import copy
+
+        merged: dict = copy.deepcopy(base)
+
+        for key, overlay_val in overlay.items():
+            if key == "entities" and isinstance(overlay_val, dict):
+                base_entities: dict = merged.setdefault("entities", {})
+                for ent_name, ent_data in overlay_val.items():
+                    if not isinstance(ent_data, dict):
+                        base_entities[ent_name] = copy.deepcopy(ent_data)
+                        continue
+                    if ent_name not in base_entities or not isinstance(
+                        base_entities[ent_name], dict
+                    ):
+                        base_entities[ent_name] = copy.deepcopy(ent_data)
+                        continue
+                    # Merge attributes dict
+                    base_ent = base_entities[ent_name]
+                    overlay_attrs = ent_data.get("attributes", {})
+                    if overlay_attrs:
+                        base_ent.setdefault("attributes", {}).update(copy.deepcopy(overlay_attrs))
+                    # Merge predicates list (union, preserve order)
+                    overlay_preds = ent_data.get("predicates", [])
+                    if overlay_preds:
+                        existing_preds: list = base_ent.setdefault("predicates", [])
+                        for p in overlay_preds:
+                            if p not in existing_preds:
+                                existing_preds.append(p)
+                    # Keep description from overlay if present
+                    if ent_data.get("description"):
+                        base_ent["description"] = ent_data["description"]
+            else:
+                # For goals, relations, and any other top-level key take the
+                # overlay value directly (goals list reflects the latest run).
+                merged[key] = copy.deepcopy(overlay_val)
+
+        return merged
 
     # ======================================================================
     # Generated-tool auto-registration

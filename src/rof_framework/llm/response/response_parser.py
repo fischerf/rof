@@ -168,6 +168,17 @@ class ResponseParser:
                 result.predicate_deltas.setdefault(entity, []).append(value)
                 result.rl_statements.append(f'{entity} is "{value}".')
 
+        # Extract prose field — free-form text output (reports, summaries, analysis).
+        # Surfaced as a synthetic attribute_delta so callers (orchestrator, tools)
+        # can find it without knowing which entity holds the content.
+        prose = (data.get("prose") or "").strip()
+        if prose:
+            # Use a sentinel entity name so the orchestrator's _integrate_json_response
+            # can also store it on the right receptacle entity.  We expose it here
+            # as "__prose__" so ResponseParser consumers can inspect it directly.
+            result.attribute_deltas.setdefault("__prose__", {})["content"] = prose
+            result.rl_statements.append(f"// prose: {prose[:80]}{'…' if len(prose) > 80 else ''}")
+
         result.is_valid_rl = True  # JSON was valid — mark as successfully parsed
         return True
 

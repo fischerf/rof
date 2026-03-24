@@ -55,6 +55,23 @@ Tests are organized by domain:
 - Tests prompt rendering and response parsing
 - Mock provider integration tests
 
+### 6a. **Fujitsu Provider** (`tests/test_fujitsu_provider.py`) — **63 tests, fully offline**
+- Tests `FujitsuChatAIProvider` construction (API key resolution, endpoint, model, headers)
+- Tests `LLMProvider` interface compliance:
+  - `supports_tool_calling()` → `False`
+  - `supports_structured_output()` → `False` (no server-side schema enforcement)
+  - `supports_json_output()` → `True` (prompt-injection JSON; GPT-5.1 follows the ROF schema reliably)
+  - `context_limit` → 128 000
+- Tests `_build_headers()` — `api-key` header, no `Authorization: Bearer`, extra-headers merge
+- Tests `_build_messages()` — JSON schema injection into system prompt, `inject_json_schema=False` opt-out, `rl`/`raw` mode passthrough
+- Tests `_build_payload()` — `max_completion_tokens`, `temperature`, no `response_format` key
+- Tests `complete()` end-to-end via mocked `httpx.Client`
+- Tests HTTP error mapping → typed `ProviderError` / `RateLimitError` / `AuthError` / `ContextLimitError`
+- Tests network errors (`TimeoutException`, `RequestError`, non-JSON body, empty choices)
+- Tests content-filter `finish_reason` handling (does not raise)
+- Validates against the real-world Fujitsu response shape (sample payload round-trip)
+- Validates `_DEFAULT_ENDPOINT` constant matches the current production URL
+
 ### 7. **Generic Providers** (`tests/test_generic_providers.py`) — **new**
 - Tests the `rof_providers.PROVIDER_REGISTRY` contract (structure, types, completeness)
 - Tests the CLI discovery helper (`rof_framework.cli.main._load_generic_providers`)
@@ -582,6 +599,16 @@ def test_three_stage_pipeline(live_llm):
 
 ### Adding a new generic provider to `rof_providers`
 
+When implementing a new provider, decide which capability methods to override on the `LLMProvider` ABC:
+
+| Method | Default | Override to `True` when… |
+|---|---|---|
+| `supports_structured_output()` | `False` | API enforces JSON schema server-side (OpenAI `json_schema`, Anthropic `tool_use`, Gemini `response_schema`) |
+| `supports_json_output()` | delegates to `supports_structured_output()` | Model reliably follows the ROF JSON schema instruction via prompt injection, even without server-side enforcement. The orchestrator's `auto` mode selects `json` output when this returns `True`. |
+| `supports_tool_calling()` | — (abstract) | Native function/tool-call interface is available |
+
+The `FujitsuChatAIProvider` is a reference example: it sets `supports_json_output() → True` while keeping `supports_structured_output() → False`, because GPT-5.1 follows the injected schema reliably even though the Fujitsu endpoint has no native `response_format` parameter.
+
 1. Implement the provider class in `src/rof_providers/`.
 2. Export it from `src/rof_providers/__init__.py`.
 3. Add one entry to `PROVIDER_REGISTRY` in `src/rof_providers/__init__.py`:
@@ -624,7 +651,7 @@ ROF_TEST_PROVIDER=my_provider ROF_TEST_API_KEY=<key> \
 | `rof_cli` | **74%** ✓ | > 75% |
 | `rof_pipeline` | ~65% | > 75% |
 | `rof_routing` | varies | > 80% (sections without optional deps skip gracefully) |
-| `rof_providers` | varies | > 80% (covered by `test_generic_providers.py`) |
+| `rof_providers` | **63 tests** ✓ | > 80% (covered by `test_fujitsu_provider.py` + `test_generic_providers.py`) |
 | `rof_framework.tools.tools.mcp` | **121 tests** ✓ | > 90% (all paths exercised offline) |
 
 ---

@@ -99,6 +99,37 @@ class LLMProvider(ABC):
         """
         return False
 
+    def supports_json_output(self) -> bool:
+        """
+        Return True if this provider can reliably produce a JSON object that
+        matches the ``ROF_GRAPH_UPDATE_SCHEMA`` when instructed to do so.
+
+        This is a **broader** signal than :meth:`supports_structured_output`:
+
+        * ``supports_structured_output() → True``  implies server-side schema
+          enforcement (OpenAI ``json_schema``, Anthropic ``tool_use``,
+          Gemini ``response_schema``, Ollama ``format``).  The API *guarantees*
+          valid JSON.
+
+        * ``supports_json_output() → True``  covers providers that cannot
+          enforce the schema server-side but reliably follow a JSON-schema
+          instruction embedded in the system prompt (prompt-injection JSON).
+          The model is capable enough that the schema instruction is respected
+          in practice, even without server-side enforcement.
+
+        The ``auto`` output-mode selector in :class:`OrchestratorConfig` uses
+        this method — not ``supports_structured_output()`` — so that capable
+        models (e.g. Fujitsu Chat-AI / GPT-4o) produce structured JSON rather
+        than falling back to the fragile RL text path.
+
+        The default implementation delegates to ``supports_structured_output()``
+        so existing providers that override the stricter method automatically
+        opt in here too.  Providers that rely solely on prompt injection should
+        override this method and return ``True`` while leaving
+        ``supports_structured_output()`` as ``False``.
+        """
+        return self.supports_structured_output()
+
     def extract_usage(self, response: LLMResponse) -> Optional["UsageInfo"]:
         """
         Extract normalised token usage from a completed response.

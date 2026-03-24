@@ -44,15 +44,46 @@ class OrchestratorConfig:
 
     system_preamble: str = (
         "You are a RelateLang workflow executor. "
-        "Interpret the following structured prompt and respond in RelateLang format."
+        "Interpret the following structured prompt and respond ONLY with RelateLang statements — "
+        "no prose, no markdown, no explanation outside of RL syntax.\n\n"
+        "RelateLang response rules:\n"
+        '  • Classification goal  (e.g. ensure classify X as "a" or "b"):\n'
+        '      → Write:  X is "chosen_label".\n'
+        "  • Attribute goal  (e.g. ensure determine X score):\n"
+        "      → Write:  X has score of <value>.\n"
+        "  • Natural-language generation goal  (e.g. ensure generate a natural language rec for X):\n"
+        '      → Write:  X has rec of "<your generated text here>".\n'
+        "  • Never write English sentences, bullet points, or headings.\n"
+        "  • Every line must end with a full stop (.).\n\n"
+        'Example response for  ensure classify Customer as "high_value" or "standard":\n'
+        '  Customer is "high_value".\n\n'
+        "Example response for  ensure generate a natural language support_tier_recommendation for Customer:\n"
+        '  Customer has support_tier_recommendation of "Premium support with dedicated account manager and 4-hour SLA.".'
     )
     system_preamble_json: str = (
         "You are a RelateLang workflow executor. "
         "Interpret the RelateLang context and respond ONLY with a valid JSON object — "
-        "no prose, no markdown, no text outside the JSON. "
-        'Required schema: {"attributes": [{"entity": "...", "name": "...", "value": ...}], '
-        '"predicates": [{"entity": "...", "value": "..."}], "reasoning": "..."}. '
-        "Use `reasoning` for chain-of-thought. Leave arrays empty if nothing applies."
+        "no prose, no markdown, no text outside the JSON.\n\n"
+        "Required schema:\n"
+        '  {"attributes": [{"entity": "...", "name": "...", "value": ...}],\n'
+        '   "predicates": [{"entity": "...", "value": "..."}],\n'
+        '   "prose": "...",\n'
+        '   "reasoning": "..."}\n\n'
+        "Field usage:\n"
+        "  attributes — structured updates: numeric values, short strings, "
+        'classification labels (e.g. {"entity":"Customer","name":"segment","value":"high_value"}).\n'
+        "  predicates — categorical conclusions, ONE per decision "
+        '(e.g. {"entity":"Customer","value":"high_value"}).\n'
+        "  prose      — ALL free-form text output: analysis reports, summaries, "
+        "recommendations, explanations, natural-language answers. "
+        "Use this field whenever the goal says 'analyse', 'write report', "
+        "'summarise', 'generate a natural language …', or similar. "
+        "Write the complete deliverable text here.\n"
+        "  reasoning  — your internal chain-of-thought scratchpad (never shown to the user).\n\n"
+        "Rules:\n"
+        "  • Leave arrays empty [] when nothing applies.\n"
+        "  • Never put report/analysis text in 'attributes' — use 'prose'.\n"
+        "  • Never enumerate all option labels in 'predicates' — pick exactly ONE conclusion."
     )
 
 
@@ -218,7 +249,7 @@ class Orchestrator:
         # ── Resolve output mode ───────────────────────────────────────────────
         mode = self.config.output_mode
         if mode == "auto":
-            mode = "json" if self.llm_provider.supports_structured_output() else "rl"
+            mode = "json" if self.llm_provider.supports_json_output() else "rl"
 
         system = self.config.system_preamble_json if mode == "json" else self.config.system_preamble
 
@@ -238,16 +269,32 @@ class Orchestrator:
             # should not be silently accepted as ACHIEVED — doing so leaves
             # goals permanently satisfied with no state written, which causes
             # downstream goals to fail or the run to succeed vacuously.
+            #
+            # Special case: "generate a natural language <attr> for <Entity>" goals
+            # are *designed* to produce prose.  When the LLM ignores our formatting
+            # instructions and returns free text rather than an RL attribute statement,
+            # we salvage the response by storing it directly as an attribute so that
+            # the goal can be marked ACHIEVED with real state written.
             if updates == 0 and mode == "rl":
-                logger.warning(
-                    "_execute_llm_step: RL response for goal %r produced zero graph "
-                    "updates (prose-only reply) — marking FAILED so the goal can be retried",
-                    goal.goal.goal_expr,
-                )
-                raise ValueError(
-                    f"RL response for goal '{goal.goal.goal_expr}' produced no graph updates "
-                    "(prose-only reply — no RelateLang statements extracted)"
-                )
+                salvaged = self._salvage_natural_language_goal(graph, goal, response)
+                if salvaged:
+                    updates = salvaged
+                    logger.debug(
+                        "_execute_llm_step: salvaged %d update(s) from prose response "
+                        "for natural-language goal %r",
+                        salvaged,
+                        goal.goal.goal_expr,
+                    )
+                else:
+                    logger.warning(
+                        "_execute_llm_step: RL response for goal %r produced zero graph "
+                        "updates (prose-only reply) — marking FAILED so the goal can be retried",
+                        goal.goal.goal_expr,
+                    )
+                    raise ValueError(
+                        f"RL response for goal '{goal.goal.goal_expr}' produced no graph updates "
+                        "(prose-only reply — no RelateLang statements extracted)"
+                    )
 
             graph.mark_goal(goal, GoalStatus.ACHIEVED, response.content)
 
@@ -335,6 +382,108 @@ class Orchestrator:
                 status=GoalStatus.FAILED,
                 error=str(e),
             )
+
+    # ── Natural-language / synthesis goal salvage ─────────────────────────────
+
+    # Matches: "generate a natural language <attr_name> for <Entity>"
+    # Groups: (1) attr_name, (2) entity_name
+    _NL_GOAL_RE: re.Pattern = re.compile(
+        r"generate\s+a\s+natural\s+language\s+([\w_]+)\s+for\s+(\w+)",
+        re.IGNORECASE,
+    )
+
+    # Synthesis / analysis goals that inherently produce prose.
+    # When the LLM returns prose for any of these the salvage path stores the
+    # response in a Report/Result entity so downstream tools (e.g. FileSaveTool)
+    # can consume it.
+    _SYNTHESIS_KEYWORDS: tuple[str, ...] = (
+        "analyse context",
+        "analyze context",
+        "write report",
+        "compose report",
+        "summarise findings",
+        "summarize findings",
+        "write analysis",
+        "compose analysis",
+        "summarise context",
+        "summarize context",
+    )
+
+    # Entity names (case-insensitive prefix match) that are considered
+    # "report receptacles" — the prose response is stored as their `content`.
+    _REPORT_ENTITY_PREFIXES: tuple[str, ...] = (
+        "report",
+        "result",
+        "summary",
+        "analysis",
+        "output",
+    )
+
+    def _salvage_natural_language_goal(
+        self,
+        graph: WorkflowGraph,
+        goal: GoalState,
+        response: LLMResponse,
+    ) -> int:
+        """
+        When an LLM goal produces a prose-only reply (0 RL updates) store the
+        raw response text as a graph attribute so the goal can be marked ACHIEVED.
+
+        Two salvage strategies are tried in order:
+
+        1. ``generate a natural language <attr> for <Entity>`` pattern:
+           stores the prose as ``Entity.<attr>``.
+
+        2. Synthesis/analysis goals (``analyse context and write report``,
+           ``compose report``, ``summarise findings``, …):
+           stores the prose as ``<ReportEntity>.content`` where
+           ``<ReportEntity>`` is the first graph entity whose name starts with a
+           "report receptacle" prefix (Report, Result, Summary, …).  Falls back
+           to a synthetic ``LLMResult`` entity when no receptacle is found.
+
+        Returns the number of graph updates applied (1 on success, 0 if neither
+        pattern matches or the response is empty).
+        """
+        content = (response.content or "").strip()
+        if not content:
+            return 0
+
+        goal_expr_lower = goal.goal.goal_expr.lower()
+
+        # ── Strategy 1: explicit "generate a natural language X for Y" ───────
+        m = self._NL_GOAL_RE.search(goal.goal.goal_expr)
+        if m:
+            attr_name = m.group(1)
+            entity_name = m.group(2)
+            value = content if len(content) <= 2000 else content[:2000] + "…"
+            graph.set_attribute(entity_name, attr_name, value)
+            logger.debug(
+                "_salvage_natural_language_goal: [nl-pattern] stored %s.%s (len=%d)",
+                entity_name,
+                attr_name,
+                len(value),
+            )
+            return 1
+
+        # ── Strategy 2: synthesis / analysis goal — store to Report.content ──
+        if any(kw in goal_expr_lower for kw in self._SYNTHESIS_KEYWORDS):
+            # Find an existing report-receptacle entity in the graph
+            receptacle: str = "LLMResult"
+            for ent_name in graph.all_entities():
+                if ent_name.lower().startswith(self._REPORT_ENTITY_PREFIXES):
+                    receptacle = ent_name
+                    break
+
+            # Do NOT truncate — FileSaveTool needs the full report text.
+            graph.set_attribute(receptacle, "content", content)
+            logger.debug(
+                "_salvage_natural_language_goal: [synthesis] stored %s.content (len=%d)",
+                receptacle,
+                len(content),
+            )
+            return 1
+
+        return 0
 
     def _route_tool(self, goal_expr: str) -> ToolProvider | None:
         """
@@ -607,6 +756,27 @@ class Orchestrator:
                         value,
                         entity,
                     )
+
+        # ── prose field: free-form text output (reports, summaries, analysis) ─
+        # When the LLM puts a natural-language deliverable in "prose" we store it
+        # on the first report-receptacle entity found in the graph (Report, Result,
+        # Summary, Analysis, Output) so that downstream tools like FileSaveTool
+        # can find it immediately via their normal "content" attribute lookup.
+        # If no receptacle entity exists we create a synthetic LLMResult entity.
+        prose = (data.get("prose") or "").strip()
+        if prose:
+            receptacle: str = "LLMResult"
+            for ent_name in graph.all_entities():
+                if ent_name.lower().startswith(self._REPORT_ENTITY_PREFIXES):
+                    receptacle = ent_name
+                    break
+            graph.set_attribute(receptacle, "content", prose)
+            updates += 1
+            logger.debug(
+                "_integrate_json_response: stored prose (%d chars) → %s.content",
+                len(prose),
+                receptacle,
+            )
 
         reasoning = data.get("reasoning", "")
         logger.debug(

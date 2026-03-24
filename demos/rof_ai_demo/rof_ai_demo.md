@@ -782,6 +782,203 @@ List the files in /tmp using the filesystem MCP server
 Read the contents of /tmp/hello.txt
 ```
 
+---
+
+### GitLab MCP prompts
+
+Start the demo with the GitLab MCP server connected:
+
+```sh
+# MCP only
+python rof_ai_demo.py --provider fujitsu \
+    --mcp-stdio gitlab-issues python D:/Github/rof/tools/gitlab_mcp/server.py \
+    --mcp-ssl-no-verify
+
+# MCP + knowledge base (resolves project names, explains labels, provides domain context)
+python rof_ai_demo.py --provider fujitsu \
+    --mcp-stdio gitlab-issues python D:/Github/rof/tools/gitlab_mcp/server.py \
+    --mcp-ssl-no-verify \
+    --rag-backend chromadb \
+    --rag-persist-dir ./knowledge_store \
+    --knowledge-dir D:/Github/rof/tools/gitlab_mcp/knowledge
+```
+
+#### MCP only — listing and reading
+
+```
+# Show who you are logged in as
+Who am I on GitLab?
+
+# List all your open issues
+List all my open GitLab issues.
+
+# List issues filtered by label
+List my open issues labelled gDoing.
+
+# List issues filtered by label, limit result
+List my open issues labelled gTodo, show the 5 most recent.
+
+# List issues in a specific project
+List my open issues in project signatureservices/cryptomodule.
+
+# Read a single issue with its full comment thread
+Read issue 447 in project secdocs/secdocs-server-mvn.
+
+# Discover which projects you have access to
+Find all projects in the signatureservices namespace.
+
+# Find a project by keyword
+Find all projects matching "secdocs".
+```
+
+#### MCP — read and save raw issue to file
+
+```
+# Save a single issue (title + description + comments) to a markdown file
+Read issue 447 in project secdocs/secdocs-server-mvn and save it to a file.
+
+# Save the full list of open issues to a text file
+List all my open GitLab issues and save the list to open_issues.txt.
+
+# Save filtered issues to file
+List my open issues labelled gDoing and save them to doing_issues.md.
+```
+
+#### MCP + analysis — read, analyse, save report
+
+These prompts fetch a live issue via MCP, then have the LLM write a
+structured analysis report, then save it to disk with `FileSaveTool`:
+
+```
+# Analyse the single most recent open issue and write a report
+Analyse the last GitLab issue and write a report to file.
+
+# Full analysis of a specific issue
+Read issue 447 in project secdocs/secdocs-server-mvn, analyse it and write a report to file.
+
+# Analyse what needs to be done to close an issue
+Read issue 108 in project signatureservices/msos and explain what needs to be done to close it. Save the result to a markdown file.
+
+# Root-cause analysis
+Read issue 700 in project signatureservices/cryptomodule and write a root-cause analysis report to file.
+
+# Prioritisation report across all open issues
+List all my open issues, analyse their priority and urgency, and write a prioritisation report to open_issues_priority.md.
+
+# Sprint planning input
+List all my open gTodo issues, group them by project, estimate effort for each, and save a sprint planning summary to sprint_plan.md.
+
+# Status summary of all in-progress work
+List my open issues labelled gDoing and write a concise status report for a team standup. Save to standup_notes.md.
+```
+
+#### MCP + web search — enrich issue with external context
+
+Combine `MCPClientTool` (live issue) with `WebSearchTool` (external docs
+or CVE data) and an LLM synthesis step:
+
+```
+# Look up a referenced external spec while reading the issue
+Read issue 684 in project signatureservices/cryptomodule, search the web for information about the referenced DSS proxy issue DSS-3629, and write a combined analysis report to file.
+
+# Enrich with external standard / RFC
+Read issue 698 in project signatureservices/cryptomodule about post-quantum cryptography, search the web for the current BSI post-quantum recommendations, and write a gap analysis report to file.
+
+# Security advisory lookup
+Read issue 696 in project signatureservices/cryptomodule about DiagnosticData missing in VerifyCertificate, search the web for DSS DiagnosticData API documentation, and write a technical analysis to file.
+```
+
+#### MCP + code generation — script from issue context
+
+Use the live issue as input data, then generate and run a Python script
+that processes it:
+
+```
+# Generate a changelog entry from issue data
+List my closed issues and generate a Python script that formats them as a CHANGELOG.md entry. Run the script and save the output.
+
+# Issue metrics
+List all my open issues and generate a Python script that counts them by project and label, prints a summary table, and saves it as issues_summary.csv. Run the script.
+
+# Export issues to CSV
+List all my open issues and generate a Python script that writes them to a CSV file with columns: project, issue_id, title, labels, url. Run the script.
+```
+
+#### MCP + knowledge base — name resolution and domain context
+
+These require `--knowledge-dir D:/Github/rof/tools/gitlab_mcp/knowledge`
+(or an already-seeded ChromaDB store).  RAGTool resolves project names and
+explains domain terminology without a live API call:
+
+```
+# Resolve project name → ID, then list issues
+List my open issues in the KGS content service project.
+
+# Resolve by alias
+What are my open issues in the storage backend project?
+
+# Explain a label seen on issues
+What does the gDoing label mean?
+
+# Understand a domain term
+What is ILM in the context of our projects?
+
+# Domain term + live issues
+What is TR-ESOR and do I have any open issues related to it?
+```
+
+#### MCP + knowledge base + analysis + save — full pipeline
+
+The richest pattern: RAGTool resolves context, MCPClientTool fetches live
+data, the LLM synthesises everything, FileSaveTool persists the result:
+
+```
+# Read and domain-annotate a specific issue
+Read issue 447 in secdocs/secdocs-server-mvn, retrieve domain background about XAIP and SDO-Filter from the knowledge base, and write a technical analysis report to xaip_sdo_analysis.md.
+
+# Full issue triage with domain context
+Read issue 705 in signatureservices/cryptomodule, retrieve background about container image delivery from the knowledge base, analyse the scope and effort, and save an implementation plan to container_image_plan.md.
+
+# Cross-reference: live issue + knowledge base + web
+Read issue 684 in signatureservices/cryptomodule, retrieve what we know about DSS from the knowledge base, search the web for the DSS-3629 ticket, and write a complete impact analysis to dss_proxy_analysis.md.
+
+# Weekly team report: all gDoing issues with domain context
+List my open issues labelled gDoing, retrieve the gDoing workflow definition from the knowledge base, and write a structured weekly progress report to weekly_progress.md.
+
+# Onboarding document for a new team member
+Find all projects in the signatureservices namespace, retrieve the project overview and domain glossary from the knowledge base, and write a project onboarding guide to onboarding_guide.md.
+
+# Risk register from open bugs
+List my open issues labelled gBug, retrieve domain context about affected components from the knowledge base, and produce a risk register with severity and mitigation notes. Save to risk_register.md.
+```
+
+#### MCP — issue lifecycle actions
+
+```
+# Post a comment on an issue
+Post a comment on issue 447 in secdocs/secdocs-server-mvn saying the initial findings have been documented.
+
+# Re-label an issue
+Set the label on issue 5 in signatureservices/secdocs-kgs-content-service to gDoing.
+
+# Close an issue with a closing comment
+Close issue 683 in signatureservices/cryptomodule with a comment saying the log message has been improved and the fix is merged.
+
+# Reopen an issue
+Reopen issue 683 in signatureservices/cryptomodule.
+```
+
+> **Tip — one-shot mode:**  any of the above prompts can be run non-interactively
+> with `--one-shot "..."`.  The session exits automatically after the run
+> and saves the plan and run-summary JSON to `--output-dir`.
+
+```sh
+python rof_ai_demo.py --provider fujitsu \
+    --mcp-stdio gitlab-issues python D:/Github/rof/tools/gitlab_mcp/server.py \
+    --mcp-ssl-no-verify \
+    --one-shot "List all my open GitLab issues and save the list to open_issues.md."
+```
+
 ### How AICodeGenTool + execution tools work together
 
 `AICodeGenTool` **only generates and saves** the source file — it never runs

@@ -46,7 +46,7 @@ stages:
 
 # ── Pipeline-level configuration ─────────────────────────────────────────
 config:
-  on_failure: halt # halt | continue | retry
+  on_failure: continue # halt | continue | retry
   retry_count: 2 # retries before giving up (OnFailure.RETRY)
   inject_prior_context: true # pass accumulated snapshot into each stage
   max_snapshot_entities: 50 # cap to avoid context window overflow
