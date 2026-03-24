@@ -119,7 +119,7 @@ class LLMProvider(ABC):
 
         The ``auto`` output-mode selector in :class:`OrchestratorConfig` uses
         this method — not ``supports_structured_output()`` — so that capable
-        models (e.g. Fujitsu Chat-AI / GPT-4o) produce structured JSON rather
+        models (e.g. GPT-5.1) produce structured JSON rather
         than falling back to the fragile RL text path.
 
         The default implementation delegates to ``supports_structured_output()``

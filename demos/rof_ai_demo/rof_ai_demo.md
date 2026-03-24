@@ -143,14 +143,14 @@ actor (e.g. a OneDrive-synced file edited from Teams or Notepad) and
 executes each new command automatically.
 
 ```sh
-# Default watch file (C:\Users\FISCHERF\OneDrive - FUJITSU\teams.txt)
+# no Default watch file ("C:\Users\{UserName}\OneDrive\rof_input.txt")
 python rof_ai_demo.py --provider github_copilot --agent
 
 # Custom paths
 python rof_ai_demo.py --provider github_copilot \
     --agent \
-    --agent-watch "C:\Users\you\OneDrive\commands.txt" \
-    --agent-log   "C:\Users\you\OneDrive\rof_output.txt" \
+    --agent-watch "C:\Users\{UserName}\OneDrive\rof_input.txt" \
+    --agent-log   "C:\Users\{UserName}\OneDrive\rof_output.txt" \
     --agent-poll  3
 ```
 
@@ -623,7 +623,7 @@ python rof_ai_demo.py --provider github_copilot
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--agent` | off | Activate agent mode. Watches `--agent-watch` for commands instead of opening the interactive REPL. |
-| `--agent-watch PATH` | `C:\Users\FISCHERF\OneDrive - FUJITSU\teams.txt` | File polled for incoming commands. Created automatically if it does not exist. After a command is consumed the file is cleared so the next command can be written. |
+| `--agent-watch PATH` | `C:\Users\{UserName}\OneDrive\rof_input.txt` | File polled for incoming commands. Created automatically if it does not exist. After a command is consumed the file is cleared so the next command can be written. |
 | `--agent-log PATH` | `<output-dir>/agent_output.txt` | File where the result of each run is written. Fully overwritten after every completed run — always contains only the latest result. |
 | `--agent-poll SECONDS` | `2.0` | How often the watch file is checked. Uses file modification time so CPU usage is negligible between writes. |
 
@@ -1055,12 +1055,12 @@ Start the demo with the GitLab MCP server connected:
 
 ```sh
 # MCP only
-python rof_ai_demo.py --provider fujitsu \
+python rof_ai_demo.py --provider ollama \
     --mcp-stdio gitlab-issues python D:/Github/rof/tools/gitlab_mcp/server.py \
     --mcp-ssl-no-verify
 
 # MCP + knowledge base (resolves project names, explains labels, provides domain context)
-python rof_ai_demo.py --provider fujitsu \
+python rof_ai_demo.py --provider ollama \
     --mcp-stdio gitlab-issues python D:/Github/rof/tools/gitlab_mcp/server.py \
     --mcp-ssl-no-verify \
     --rag-backend chromadb \
@@ -1238,7 +1238,7 @@ Reopen issue 683 in signatureservices/cryptomodule.
 > and saves the plan and run-summary JSON to `--output-dir`.
 
 ```sh
-python rof_ai_demo.py --provider fujitsu \
+python rof_ai_demo.py --provider ollama \
     --mcp-stdio gitlab-issues python D:/Github/rof/tools/gitlab_mcp/server.py \
     --mcp-ssl-no-verify \
     --one-shot "List all my open GitLab issues and save the list to open_issues.md."

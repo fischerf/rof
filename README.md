@@ -671,7 +671,7 @@ ROF is **not** a replacement for:
   │                                           enforcement OR prompt injection.
   │                                           The "auto" output-mode selector uses this
   │                                           (not supports_structured_output) so capable
-  │                                           models (e.g. Fujitsu/GPT-4o) get json mode
+  │                                           models (e.g. GPT-5.1) get json mode
   │                                           even without a native schema API.
   │                                           Default: delegates to supports_structured_output().
   │     supports_tool_calling()      → True  native function/tool-call interface available.
@@ -715,17 +715,6 @@ ROF is **not** a replacement for:
         The correct tier-specific API base URL (individual vs. business account)
         is discovered automatically from the session-token exchange response.
         Dependencies: pip install openai httpx
-
-  rof_providers.FujitsuChatAIProvider          (optional package: rof-providers)
-  │     Calls the Fujitsu AI Foundation Chat-AI endpoint (GPT-5.1).
-  │     Uses plain httpx — no vendor SDK required.
-  │     Auth via proprietary "api-key" header (not Authorization: Bearer).
-  │     supports_json_output() → True   (prompt-injection JSON; GPT-5.1 follows
-  │                                       the ROF schema reliably in practice)
-  │     supports_structured_output() → False  (no server-side schema enforcement)
-  │     supports_tool_calling()      → False
-  │     FUJITSU_API_KEY env var or api_key= constructor argument.
-  │     Optional endpoint override: FUJITSU_CHATAI_ENDPOINT or endpoint= kwarg.
 
   RetryManager
   │   Wraps any provider transparently.
@@ -1757,7 +1746,7 @@ except BudgetExceededError as e:
     print(tracker.summary())        # stats up to the point of halt
 ```
 
-Custom and generic providers (e.g. `XYZChatAIProvider`) report their token
+Custom and generic providers (e.g. `AIProvider`) report their token
 counts by overriding `LLMProvider.extract_usage()` — the `TrackingProvider`
 calls this hook first and falls back to built-in raw-dict heuristics for the
 four bundled providers.
