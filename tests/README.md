@@ -117,6 +117,90 @@ No external MCP server, subprocess, or network access is required — all transp
 - Integration tests for `ConfidentOrchestrator` – stub LLM + tool runs, trace writing, multi-run memory accumulation (requires `rof_core` + `rof_tools`)
 - Integration tests for `ConfidentPipeline` – multi-stage run, shared memory across stages (requires `rof_core` + `rof_pipeline`)
 
+### 12. **ToolProvider / Schema** (`tests/test_tool_provider.py`) — **169 tests**
+
+The schema-driven planner redesign introduced `ToolParam`, `ToolSchema`, and `ToolProvider.tool_schema()` as the ROF equivalent of an MCP tool's `inputSchema`.  This test file covers the full contract end-to-end.
+
+**`ToolParam` (12 tests)**
+- Field defaults and explicit construction for all attributes (`name`, `type`, `description`, `required`, `default`)
+- All six JSON Schema primitive type strings accepted (`string`, `integer`, `boolean`, `number`, `array`, `object`)
+- `required=True` with no default; `required=False` with typed default value
+
+**`ToolSchema` (13 tests)**
+- Minimal and full construction
+- `canonical_trigger` — returns first trigger, empty string when list is empty
+- `required_params` / `optional_params` — correct filtered views for all-required, all-optional, mixed
+- `notes` list round-trip
+- Trigger ordering preserved; full round-trip with a representative game-tool schema (`SelectCardTool`)
+
+**`ToolProvider.tool_schema()` default implementation (8 tests)**
+- `schema.name` matches `tool.name`
+- `schema.triggers` equals `trigger_keywords`
+- `canonical_trigger` is the first keyword
+- `description` derived from the first line of the class docstring
+- Fallback to `"<Name> tool."` when no docstring is present
+- No params, no notes in the default schema
+- Return type is always `ToolSchema`
+
+**Custom `tool_schema()` override (7 tests)**
+- Subclass override is fully respected — description, params, notes, triggers
+- Required param carries correct name, type, `required=True`, `default=None`
+- Optional param carries correct default value
+- Class docstring does not leak through the override
+
+**Builtin schema patches — all 12 tools (96 tests, parametrised)**
+
+Verifies that the class-level patch applied in `tools/tools/__init__.py` works for every builtin tool:
+`AICodeGenTool`, `CodeRunnerTool`, `LLMPlayerTool`, `WebSearchTool`, `APICallTool`,
+`FileReaderTool`, `FileSaveTool`, `ValidatorTool`, `HumanInLoopTool`, `RAGTool`,
+`DatabaseTool`, `LuaRunTool`.
+
+For each tool, 8 assertions are checked:
+- `tool_schema` is callable at class level (`cls.tool_schema(None)`)
+- `schema.name` matches the class name exactly
+- `canonical_trigger` contains the expected keyword fragment
+- `description` is a non-empty string
+- All declared required params are present by name
+- All param names are non-empty strings
+- All param types are valid JSON Schema primitives
+- Required params have `default=None`
+
+**`ALL_BUILTIN_SCHEMAS` list (5 tests)**
+- Importable from `rof_framework.tools.tools`
+- All entries are `ToolSchema` instances
+- No duplicate names
+- Every schema has at least one trigger and a non-empty `canonical_trigger`
+- All 12 expected tool names are present
+
+**Regression: index-param guard (18 tests)**
+
+Directly guards against the original `Field required` bug where `select_card`,
+`buy_pack`, and `choose_artifact` were called without their required index parameters.
+Six game tools are tested across three parametrised groups:
+
+| Tool | Required param |
+|---|---|
+| `select_card` | `card_number` |
+| `buy_pack` | `pack_number` |
+| `choose_artifact` | `artifact_number` |
+| `pick_card_draft` | `pick_number` |
+| `remove_card` | `card_number` |
+| `pick_reward` | `card_number` |
+
+For `select_card`, `buy_pack`, and `choose_artifact`: param is `required=True`,
+type is `"integer"`, and `default` is `None`.
+
+**`ToolRequest` / `ToolResponse` dataclasses (7 tests)**
+- Default field values and full construction
+- `input` dict is independent per instance (no shared mutable default)
+- `output` accepts any type; `error` defaults to empty string
+
+**Quick-test alias:**
+```cmd
+python tests/quick_test.py tool_provider
+python tests/quick_test.py schemas        # alias
+```
+
 ---
 
 ## Running Tests

@@ -17,6 +17,8 @@ TEST_DOMAINS = {
     "lint": "test_lint.py",
     "llm": "test_llm_providers.py",
     "tools": "test_tools_registry.py",
+    "tool_provider": "test_tool_provider.py",
+    "schemas": "test_tool_provider.py",
     "mcp": "test_mcp.py",
     "passthrough": "test_tool_output_graph_passthrough.py",
     "chains": "test_pipeline_chains.py",
@@ -73,13 +75,15 @@ Available domains:
   cli      - CLI tests
   lint     - Linter tests
   llm      - LLM provider tests
-  tools       - Tools and registry tests
-  mcp         - MCP client integration tests (MCPServerConfig, MCPClientTool, MCPToolFactory)
-  passthrough - Tool output entity-keyed contract & graph passthrough tests
-  chains      - Real multi-tool pipeline chain integration tests
-  pipeline    - Pipeline orchestration tests
-  routing     - Learned routing confidence tests
-  all         - All tests
+  tools         - Tools and registry tests
+  tool_provider - ToolParam, ToolSchema, ToolProvider.tool_schema() + builtin schema patches
+  schemas       - Alias for tool_provider
+  mcp           - MCP client integration tests (MCPServerConfig, MCPClientTool, MCPToolFactory)
+  passthrough   - Tool output entity-keyed contract & graph passthrough tests
+  chains        - Real multi-tool pipeline chain integration tests
+  pipeline      - Pipeline orchestration tests
+  routing       - Learned routing confidence tests
+  all           - All tests
         """,
     )
 
