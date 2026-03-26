@@ -393,10 +393,21 @@ def _build_mcp_configs(args: argparse.Namespace) -> list:
     mcp_keywords: list[str] = list(getattr(args, "mcp_keywords", None) or [])
     ssl_no_verify: bool = bool(getattr(args, "mcp_ssl_no_verify", False))
 
-    # ── Execute ───────────────────────────────────────────────────
+    # ── stdio servers ─────────────────────────────────────────────────────
     # argparse nargs="+" collects everything after the flag into one flat
     # list.  We allow multiple --mcp-stdio flags; each produces one entry in
     # args.mcp_stdio as a sublist  [NAME, CMD, ARG1, ARG2, …].
+    import os as _os
+    import sys as _sys
+
+    # The directory that contains rof_ai_demo.py — two levels up from here
+    # is the rof project root, which is what we need on PYTHONPATH so that
+    # package-style MCP servers (e.g. `python -m mcp_server.server`) can be
+    # found by the subprocess when the caller only knows the package name.
+    _THIS_DIR = _os.path.dirname(_os.path.abspath(__file__))  # demos/rof_ai_demo
+    _ROF_ROOT = _os.path.dirname(_os.path.dirname(_THIS_DIR))  # rof/
+    _TOOLS_DIR = _os.path.join(_ROF_ROOT, "tools")  # rof/tools/
+
     for entry in getattr(args, "mcp_stdio", None) or []:
         if len(entry) < 2:
             warn(f"--mcp-stdio requires at least NAME and CMD (got: {entry!r}) — skipping.")
@@ -422,6 +433,29 @@ def _build_mcp_configs(args: argparse.Namespace) -> list:
             warn(
                 f"MCP stdio '{name}': SSL verification DISABLED "
                 "(NODE_TLS_REJECT_UNAUTHORIZED=0).  Use only for trusted hosts."
+            )
+
+        # ── Python module-mode detection ──────────────────────────────────
+        # When the caller runs a Python MCP server as a package module
+        # (command=python, args=["-m", "pkg.server"]), the subprocess needs
+        # the package's parent directory on PYTHONPATH so Python can resolve
+        # the dotted name.  We detect this pattern and automatically prepend
+        # rof/tools/ (where mcp_server/ lives) to PYTHONPATH.
+        #
+        # Detection: command looks like a Python interpreter AND the first
+        # arg is "-m".
+        _is_python = (
+            _os.path.basename(command).lower().startswith("python") or command == _sys.executable
+        )
+        if _is_python and cmd_args and cmd_args[0] == "-m":
+            _existing_pypath = _os.environ.get("PYTHONPATH", "")
+            _new_pypath = (
+                _TOOLS_DIR + _os.pathsep + _existing_pypath if _existing_pypath else _TOOLS_DIR
+            )
+            stdio_env["PYTHONPATH"] = _new_pypath
+            info(
+                f"MCP stdio '{name}': Python module mode detected — "
+                f"injecting PYTHONPATH={_TOOLS_DIR!r}"
             )
 
         try:
@@ -469,6 +503,79 @@ def _build_mcp_configs(args: argparse.Namespace) -> list:
 # ===========================================================================
 # CLI argument parser
 # ===========================================================================
+
+# Flags that introduce an --mcp-stdio / --mcp-http group.
+_MCP_GROUP_FLAGS: frozenset[str] = frozenset(["--mcp-stdio", "--mcp-http"])
+
+
+def _extract_mcp_groups(argv: list[str]) -> tuple[list[str], list[list[str]], list[list[str]]]:
+    """
+    Pre-process *argv* (typically ``sys.argv[1:]``) **before** argparse sees it.
+
+    argparse's ``nargs="+"`` stops collecting values as soon as it encounters a
+    token that starts with ``-``, treating it as a new option flag.  This breaks
+    any ``--mcp-stdio`` / ``--mcp-http`` entry whose args contain dash-prefixed
+    tokens such as ``-m`` (Python's module flag) or ``-y`` (npx's yes flag).
+
+    This function scans *argv* left-to-right and pulls out every
+    ``--mcp-stdio`` / ``--mcp-http`` group manually: a group starts at the flag
+    and ends just before the next token that is a known argparse flag (i.e.
+    starts with ``--`` and is **not** itself an mcp-group flag, OR starts with
+    a single ``-`` followed by a letter that is a registered short option).
+
+    The remaining tokens (everything that is not part of an mcp group) are
+    returned as *clean_argv* and passed to ``parse_args()`` normally.
+
+    Returns
+    -------
+    clean_argv   – argv with all mcp-group tokens removed
+    stdio_groups – list of token-lists, one per ``--mcp-stdio`` occurrence
+    http_groups  – list of token-lists, one per ``--mcp-http`` occurrence
+    """
+    stdio_groups: list[list[str]] = []
+    http_groups: list[list[str]] = []
+    clean_argv: list[str] = []
+
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+
+        if token not in _MCP_GROUP_FLAGS:
+            clean_argv.append(token)
+            i += 1
+            continue
+
+        # Determine which list to append to.
+        dest = stdio_groups if token == "--mcp-stdio" else http_groups
+        i += 1  # skip the flag itself
+
+        # Collect all subsequent tokens that belong to this group.
+        # A token ends the group when it looks like a new argparse flag:
+        #   • starts with "--"  (long option)
+        #   • starts with "-" followed by a non-digit letter (short option)
+        # We intentionally do NOT stop on "-m", "-y", "-v" etc. because those
+        # are part of the MCP server command line, not our own flags.
+        #
+        # The heuristic: stop only on "--<word>" tokens that are NOT themselves
+        # mcp-group flags (those are handled in the outer loop).  Single-dash
+        # tokens are never our own short flags (we don't register any), so they
+        # are always part of the group value.
+        group_tokens: list[str] = []
+        while i < len(argv):
+            t = argv[i]
+            # A new long-option flag that is not an mcp-group flag ends the group.
+            if t.startswith("--") and t not in _MCP_GROUP_FLAGS:
+                break
+            # An mcp-group flag also ends the group (handled by outer loop).
+            if t in _MCP_GROUP_FLAGS:
+                break
+            group_tokens.append(t)
+            i += 1
+
+        if group_tokens:
+            dest.append(group_tokens)
+
+    return clean_argv, stdio_groups, http_groups
 
 
 class _AppendMCPAction(argparse.Action):
@@ -980,8 +1087,43 @@ def _parse_args() -> argparse.Namespace:
             "Default: 2.0"
         ),
     )
+    agent.add_argument(
+        "--agent-log-format",
+        dest="agent_log_format",
+        choices=["text", "markdown"],
+        default="text",
+        metavar="FORMAT",
+        help=(
+            "Output format for the agent log file.  "
+            "'text' (default) — plain text, readable in any editor.  "
+            "'markdown' — GitHub-Flavoured Markdown with headings, tables, and "
+            "fenced code blocks.  The log is always written to exactly the path "
+            "given by --agent-log, regardless of format.  "
+            "Choices: text | markdown"
+        ),
+    )
 
-    return p.parse_args()
+    # Pre-extract --mcp-stdio / --mcp-http groups from sys.argv so that
+    # dash-prefixed tokens inside those groups (e.g. "-m", "-y") are never
+    # mistaken for argparse flags.  The cleaned argv is passed to parse_args();
+    # the extracted groups are injected directly into the namespace afterwards.
+    import sys as _sys_inner
+
+    _clean_argv, _stdio_groups, _http_groups = _extract_mcp_groups(_sys_inner.argv[1:])
+
+    args = p.parse_args(_clean_argv)
+
+    # Merge pre-extracted MCP groups into the namespace, appending to any
+    # entries that the action might have collected from clean_argv (in practice
+    # there will be none, but we preserve the list semantics).
+    if _stdio_groups:
+        existing_stdio: list = getattr(args, "mcp_stdio", None) or []
+        setattr(args, "mcp_stdio", existing_stdio + _stdio_groups)
+    if _http_groups:
+        existing_http: list = getattr(args, "mcp_http", None) or []
+        setattr(args, "mcp_http", existing_http + _http_groups)
+
+    return args
 
 
 # ===========================================================================
@@ -1135,6 +1277,7 @@ def main() -> None:
     _agent_watch_path: Optional[Path] = None
     _agent_log_path: Optional[Path] = None
     _agent_poll: float = 2.0
+    _agent_log_format: str = "text"
     if _agent_mode:
         _agent_watch_str: str = getattr(args, "agent_watch", "").strip()
         _agent_watch_path = Path(_agent_watch_str) if _agent_watch_str else None
@@ -1147,11 +1290,13 @@ def main() -> None:
             Path(_agent_log_str) if _agent_log_str else output_dir / "agent_output.txt"
         )
         _agent_poll = max(0.1, float(getattr(args, "agent_poll", 2.0)))
+        _agent_log_format = getattr(args, "agent_log_format", "text").strip().lower()
 
         info(f"Agent mode    : {bold(cyan('active'))}")
         info(f"  watch file  : {dim(str(_agent_watch_path))}")
         info(f"  log  file   : {dim(str(_agent_log_path))}")
         info(f"  poll        : {dim(str(_agent_poll) + ' s')}")
+        info(f"  log format  : {dim(_agent_log_format)}")
 
     # ── Run ──────────────────────────────────────────────────────────────
     if _agent_mode and _agent_watch_path is not None and _agent_log_path is not None:
@@ -1160,6 +1305,7 @@ def main() -> None:
             watch_file=_agent_watch_path,
             log_file=_agent_log_path,
             poll_interval=_agent_poll,
+            log_format=_agent_log_format,
         )
     elif args.one_shot:
         try:
