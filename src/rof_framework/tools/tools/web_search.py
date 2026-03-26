@@ -39,6 +39,91 @@ logger = logging.getLogger("rof.tools")
 __all__ = ["SearchResult", "WebSearchTool"]
 
 
+def _clean_text(text: str) -> str:
+    """Fix missing spaces that result from stripped HTML tags (e.g. <b>) in DuckDuckGo snippets.
+
+    DuckDuckGo wraps matched keywords in <b>…</b> tags. When the ddgs library
+    strips those tags it does NOT insert replacement spaces, so adjacent words
+    get fused: "talks with<b>Iran</b>about" → "talks withIranabout".
+
+    Strategy (order matters):
+      1. Replace any residual HTML tags with a single space so tag boundaries
+         always produce whitespace.
+      2. Collapse runs of whitespace back to one space.
+      3. Insert a space between a lower-case letter / digit and an upper-case
+         letter  (e.g. "withIran" → "with Iran", "endwar" is NOT affected here
+         because both chars are lower-case – those are genuine word fusions that
+         we cannot reliably split without a dictionary).
+      4. Insert a space between a run of 2+ upper-case letters and an
+         upper-case letter followed by lower-case  (e.g. "USIran" → "US Iran").
+    """
+    # Step 1: replace any leftover HTML tags with a space
+    text = re.sub(r"<[^>]+>", " ", text)
+    # Step 2: collapse multiple spaces / mixed whitespace
+    text = re.sub(r"[ \t]+", " ", text)
+    # Step 3: lower/digit → Upper  (e.g. "withIran", "15Iran")
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    # Step 4: UPPER sequence → Upper+lower  (e.g. "USIran" → "US Iran")
+    text = re.sub(r"([A-Z]{2,})([A-Z][a-z])", r"\1 \2", text)
+    return text.strip()
+
+
+# ---------------------------------------------------------------------------
+# ddgs HTML pre-processing patch
+# ---------------------------------------------------------------------------
+
+# Regex that matches any inline emphasis tag used by DuckDuckGo / Bing to
+# highlight matched keywords.  These tags have NO semantic content – only their
+# text children matter – so replacing them with a single space is safe and
+# ensures lxml's XPath text() nodes are separated correctly.
+_INLINE_TAG_RE = re.compile(r"</?(?:b|strong|em|i|mark|span)\b[^>]*>", re.IGNORECASE)
+
+
+def _make_space_pre_processor(original_fn):
+    """Wrap an engine's pre_process_html to inject spaces at tag boundaries."""
+
+    def _pre_process_html(self, html_text: str) -> str:
+        html_text = _INLINE_TAG_RE.sub(" ", html_text)
+        return original_fn(self, html_text)
+
+    return _pre_process_html
+
+
+def _patch_ddgs_engines() -> None:
+    """Monkey-patch all loaded ddgs text-search engine classes.
+
+    The patch replaces every inline emphasis tag (``<b>``, ``<strong>``, …)
+    with a plain space *before* lxml parses the document.  This prevents words
+    from being fused when ddgs joins XPath ``text()`` nodes without separators.
+
+    The patch is idempotent: calling this function multiple times is harmless
+    because we mark patched classes with ``_rof_space_patched``.
+    """
+    try:
+        import importlib
+        import pkgutil
+
+        import ddgs.engines as _eng_pkg  # type: ignore
+        from ddgs.base import BaseSearchEngine  # type: ignore
+
+        for _finder, _mod_name, _ispkg in pkgutil.iter_modules(_eng_pkg.__path__):
+            try:
+                mod = importlib.import_module(f"ddgs.engines.{_mod_name}")
+            except Exception:
+                continue
+            for _attr in vars(mod).values():
+                if (
+                    isinstance(_attr, type)
+                    and issubclass(_attr, BaseSearchEngine)
+                    and _attr is not BaseSearchEngine
+                    and not getattr(_attr, "_rof_space_patched", False)
+                ):
+                    _attr.pre_process_html = _make_space_pre_processor(_attr.pre_process_html)
+                    _attr._rof_space_patched = True  # type: ignore[attr-defined]
+    except Exception as exc:  # pragma: no cover
+        logger.debug("ddgs engine patch skipped: %s", exc)
+
+
 # rof_tools/tools/web_search.py
 @dataclass
 class SearchResult:
@@ -197,13 +282,25 @@ class WebSearchTool(ToolProvider):
             from ddgs import DDGS  # type: ignore
         except ImportError as e:
             raise ImportError("pip install ddgs") from e
-        ddgs = DDGS(timeout=int(self._timeout), verify=self._verify)
-        raw = ddgs.text(query, max_results=max_results)
+
+        # Root-cause fix: ddgs uses lxml XPath `//text()` which concatenates
+        # text nodes without inserting spaces at tag boundaries.  DuckDuckGo
+        # wraps highlighted keywords in <b>…</b>, so "talks with<b>Iran</b>about"
+        # becomes "talks withIranabout" after tag stripping.
+        #
+        # We patch pre_process_html on every DuckDuckGo-family engine that is
+        # already loaded so that ALL inline emphasis tags are replaced by a
+        # single space BEFORE lxml ever sees the document.  This is the only
+        # place where the raw HTML is still intact.
+        _patch_ddgs_engines()
+
+        ddgs_client = DDGS(timeout=int(self._timeout), verify=self._verify)
+        raw = ddgs_client.text(query, max_results=max_results)
         return [
             SearchResult(
-                title=r.get("title", ""),
+                title=_clean_text(r.get("title", "")),
                 url=r.get("href", r.get("url", "")),
-                snippet=r.get("body", r.get("snippet", "")),
+                snippet=_clean_text(r.get("body", r.get("snippet", ""))),
             )
             for r in raw
         ]
@@ -224,9 +321,9 @@ class WebSearchTool(ToolProvider):
         data = r.json()
         return [
             SearchResult(
-                title=i.get("title", ""),
+                title=_clean_text(i.get("title", "")),
                 url=i.get("link", ""),
-                snippet=i.get("snippet", ""),
+                snippet=_clean_text(i.get("snippet", "")),
             )
             for i in data.get("organic_results", [])[:max_results]
         ]
@@ -248,9 +345,9 @@ class WebSearchTool(ToolProvider):
         data = r.json()
         return [
             SearchResult(
-                title=i.get("title", ""),
+                title=_clean_text(i.get("title", "")),
                 url=i.get("url", ""),
-                snippet=i.get("description", ""),
+                snippet=_clean_text(i.get("description", "")),
             )
             for i in data.get("web", {}).get("results", [])[:max_results]
         ]

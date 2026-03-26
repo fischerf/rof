@@ -215,6 +215,7 @@ def run_agent(
     watch_file: Path,
     log_file: Path,
     poll_interval: float = 2.0,
+    log_format: str = "text",  # "text" or "markdown"
 ) -> None:
     """
     Start the file-watching agent loop.
@@ -228,13 +229,22 @@ def run_agent(
         When the file is non-empty and contains a command that hasn't been
         seen before, the command is executed and the file is cleared.
     log_file      : Path
-        After each completed workflow run the full console output of that run
-        is written to this file in one atomic write, replacing any previous
-        content.  The file is only written once the run has finished so the
-        remote viewer always sees a complete snapshot.
+        After each completed workflow run the result is rendered by
+        ``output_layout.render_result()`` and written to this file in one
+        atomic write, replacing any previous content.
     poll_interval : float
         How often (in seconds) to check the watch file.  Default: 2.0 s.
+    log_format    : str
+        ``"text"``     – plain text (default), suitable for any editor.
+        ``"markdown"`` – GitHub-Flavoured Markdown with headings, tables,
+                         and fenced code blocks.  The log file is always
+                         written to exactly the path supplied by the caller.
     """
+    # ── Normalise log_format ──────────────────────────────────────────────
+    log_format = log_format.strip().lower()
+    if log_format not in ("text", "markdown"):
+        warn(f"Agent: unknown log_format {log_format!r}; falling back to 'text'.")
+        log_format = "text"
 
     # ── Ensure parent directories exist ──────────────────────────────────
     watch_file.parent.mkdir(parents=True, exist_ok=True)
@@ -257,7 +267,9 @@ def run_agent(
     sys.stderr = _cap_stderr  # type: ignore[assignment]
 
     try:
-        _agent_loop(session, watch_file, log_file, poll_interval, _cap_stdout, _cap_stderr)
+        _agent_loop(
+            session, watch_file, log_file, poll_interval, log_format, _cap_stdout, _cap_stderr
+        )
     finally:
         sys.stdout = _orig_stdout
         sys.stderr = _orig_stderr
@@ -273,10 +285,14 @@ def _agent_loop(
     watch_file: Path,
     log_file: Path,
     poll_interval: float,
+    log_format: str,
     cap_stdout: _Capture,
     cap_stderr: _Capture,
 ) -> None:
     """Core polling loop – called from :func:`run_agent`."""
+
+    render_mode = "agent_md" if log_format == "markdown" else "agent"
+    format_label = "markdown (.md)" if log_format == "markdown" else "plain text"
 
     banner(
         "Agent Mode",
@@ -284,12 +300,14 @@ def _agent_loop(
             f"watch : {watch_file}  │  "
             f"log   : {log_file}  │  "
             f"poll  : {poll_interval}s  │  "
+            f"format: {format_label}  │  "
             "Ctrl-C to stop"
         ),
     )
 
     info(f"Agent watch file : {bold(cyan(str(watch_file)))}")
     info(f"Agent log  file  : {bold(cyan(str(log_file)))}")
+    info(f"Log format       : {bold(format_label)}")
     info(f"Poll interval    : {bold(str(poll_interval))} s")
     info(
         f"Status           : {green('active')} — write a command into the watch file to execute it"
@@ -403,7 +421,7 @@ def _agent_loop(
 
                 log_text = render_result(
                     result.snapshot,
-                    mode="agent",
+                    mode=render_mode,
                     command=command,
                     success=run_success,
                     plan_ms=plan_ms,

@@ -7,25 +7,24 @@ Provides a single public function:
 
 which turns a RunResult snapshot dict into a human-readable string.
 
-Two rendering modes
--------------------
-  "cli"   – rich, colour-aware terminal output.  Replaces the inline
-             entity-state block in session.py.  The run-summary table
-             (Status / Mode / Routing / Tokens …) is printed by session.py
-             itself; this function renders only the *result* section that
-             follows it.
+Three rendering modes
+---------------------
+  "cli"       – rich, ANSI-coloured terminal output.  Replaces the inline
+                entity-state block in session.py.  The run-summary table
+                (Status / Mode / Routing / Tokens …) is printed by session.py
+                itself; this function renders only the *result* section that
+                follows it.
 
-  "agent" – clean plain text written to the agent log file.  No ANSI codes,
-             no pipeline scaffolding, no RL source.  Just the command, a
-             one-line status header, and the result in the most readable
-             form possible.
+  "agent"     – clean plain text written to the agent log file.  No ANSI
+                codes, no pipeline scaffolding, no RL source.  Just the
+                command, a one-line status header, and the result in the
+                most readable form possible.
 
-Template engine
----------------
-Python's stdlib ``string.Template`` is used for every layout.  Each
-template receives a ``vars`` dict built from the snapshot; unknown
-``$keys`` are left as-is via ``safe_substitute`` so a partially-filled
-template never raises.
+  "agent_md"  – GitHub-flavoured Markdown written to the agent log file.
+                Same content as "agent" but formatted with headings, bold,
+                tables, and fenced code blocks so the file renders nicely
+                in Teams, VS Code, Notepad with a Markdown preview, or any
+                Markdown viewer.  Suitable for sharing via OneDrive.
 
 Layout selection
 ----------------
@@ -35,14 +34,14 @@ is used.  The last entry is always the generic fallback.
 
 Adding a new layout
 -------------------
-1. Define a ``_Layout`` with a name, a match function, and two templates
-   (cli + agent).
+1. Define a ``_Layout`` with a name, a match function, and three renderer
+   callables (cli, agent, agent_md).
 2. Insert it *before* the ``generic`` entry in ``_LAYOUTS``.
 That's it – no changes needed anywhere else.
 
 Attribute filtering
 -------------------
-_SKIP_ATTRS      – completely hidden in both modes (internal plumbing).
+_SKIP_ATTRS      – completely hidden in all modes (internal plumbing).
 _TRUNCATE_ATTRS  – shown but capped at _CLI_TRUNC / _AGENT_TRUNC chars.
 """
 
@@ -218,6 +217,7 @@ class _Layout:
     match: Callable[[dict], bool]  # receives flattened snapshot
     cli_renderer: Callable[[dict, dict], str]  # (flat, entities) -> str
     agent_renderer: Callable[[dict, dict], str]  # (flat, entities) -> str
+    agent_md_renderer: Callable[[dict, dict], str]  # (flat, entities) -> str
 
 
 # ===========================================================================
@@ -286,6 +286,35 @@ def _web_search_agent(flat: dict, entities: dict) -> str:
     return "\n".join(lines)
 
 
+def _web_search_agent_md(flat: dict, entities: dict) -> str:
+    lines: list[str] = []
+    query = flat.get("WebSearchResults.query", flat.get("query", ""))
+    count = flat.get("WebSearchResults.result_count", "")
+    if query:
+        lines.append("## Search Results\n")
+        lines.append(
+            f"**Query:** {query}" + (f"  &nbsp;·&nbsp;  **{count} results**" if count else "")
+        )
+        lines.append("")
+
+    idx = 1
+    while f"SearchResult{idx}" in entities:
+        attrs = _entity_attrs(entities[f"SearchResult{idx}"], _AGENT_TRUNC)
+        title = attrs.get("title", "")
+        url = attrs.get("url", "")
+        snippet = attrs.get("snippet", "")
+        if url:
+            lines.append(f"### {idx}. [{title}]({url})")
+        else:
+            lines.append(f"### {idx}. {title}")
+        if snippet:
+            lines.append(f"\n{snippet}\n")
+        lines.append("")
+        idx += 1
+
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # 2. RAG  (RAGResults + KnowledgeDoc1…N)
 # ---------------------------------------------------------------------------
@@ -348,6 +377,36 @@ def _rag_agent(flat: dict, entities: dict) -> str:
     return "\n".join(lines)
 
 
+def _rag_agent_md(flat: dict, entities: dict) -> str:
+    lines: list[str] = []
+    query = flat.get("RAGResults.query", flat.get("query", ""))
+    count = flat.get("RAGResults.result_count", "")
+    lines.append("## Knowledge Base Results\n")
+    if query:
+        lines.append(
+            f"**Query:** {query}" + (f"  &nbsp;·&nbsp;  **{count} document(s)**" if count else "")
+        )
+        lines.append("")
+
+    idx = 1
+    while f"KnowledgeDoc{idx}" in entities:
+        attrs = _entity_attrs(entities[f"KnowledgeDoc{idx}"], _AGENT_TRUNC)
+        score = attrs.get("relevance_score", "")
+        text = attrs.get("text", "")
+        score_str = f" *(score: {score})*" if score else ""
+        lines.append(f"### Document {idx}{score_str}\n")
+        if text:
+            lines.append(f"{text}\n")
+        extras = {k: v for k, v in attrs.items() if k not in ("text", "relevance_score")}
+        if extras:
+            for k, v in extras.items():
+                lines.append(f"- **{k}:** {v}")
+            lines.append("")
+        idx += 1
+
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # 3. Code generation  (saved_to + filename)
 # ---------------------------------------------------------------------------
@@ -395,6 +454,30 @@ def _codegen_agent(flat: dict, entities: dict) -> str:
                 lines.append(f"  filename : {filename}")
             if saved_to:
                 lines.append(f"  saved to : {saved_to}")
+            break
+
+    return "\n".join(lines)
+
+
+def _codegen_agent_md(flat: dict, entities: dict) -> str:
+    lines: list[str] = []
+    lines.append("## Generated Code\n")
+
+    for ename, edata in entities.items():
+        if ename.startswith("RoutingTrace"):
+            continue
+        attrs = _entity_attrs(edata, _AGENT_TRUNC)
+        if "saved_to" in attrs or "filename" in attrs:
+            lang = attrs.get("language", "")
+            filename = attrs.get("filename", "")
+            saved_to = attrs.get("saved_to", "")
+            if lang:
+                lines.append(f"**Language:** {lang}  ")
+            if filename:
+                lines.append(f"**Filename:** `{filename}`  ")
+            if saved_to:
+                lines.append(f"**Saved to:** `{saved_to}`")
+            lines.append("")
             break
 
     return "\n".join(lines)
@@ -459,6 +542,35 @@ def _code_run_agent(flat: dict, entities: dict) -> str:
     return "\n".join(lines)
 
 
+def _code_run_agent_md(flat: dict, entities: dict) -> str:
+    lines: list[str] = []
+    stdout = str(flat.get("stdout", "")).rstrip()
+    stderr = str(flat.get("stderr", "")).rstrip()
+    returncode = flat.get("returncode", 0)
+    timed_out = flat.get("timed_out", False)
+
+    lines.append("## Execution Output\n")
+    rc_badge = "✅" if str(returncode) == "0" else "❌"
+    lines.append(
+        f"**Exit code:** {rc_badge} `{returncode}`" + ("  *(timed out)*" if timed_out else "")
+    )
+    lines.append("")
+
+    if stdout:
+        lines.append("**Output:**\n")
+        lines.append("```")
+        lines.append(_trunc(stdout, _AGENT_TRUNC * 4))
+        lines.append("```\n")
+
+    if stderr:
+        lines.append("**Errors:**\n")
+        lines.append("```")
+        lines.append(_trunc(stderr, _AGENT_TRUNC * 2))
+        lines.append("```\n")
+
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # 5. File save  (file_path + bytes_written)
 # ---------------------------------------------------------------------------
@@ -486,6 +598,19 @@ def _file_save_agent(flat: dict, entities: dict) -> str:
         lines.append(f"  path  : {file_path}")
     if bytes_written != "":
         lines.append(f"  size  : {bytes_written} bytes")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _file_save_agent_md(flat: dict, entities: dict) -> str:
+    lines: list[str] = []
+    file_path = flat.get("file_path", "")
+    bytes_written = flat.get("bytes_written", "")
+    lines.append("## File Written\n")
+    if file_path:
+        lines.append(f"**Path:** `{file_path}`  ")
+    if bytes_written != "":
+        lines.append(f"**Size:** {bytes_written} bytes")
     lines.append("")
     return "\n".join(lines)
 
@@ -540,6 +665,45 @@ def _file_read_agent(flat: dict, entities: dict) -> str:
         if content.count("\n") > 10:
             lines.append("  …")
     lines.append("")
+    return "\n".join(lines)
+
+
+def _file_read_agent_md(flat: dict, entities: dict) -> str:
+    lines: list[str] = []
+    path = flat.get("path", "")
+    fmt = flat.get("format", "")
+    char_count = flat.get("char_count", "")
+    content = str(flat.get("content", ""))
+
+    lines.append("## File Content\n")
+    if path:
+        lines.append(f"**Path:** `{path}`  ")
+    if fmt:
+        lines.append(f"**Format:** {fmt}  ")
+    if char_count:
+        lines.append(f"**Characters:** {char_count}")
+    lines.append("")
+
+    if content:
+        lines.append("**Preview:**\n")
+        # Use a fenced block; pick a language hint from the format when possible
+        lang_hint = {
+            "python": "python",
+            "json": "json",
+            "csv": "csv",
+            "html": "html",
+            "text": "",
+            "pdf": "",
+            "docx": "",
+        }.get(str(fmt), "")
+        lines.append(f"```{lang_hint}")
+        preview = _trunc(content, _AGENT_TRUNC * 2)
+        for ln in preview.splitlines()[:20]:
+            lines.append(ln)
+        if content.count("\n") > 20:
+            lines.append("…")
+        lines.append("```\n")
+
     return "\n".join(lines)
 
 
@@ -611,6 +775,37 @@ def _database_agent(flat: dict, entities: dict) -> str:
     return "\n".join(lines)
 
 
+def _database_agent_md(flat: dict, entities: dict) -> str:
+    lines: list[str] = []
+    query = str(flat.get("query", ""))
+    columns = flat.get("columns", [])
+    rows = flat.get("rows", [])
+    rowcount = flat.get("rowcount", len(rows) if isinstance(rows, list) else 0)
+
+    lines.append("## Database Result\n")
+    if query:
+        lines.append(f"**Query:**\n\n```sql\n{_trunc(query, _AGENT_TRUNC)}\n```\n")
+    lines.append(f"**Rows returned:** {rowcount}\n")
+
+    if isinstance(columns, list) and columns and isinstance(rows, list) and rows:
+        # Render as a Markdown table (first 10 rows)
+        header = " | ".join(str(c) for c in columns)
+        separator = " | ".join("---" for _ in columns)
+        lines.append(f"| {header} |")
+        lines.append(f"| {separator} |")
+        for row in rows[:10]:
+            if isinstance(row, dict):
+                cells = " | ".join(_trunc(str(row.get(c, "")), 40) for c in columns)
+            else:
+                cells = _trunc(str(row), _AGENT_TRUNC)
+            lines.append(f"| {cells} |")
+        if rowcount > 10:
+            lines.append(f"\n*… {rowcount - 10} more row(s) not shown.*")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # 8. API call  (APICallResult → status_code, body, elapsed_ms, success)
 # ---------------------------------------------------------------------------
@@ -649,6 +844,33 @@ def _api_call_agent(flat: dict, entities: dict) -> str:
         lines.append("")
         lines.append(f"  body    : {_trunc(body, _AGENT_TRUNC)}")
     lines.append("")
+    return "\n".join(lines)
+
+
+def _api_call_agent_md(flat: dict, entities: dict) -> str:
+    lines: list[str] = []
+    status_code = flat.get("APICallResult.status_code", flat.get("status_code", ""))
+    elapsed_ms = flat.get("APICallResult.elapsed_ms", flat.get("elapsed_ms", ""))
+    body = str(flat.get("APICallResult.body", flat.get("body", "")))
+    success = flat.get("APICallResult.success", flat.get("success", True))
+
+    lines.append("## API Response\n")
+    ok_badge = "✅" if str(success).lower() not in ("false", "0") else "❌"
+    lines.append(
+        f"**Status:** {ok_badge} `{status_code}`"
+        + (f"  &nbsp;·&nbsp;  {elapsed_ms} ms" if elapsed_ms else "")
+    )
+    lines.append("")
+
+    if body:
+        # Try to detect JSON for syntax highlighting
+        body_stripped = body.strip()
+        lang = "json" if body_stripped.startswith(("{", "[")) else ""
+        lines.append("**Body:**\n")
+        lines.append(f"```{lang}")
+        lines.append(_trunc(body, _AGENT_TRUNC * 3))
+        lines.append("```\n")
+
     return "\n".join(lines)
 
 
@@ -713,6 +935,31 @@ def _validator_agent(flat: dict, entities: dict) -> str:
     return "\n".join(lines)
 
 
+def _validator_agent_md(flat: dict, entities: dict) -> str:
+    lines: list[str] = []
+    is_valid = flat.get("is_valid", True)
+    issue_count = int(flat.get("issue_count", 0))
+    issues = flat.get("issues", [])
+
+    badge = "✅ **Valid**" if str(is_valid).lower() not in ("false", "0") else "❌ **Invalid**"
+    lines.append("## Validation Result\n")
+    lines.append(badge + (f"  &nbsp;·&nbsp;  {issue_count} issue(s)" if issue_count else ""))
+    lines.append("")
+
+    if isinstance(issues, list) and issues:
+        lines.append("| Severity | Message | Line |")
+        lines.append("| --- | --- | --- |")
+        for iss in issues[:20]:
+            if isinstance(iss, dict):
+                sev = iss.get("severity", "info").upper()
+                msg = iss.get("message", "").replace("|", "\\|")
+                ln = iss.get("line", 0)
+                lines.append(f"| {sev} | {msg} | {ln if ln else '—'} |")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # 10. MCP result  (MCPResult → server, tool, result, success)
 # ---------------------------------------------------------------------------
@@ -753,6 +1000,31 @@ def _mcp_agent(flat: dict, entities: dict) -> str:
         lines.append("")
         lines.append(f"Result:\n  {_trunc(result, _AGENT_TRUNC)}")
     lines.append("")
+    return "\n".join(lines)
+
+
+def _mcp_agent_md(flat: dict, entities: dict) -> str:
+    lines: list[str] = []
+    server = flat.get("MCPResult.server", flat.get("server", ""))
+    tool = flat.get("MCPResult.tool", flat.get("tool", ""))
+    result = str(flat.get("MCPResult.result", flat.get("result", "")))
+    success = flat.get("MCPResult.success", flat.get("success", True))
+
+    badge = "✅" if str(success).lower() not in ("false", "0") else "❌"
+    lines.append("## MCP Result\n")
+    lines.append(f"**Server:** `{server}`  ")
+    if tool:
+        lines.append(f"**Tool:** `{tool}`  ")
+    lines.append(f"**Status:** {badge}\n")
+
+    if result:
+        result_stripped = result.strip()
+        lang = "json" if result_stripped.startswith(("{", "[")) else ""
+        lines.append("**Result:**\n")
+        lines.append(f"```{lang}")
+        lines.append(_trunc(result, _AGENT_TRUNC * 3))
+        lines.append("```\n")
+
     return "\n".join(lines)
 
 
@@ -798,6 +1070,27 @@ def _generic_agent(flat: dict, entities: dict) -> str:
     return "\n".join(lines)
 
 
+def _generic_agent_md(flat: dict, entities: dict) -> str:
+    lines: list[str] = []
+    lines.append("## Result\n")
+
+    for ename, edata in entities.items():
+        if ename.startswith("RoutingTrace"):
+            continue
+        attrs = _entity_attrs(edata, _AGENT_TRUNC)
+        if not attrs:
+            continue
+        lines.append(f"### {ename}\n")
+        lines.append("| Attribute | Value |")
+        lines.append("| --- | --- |")
+        for k, v in attrs.items():
+            v_escaped = str(v).replace("|", "\\|")
+            lines.append(f"| `{k}` | {v_escaped} |")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 # ===========================================================================
 # Layout registry
 # ===========================================================================
@@ -810,66 +1103,77 @@ _LAYOUTS: list[_Layout] = [
         ),
         cli_renderer=_web_search_cli,
         agent_renderer=_web_search_agent,
+        agent_md_renderer=_web_search_agent_md,
     ),
     _Layout(
         name="rag",
         match=lambda flat: "RAGResults.query" in flat or "RAGResults.result_count" in flat,
         cli_renderer=_rag_cli,
         agent_renderer=_rag_agent,
+        agent_md_renderer=_rag_agent_md,
     ),
     _Layout(
         name="codegen",
         match=lambda flat: "saved_to" in flat and "filename" in flat,
         cli_renderer=_codegen_cli,
         agent_renderer=_codegen_agent,
+        agent_md_renderer=_codegen_agent_md,
     ),
     _Layout(
         name="code_run",
         match=lambda flat: "stdout" in flat or "returncode" in flat,
         cli_renderer=_code_run_cli,
         agent_renderer=_code_run_agent,
+        agent_md_renderer=_code_run_agent_md,
     ),
     _Layout(
         name="file_save",
         match=lambda flat: "file_path" in flat and "bytes_written" in flat,
         cli_renderer=_file_save_cli,
         agent_renderer=_file_save_agent,
+        agent_md_renderer=_file_save_agent_md,
     ),
     _Layout(
         name="file_read",
         match=lambda flat: "path" in flat and "format" in flat and "char_count" in flat,
         cli_renderer=_file_read_cli,
         agent_renderer=_file_read_agent,
+        agent_md_renderer=_file_read_agent_md,
     ),
     _Layout(
         name="database",
         match=lambda flat: "columns" in flat and "rowcount" in flat,
         cli_renderer=_database_cli,
         agent_renderer=_database_agent,
+        agent_md_renderer=_database_agent_md,
     ),
     _Layout(
         name="api_call",
         match=lambda flat: "APICallResult.status_code" in flat or "status_code" in flat,
         cli_renderer=_api_call_cli,
         agent_renderer=_api_call_agent,
+        agent_md_renderer=_api_call_agent_md,
     ),
     _Layout(
         name="validator",
         match=lambda flat: "is_valid" in flat and "issue_count" in flat,
         cli_renderer=_validator_cli,
         agent_renderer=_validator_agent,
+        agent_md_renderer=_validator_agent_md,
     ),
     _Layout(
         name="mcp",
         match=lambda flat: "MCPResult.server" in flat or "MCPResult.result" in flat,
         cli_renderer=_mcp_cli,
         agent_renderer=_mcp_agent,
+        agent_md_renderer=_mcp_agent_md,
     ),
     _Layout(
         name="generic",
         match=lambda flat: True,  # always matches – must be last
         cli_renderer=_generic_cli,
         agent_renderer=_generic_agent,
+        agent_md_renderer=_generic_agent_md,
     ),
 ]
 
@@ -919,6 +1223,31 @@ def _render_routing_agent(entities: dict) -> str:
     return "\n".join(lines)
 
 
+def _render_routing_agent_md(entities: dict) -> str:
+    traces = {k: v for k, v in entities.items() if k.startswith("RoutingTrace")}
+    if not traces:
+        return ""
+    lines: list[str] = [
+        "## Routing\n",
+        "| Goal pattern | Tool | Confidence |",
+        "| --- | --- | --- |",
+    ]
+    for tdata in traces.values():
+        a = tdata.get("attributes", tdata)
+        conf_raw = a.get("composite", "?")
+        try:
+            conf_str = f"{float(conf_raw):.3f}"
+        except (TypeError, ValueError):
+            conf_str = str(conf_raw)
+        uncertain = " ⚠" if a.get("is_uncertain") == "True" else ""
+        lines.append(
+            f"| {a.get('goal_pattern', '?')} "
+            f"| `{a.get('tool_selected', '?')}` "
+            f"| {conf_str}{uncertain} |"
+        )
+    return "\n".join(lines)
+
+
 # ===========================================================================
 # Public API
 # ===========================================================================
@@ -927,7 +1256,7 @@ def _render_routing_agent(entities: dict) -> str:
 def render_result(
     snapshot: dict,
     *,
-    mode: str,  # "cli" or "agent"
+    mode: str,  # "cli", "agent", or "agent_md"
     command: str = "",
     success: bool = True,
     plan_ms: int = 0,
@@ -939,15 +1268,18 @@ def render_result(
     Parameters
     ----------
     snapshot  : RunResult.snapshot dict
-    mode      : "cli"   – ANSI-coloured terminal output
-                "agent" – plain text for log file
-    command   : original user prompt (shown in agent header)
+    mode      : "cli"      – ANSI-coloured terminal output
+                "agent"    – plain text for the agent log file
+                "agent_md" – GitHub-Flavoured Markdown for the agent log file
+    command   : original user prompt (shown in agent/markdown header)
     success   : overall run success flag
     plan_ms   : planning time in milliseconds
     exec_ms   : execution time in milliseconds
 
     Returns the fully formatted string, ready to print / write.
     """
+    import datetime
+
     entities = _extract_entities(snapshot)
     flat = _flatten_snapshot(snapshot)
 
@@ -958,16 +1290,34 @@ def render_result(
             layout = candidate
             break
 
-    # Render result section
-    if mode == "agent":
-        import datetime
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    status_str = "SUCCESS" if success else "FAILED"
+    timing_str = f"plan {plan_ms}ms  exec {exec_ms}ms" if plan_ms or exec_ms else ""
 
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-        status_str = "SUCCESS" if success else "FAILED"
+    # ── Markdown mode ─────────────────────────────────────────────────────
+    if mode == "agent_md":
+        status_badge = "✅" if success else "❌"
+        header_parts = [
+            f"# {command}\n",
+            f"**{status_badge} {status_str}**"
+            + (f"  &nbsp;·&nbsp;  {timing_str}" if timing_str else "")
+            + f"  &nbsp;·&nbsp;  {now}\n",
+            "---\n",
+        ]
+        header = "\n".join(header_parts)
+        result_body = layout.agent_md_renderer(flat, entities)
+        routing = _render_routing_agent_md(entities)
+        parts = [header, result_body]
+        if routing:
+            parts.append("\n" + routing + "\n")
+        return "\n".join(parts)
+
+    # ── Plain-text agent mode ──────────────────────────────────────────────
+    if mode == "agent":
         header = (
             f"Command : {command}\n"
             f"Time    : {now}  |  {status_str}"
-            + (f"  |  plan {plan_ms}ms  exec {exec_ms}ms" if plan_ms or exec_ms else "")
+            + (f"  |  {timing_str}" if timing_str else "")
             + "\n"
             + ("-" * 60)
             + "\n"
@@ -979,10 +1329,10 @@ def render_result(
             parts.append("\n" + routing + "\n")
         return "".join(parts)
 
-    else:  # "cli"
-        result_body = layout.cli_renderer(flat, entities)
-        routing = _render_routing_cli(entities)
-        parts = [result_body]
-        if routing:
-            parts.append(routing + "\n")
-        return "".join(parts)
+    # ── CLI mode ───────────────────────────────────────────────────────────
+    result_body = layout.cli_renderer(flat, entities)
+    routing = _render_routing_cli(entities)
+    parts = [result_body]
+    if routing:
+        parts.append(routing + "\n")
+    return "".join(parts)
