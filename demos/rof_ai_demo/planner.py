@@ -6,19 +6,38 @@ Stage 1 of the two-stage pipeline.
 Converts a natural-language user prompt into a validated RelateLang (.rl)
 workflow AST by calling the LLM with a structured system prompt.
 
+Architecture
+------------
+The system prompt has three clean, separate layers:
+
+  1. ``_PLANNER_SYSTEM_BASE``   — RelateLang syntax only.  Never changes.
+  2. Tool catalogue             — auto-built from ``ToolSchema`` objects at
+                                  session start.  Every tool (builtin and MCP)
+                                  self-describes via ``tool_schema()`` /
+                                  ``inputSchema``.  Zero hand-written prose about
+                                  specific tools lives here.
+  3. Knowledge hint             — injected only when ``--knowledge-dir`` is
+                                  active; points the planner at RAGTool and
+                                  gives KB-specific rules.  Domain knowledge
+                                  (game rules, GitLab conventions, …) lives in
+                                  Markdown files in the knowledge directory and
+                                  is retrieved at runtime by RAGTool — it is
+                                  NOT embedded in this prompt.
+
 Exports
 -------
-  _PLANNER_SYSTEM_BASE      – base system prompt string
-  _build_planner_system()   – assembles the full system prompt
-  _make_knowledge_hint()    – builds the optional RAG knowledge-base block
+  _PLANNER_SYSTEM_BASE      – base syntax prompt (for tests / inspection)
+  build_tool_catalogue()    – converts a list of ToolSchema → prompt block
+  build_mcp_tool_schemas()  – converts discovered MCP Tool objects → ToolSchema list
   Planner                   – wraps an LLMProvider to produce (rl_src, ast)
 """
 
 from __future__ import annotations
 
 import re
+import textwrap
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from console import warn
 from imports import (
@@ -29,18 +48,22 @@ from imports import (
     RLParser,
 )
 
+if TYPE_CHECKING:
+    pass
+
 # ===========================================================================
-# Base planner system prompt
+# Layer 1 — RelateLang syntax base  (no tool names, no domain knowledge)
 # ===========================================================================
 
 _PLANNER_SYSTEM_BASE = """\
 You are a RelateLang Workflow Planner.
 
 Your ONLY job is to convert a natural language request into a valid RelateLang
-(.rl) workflow specification. Output ONLY the .rl content – no markdown fences,
-no explanation, no prose before or after.
+(.rl) workflow specification.  Output ONLY the .rl content — no markdown
+fences, no explanation, no prose before or after.
 
 ## RelateLang Syntax
+
   define <Entity> as "<description>".
   <Entity> has <attribute> of <value>.
   <Entity> is <predicate>.
@@ -48,573 +71,274 @@ no explanation, no prose before or after.
   if <condition>, then ensure <action>.
   ensure <goal expression>.
 
-## Available Tools and their trigger keywords
-Use these EXACT phrases in ensure statements to activate tools:
+## General planning rules
 
-  AICodeGenTool    – "generate python code"  /  "generate python script"
-                     "generate lua code"      /  "generate javascript code"
-                     "generate code"          /  "write code"  /  "create code"
-                     "implement code"         /  "generate <lang> code"
-                     (NOTE: AICodeGenTool ONLY generates and saves the source file —
-                      it does NOT execute it. Pair it with CodeRunnerTool to run
-                      non-interactive scripts, or with LLMPlayerTool to run
-                      interactive programs such as games and questionnaires.)
-  CodeRunnerTool   – "run code"  /  "execute code"  /  "run python"
-                     "run lua"   /  "run javascript" /  "run script"
-                     (Use after AICodeGenTool for non-interactive scripts only.
-                      Do NOT use for interactive programs — use LLMPlayerTool instead.)
-  LLMPlayerTool    – "play game"  /  "play text adventure"  /  "play python game"
-                     "play adventure"  /  "play and record choices"  /  "let llm play"
-                     (Use after AICodeGenTool for interactive programs: games,
-                      questionnaires, menus. LLMPlayerTool executes the script and
-                      drives its stdin/stdout using the LLM as the player.)
-  WebSearchTool    – "retrieve web_information"  /  "search web"  /  "look up"
-  APICallTool      – "call api"  /  "http request"  /  "fetch url"
-  FileReaderTool   – "read file"  /  "parse file"  /  "extract text"
-  ValidatorTool    – "validate output"  /  "validate schema"
-  HumanInLoopTool  – "wait for human"  /  "human approval"
-  RAGTool          – "retrieve information"  /  "rag query"  /  "knowledge base"
-                     "retrieve knowledge"  /  "retrieve document"
-                     (NOTE: RAGTool trigger phrases all start with "retrieve" or
-                      contain "knowledge base". Do NOT use any of these words in
-                      synthesise/analysis goals — use "analyse context" or
-                      "write report" instead, otherwise the router mis-routes the
-                      synthesise step back to RAGTool a second time.)
-  DatabaseTool     – "query database"  /  "sql query"  /  "database lookup"
-                     "retrieve from database"  /  "execute sql"
-  FileSaveTool     – "save file"  /  "write file"  /  "save csv"  /  "write csv"
-                     "export csv"  /  "save results"  /  "export results"
-                     "save data"   /  "write data"    /  "save output"
-  LuaRunTool       – "run lua script"  /  "run lua interactively"
-  MCPClientTool    – trigger keywords are auto-discovered from the MCP server at
-                     connection time and injected into this prompt dynamically.
-                     Use them exactly as listed in the ## MCP Servers section below
-                     (when present). If no MCP section appears, no MCP servers are
-                     connected.
-
-## Planning rules
-1. Every request MUST have at least one `ensure` goal.
-2. Declare all key entities with `define`.
-3. Store parameters (language, count, topic, …) using `<entity> has <attr> of <val>.`
-4. For code tasks use:   ensure generate <language> code for <brief description>.
-5. For web tasks use:    ensure retrieve web_information about <topic>.
-6. Keep workflows concise: 2–6 statements plus 1–3 goals.
-7. AICodeGenTool ONLY generates and saves the source file — it never executes it.
-   Always follow it with an execution goal:
-   a. Non-interactive scripts (no user input): add a CodeRunnerTool goal.
-      ensure generate python code for <description>.
-      ensure run python code.
-      CRITICAL: CodeRunnerTool runs scripts headlessly — there is NO terminal and
-      NO human present. The generated script MUST NOT contain any call to:
-        input(), raw_input(), sys.stdin.read(), sys.stdin.readline(),
-        getpass.getpass(), io.read() (Lua), readline.createInterface() (JS),
-        or ANY other blocking stdin read.
-      All parameters (paths, URLs, counts, filenames) must be hard-coded or
-      derived from the context variables — NEVER prompted at runtime.
-      If you need user confirmation, skip it and proceed automatically.
-      Violation = CodeRunnerTool will detect the interactive call and FAIL
-      immediately instead of timing out.
-   b. Interactive programs (games, menus, questionnaires, anything that needs
-      a human to answer prompts): add a LLMPlayerTool goal INSTEAD.
-      ensure generate python code for <description>.
-      ensure play game with llm player and record choices.
-      Use this path ONLY when the task explicitly says "interactive",
-      "questionnaire", "game", "menu", "play", or "adventure".
-   c. When the user asks to SAVE or EXPORT derived data written by the script,
-      include the file-saving logic inside the generate goal description — the
-      script itself will write the file when CodeRunnerTool executes it.
-   d. Do NOT use FileSaveTool for derived/computed data — it can only write a
-      content string that already exists verbatim as a snapshot attribute.
-      Exception: when the user asks to save the result of an analysis or
-      synthesis to a file, use FileSaveTool — but you MUST instruct the LLM
-      analysis goal to write its answer into a `content` attribute on the
-      output entity (see rule 12a).
-   e. The `ensure generate python code for …` goal text MUST describe the task
-      in plain terms — NEVER include the words "web search", "retrieve",
-      "search results", or any other WebSearchTool trigger phrase inside a
-      generate goal, or the router will mis-route it to WebSearchTool instead
-      of AICodeGenTool.  Refer to the data by its entity name (e.g. "ai_news",
-      "search_data") or a neutral description ("the collected data", "the results").
-8. All statements MUST end with a full stop (.).
-9. String values MUST be quoted with double quotes.
-10. NEVER pair a LLMPlayerTool goal with a CodeRunnerTool goal for the same script.
-    LLMPlayerTool executes the script itself — CodeRunnerTool would run it a second
-    time. Choose one execution tool per generated script, never both.
-
-14. Choosing between CodeRunnerTool and LLMPlayerTool:
-    - Use CodeRunnerTool  when: the task is fully automatic (download files,
-      process data, generate a CSV, run calculations, call an API, …).
-      The script MUST be non-interactive (no input() calls).
-    - Use LLMPlayerTool   when: the task explicitly asks for interactivity
-      (a game, a questionnaire, a menu, or anything requiring human responses).
-      The script MAY use input() freely because LLMPlayerTool drives stdin.
-    - When in doubt: default to CodeRunnerTool + non-interactive script.
-      Only switch to LLMPlayerTool when the word "interactive", "game",
-      "questionnaire", "play", "menu", or "adventure" appears in the request.
-
-11. LLM-only analysis/synthesis goals (no tool trigger):
-    Use goal phrases that contain NONE of these words: retrieve, search, knowledge,
-    query, database, generate, run, execute, play, save, write, export, read, fetch.
-    Safe phrases: "analyse context and write report", "compose report from context",
-    "write analysis based on context", "summarise findings".
-    These phrases reach the LLM directly — no tool is invoked.
-
-12. When ANY data-fetching goal (RAGTool, MCPClientTool, WebSearchTool, …) is
-    followed by an LLM analysis goal:
-    a. The LLM goal phrase must not contain any tool trigger word (see rule 11).
-    b. ALWAYS define an output entity with a `file_path` attribute BEFORE the
-       analysis goal when the result must be saved, so FileSaveTool can find it:
-         define Report as "...".
-         Report has file_path of "output.md".
-       The LLM analysis step MUST write the full answer as:
-         Report has content of "<full analysis text>".
-       FileSaveTool reads `content` from `Report` and `file_path` from `Report`.
-    c. NEVER use "synthesise the retrieved knowledge documents" as a goal phrase —
-       it contains "retrieved" which routes back to RAGTool.
-       WRONG:  ensure synthesise the retrieved knowledge documents and answer the question.
-       RIGHT:  ensure analyse context and write report.
-    d. When the fetched content contains hyperlinks or URLs (e.g. an issue
-       description linking to a spec PDF), the system will automatically fetch
-       those URLs and inject their text as UrlContent entities into the context
-       before the analysis step runs. You do NOT need to add extra goals for
-       this — just ensure the analysis goal is present.
-
-13. The LLM analysis step MUST always write its full answer as a RelateLang
-    attribute — NEVER as prose. Specifically:
-    a. If a Report/Result entity is in scope:
-         Report has content of "<complete analysis text — escape inner quotes with '>".
-    b. If no output entity exists yet, define one inline:
-         define AnalysisResult as "Analysis output".
-         AnalysisResult has content of "<complete analysis text>".
-    c. The executor (system preamble) enforces this — the LLM will be retried
-       until valid RelateLang with at least one attribute update is produced.
-
-## Examples
-
-### Request: "Calculate the first 10 Fibonacci numbers in Python"
-define Task as "Fibonacci sequence computation".
-Task has language of "python".
-Task has count of 10.
-ensure generate python code for computing the first 10 Fibonacci numbers.
-ensure run python code.
-
-### Request: "Search for the latest news about large language models"
-define Topic as "Large language model news".
-ensure retrieve web_information about latest large language model news.
-
-### Request: "Create a CLI questionnaire in Lua"
-define Task as "Interactive CLI questionnaire".
-Task has language of "lua".
-Task has type of "questionnaire".
-Task has questions of 3.
-ensure generate lua code for an interactive CLI questionnaire with 3 questions.
-ensure play interactively with llm player and record choices.
-
-### Request: "Write a Python script that generates a random maze"
-define Task as "Random maze generator".
-Task has language of "python".
-Task has width of 21.
-Task has height of 11.
-ensure generate python code for a random maze generator printed to stdout.
-ensure run python code.
-
-### Request: "Create a text adventure in Python, let the LLM play it, and save the choices"
-define Task as "Text Adventure Game".
-Task has language of "python".
-ensure generate python code for a small text adventure game.
-ensure play game with llm player and record choices.
-
-### Request: "Search for current AI news and save the results as a CSV file"
-define Task as "AI news collection and CSV export".
-Task has topic of "artificial intelligence news".
-Task has output_file of "ai_news.csv".
-ensure retrieve web_information about latest artificial intelligence news.
-ensure generate python code for reading the SearchResult entities from the graph snapshot and writing ai_news.csv with columns title, url, snippet.
-ensure run python code.
-
-### Request: "Search the web for PDF documents about X and save them to disk"
-define Task as "Download PDFs from web search results".
-Task has topic of "X".
-Task has output_dir of "downloads".
-ensure retrieve web_information about X PDF documents.
-ensure generate python code for iterating all SearchResult urls whose url ends with .pdf or whose title contains PDF, downloading each file with requests using a 60-second timeout and SSL verify=False, saving to the output_dir folder, printing progress and skipping errors — no input() calls.
-ensure run python code.
-
-### Request: "Search the web for TR-ESOR v1.3 PDFs and save them to disk"
-define Task as "Download TR-ESOR v1.3 PDFs".
-Task has topic of "TR-ESOR v1.3 PDF".
-Task has output_dir of "tr_esor_v1_3_pdfs".
-ensure retrieve web_information about TR-ESOR v1.3 PDF documents.
-ensure generate python code for iterating all SearchResult urls whose url ends with .pdf, downloading each file with requests using a 60-second timeout and SSL verify=False, saving each to the tr_esor_v1_3_pdfs folder with a sanitized filename, printing progress to stdout and skipping failures — no input() calls, no prompts.
-ensure run python code.
-
-### Request: "Find the top 5 stocks influenced by tech news and export them to stocks.csv"
-define Task as "Tech news stock impact analysis".
-Task has topic of "technology news stock market impact".
-Task has output_file of "stocks.csv".
-ensure retrieve web_information about technology news and stock market impact.
-ensure generate python code for reading the graph snapshot entities and writing stocks.csv with columns event, stock_ticker, impact, source.
-ensure run python code.
-
-### Request: "Search for latest Python news and save to a file"
-define Task as "Python news collection".
-Task has topic of "Python programming language".
-Task has output_file of "python_news.txt".
-ensure retrieve web_information about latest Python programming news.
-ensure generate python code for writing the collected titles and urls to python_news.txt.
-ensure run python code.
-
-### Request: "Look up recent climate change articles and export to climate.csv"
-define Task as "Climate news export".
-Task has topic of "climate change".
-Task has output_file of "climate.csv".
-ensure retrieve web_information about recent climate change articles.
-ensure generate python code for writing climate.csv with columns title, url, snippet from the collected data.
-ensure run python code.
-
+1.  Every request MUST have at least one `ensure` goal.
+2.  Declare all key entities with `define`.
+3.  Store parameters using `<Entity> has <attr> of <val>.`
+4.  All statements MUST end with a full stop (.).
+5.  String values MUST be quoted with double quotes.
+6.  Keep workflows concise: 2–6 define/has statements plus 1–4 goals.
+7.  The tool catalogue below lists every available tool.  Use ONLY the
+    trigger phrases shown there — do not invent new ones.
+8.  REQUIRED params listed for a tool MUST be set as entity attributes
+    BEFORE the ensure statement.  Missing required params cause tool failure.
+9.  For tools that select a numbered item from a list (e.g. select_card,
+    buy_pack, choose_artifact) default to index 1 when no specific index
+    is known yet.
+10. LLM-only analysis/synthesis goals use a phrase that contains NONE of the
+    tool trigger words.  Safe phrases:
+      ensure analyse context and write report.
+      ensure compose report from context.
+      ensure summarise findings.
+11. When saving LLM analysis output to a file:
+    a.  Define a Report entity with a file_path attribute BEFORE the analysis
+        goal.
+    b.  The LLM analysis step MUST write its full answer as:
+          Report has content of "<full text>".
+    c.  Follow with: ensure save file.
+    d.  FileSaveTool reads `content` from Report and `file_path` from Report.
+12. Do NOT use trigger words from one tool inside the ensure phrase of
+    another tool — the router will mis-route the goal.
 """
 
 
 # ===========================================================================
-# Prompt assembly helpers
+# Layer 2 — Tool catalogue  (schema-driven, no hand-written prose)
+# ===========================================================================
+
+
+def build_mcp_tool_schemas(discovered_tools: list) -> list:
+    """
+    Convert a list of raw MCP Tool objects (from ``tools/list``) into a list
+    of ``ToolSchema`` instances so they can be fed to ``build_tool_catalogue``
+    alongside builtin tool schemas.
+
+    Each MCP Tool object is expected to have:
+      .name          – str
+      .description   – str
+      .inputSchema   – dict  (JSON Schema with 'properties' and 'required')
+
+    Returns an empty list when *discovered_tools* is empty.
+    """
+    try:
+        from rof_framework.core.interfaces.tool_provider import ToolParam, ToolSchema
+    except ImportError:
+        return []
+
+    schemas: list = []
+    for tool_def in discovered_tools:
+        t_name: str = getattr(tool_def, "name", "") or ""
+        if not t_name:
+            continue
+
+        t_desc: str = (getattr(tool_def, "description", "") or "").strip()
+        phrase = t_name.replace("_", " ").replace("-", " ").lower()
+
+        schema_raw: dict = getattr(tool_def, "inputSchema", None) or {}
+        props: dict = schema_raw.get("properties", {})
+        required_names: list = schema_raw.get("required", [])
+
+        params: list = []
+        for param_name, param_def in props.items():
+            params.append(
+                ToolParam(
+                    name=param_name,
+                    type=param_def.get("type", "string"),
+                    description=param_def.get("description", param_def.get("title", "")),
+                    required=param_name in required_names,
+                    default=param_def.get("default", None),
+                )
+            )
+
+        schemas.append(
+            ToolSchema(
+                name=t_name,
+                description=t_desc,
+                triggers=[phrase],
+                params=params,
+            )
+        )
+
+    return schemas
+
+
+def build_tool_catalogue(schemas: list, server_name: str = "") -> str:
+    """
+    Render a structured tool-catalogue block from a list of ``ToolSchema``
+    objects.
+
+    The output is injected as Layer 2 of the planner system prompt.
+    Format (YAML-inspired, readable by the LLM without special parsing):
+
+      ### ToolName
+        Description: …
+        Trigger:     "canonical phrase"
+        Also:        "alt phrase 1"  /  "alt phrase 2"
+        Params:
+          - card_number  integer  REQUIRED  — 1-based index from get_hand()
+          - top_k        integer  optional  default=3
+        Notes:
+          • …
+
+    Parameters
+    ----------
+    schemas:
+        List of ``ToolSchema`` objects (builtin or MCP-derived).
+    server_name:
+        When non-empty, prepended as a section header
+        (e.g. ``"## MCP Server: game"``).
+    """
+    if not schemas:
+        return ""
+
+    lines: list[str] = []
+
+    if server_name:
+        lines.append(f"\n## MCP Server: {server_name}\n")
+    else:
+        lines.append("\n## Available tools\n")
+
+    for schema in schemas:
+        lines.append(f"### {schema.name}")
+
+        # Description — wrap at 80 chars with hanging indent
+        if schema.description:
+            wrapped = textwrap.fill(
+                schema.description,
+                width=78,
+                initial_indent="  Description: ",
+                subsequent_indent="               ",
+            )
+            lines.append(wrapped)
+
+        # Trigger phrases
+        if schema.triggers:
+            lines.append(f'  Trigger:     "{schema.triggers[0]}"')
+            alts = schema.triggers[1:6]  # show up to 5 alternates
+            if alts:
+                alt_str = "  /  ".join(f'"{a}"' for a in alts)
+                lines.append(f"  Also:        {alt_str}")
+
+        # Parameters
+        if schema.params:
+            lines.append("  Params:")
+            for p in schema.params:
+                req_label = "REQUIRED" if p.required else "optional"
+                default_note = (
+                    f"  default={p.default!r}" if (not p.required and p.default is not None) else ""
+                )
+                desc_note = f"  — {p.description}" if p.description else ""
+                lines.append(
+                    f"    - {p.name:<22} {p.type:<10} {req_label}{default_note}{desc_note}"
+                )
+
+        # Notes
+        if schema.notes:
+            lines.append("  Notes:")
+            for note in schema.notes:
+                wrapped_note = textwrap.fill(
+                    note,
+                    width=76,
+                    initial_indent="    • ",
+                    subsequent_indent="      ",
+                )
+                lines.append(wrapped_note)
+
+        lines.append("")  # blank line between tools
+
+    return "\n".join(lines)
+
+
+def _build_planner_system(
+    tool_catalogue: str = "",
+    knowledge_hint: str = "",
+    generated_tools_hint: str = "",
+) -> str:
+    """
+    Assemble the full planner system prompt from its three layers.
+
+    Parameters
+    ----------
+    tool_catalogue:
+        Layer 2 — produced by ``build_tool_catalogue``; empty → omitted.
+    knowledge_hint:
+        Layer 3 — produced by ``_make_knowledge_hint``; empty → omitted.
+    generated_tools_hint:
+        Appendix for dynamically registered generated tools; empty → omitted.
+    """
+    parts = [_PLANNER_SYSTEM_BASE]
+    if tool_catalogue:
+        parts.append(tool_catalogue)
+    if knowledge_hint:
+        parts.append(knowledge_hint)
+    if generated_tools_hint:
+        parts.append(generated_tools_hint)
+    return "\n".join(parts)
+
+
+# ===========================================================================
+# Layer 3 — Knowledge-base hint  (pointer only — content lives in .md files)
 # ===========================================================================
 
 
 def _make_knowledge_hint(knowledge_dir: Optional[Path], doc_count: int = 0) -> str:
     """
-    Build the knowledge-base section appended to ``_PLANNER_SYSTEM_BASE``
-    when ``--knowledge-dir`` is active or ``--rag-backend chromadb`` has
-    documents already stored on disk.
+    Build the knowledge-base section appended to the planner system prompt
+    when ``--knowledge-dir`` is active or a chromadb corpus is pre-loaded.
 
-    Instructs the planner to:
-      1. Prefer RAGTool over WebSearchTool for questions answerable from
-         the loaded corpus.
-      2. Always follow a RAGTool goal with a synthesis LLM goal so the
-         retrieved ``KnowledgeDoc`` entities are actually consumed.
-      3. Use RAGTool to resolve project names → IDs before calling MCP tools
-         when an MCP server is also connected.
+    This block instructs the planner on *how* to use RAGTool.
+    The actual domain knowledge (game rules, GitLab conventions, …) lives in
+    Markdown files in the knowledge directory and is retrieved at query time
+    by RAGTool — it is NOT embedded here.
     """
     dir_label = str(knowledge_dir) if knowledge_dir else "pre-loaded corpus"
     count_note = f" ({doc_count} document(s) indexed)" if doc_count else ""
     return f"""\
+
 ## Knowledge base (active)
+
 A local knowledge base is pre-loaded from: {dir_label}{count_note}
-RAGTool has access to this corpus. Follow these additional rules:
+RAGTool has access to this corpus.
 
-KB-1. When the user asks a question that could be answered from internal
-    knowledge, ALWAYS prefer RAGTool over WebSearchTool.
-    Use:   ensure retrieve information about <topic> from the knowledge base.
-    NOT:   ensure retrieve web_information about <topic>.
+KB-1. Prefer RAGTool over WebSearchTool for questions answerable from the
+      knowledge base.
+      Use:  ensure retrieve information about <topic> from the knowledge base.
+      NOT:  ensure retrieve web_information about <topic>.
 
-KB-2. After EVERY RAGTool goal you MUST add a second LLM analysis goal.
-    This goal has NO tool trigger — the orchestrator calls the LLM directly
-    with the KnowledgeDoc entities injected as context.
-    CRITICAL: The goal phrase must NOT contain "retrieve", "knowledge",
-    "search", "query", "database", "generate", "run", "save", "write",
-    "read", or "fetch" — any of these words would mis-route the step to a
-    tool instead of the LLM.
-    Safe phrases to use EXACTLY:
-      ensure analyse context and write report.
-      ensure compose report from context.
-      ensure summarise findings.
-      ensure write analysis based on context.
+KB-2. After EVERY RAGTool goal add an LLM analysis goal.  The phrase must
+      contain NONE of: retrieve, search, knowledge, query, database, generate,
+      run, save, write, read, fetch.
+      Safe phrases:
+        ensure analyse context and write report.
+        ensure compose report from context.
+        ensure summarise findings.
 
-KB-3. When the result must be saved to a file, ALSO define a Report entity
-    with a file_path attribute BEFORE the analysis goal, then add
-    "ensure save file." as the final goal.  The LLM analysis step will
-    write the full answer as `Report has content of "..."` into the graph,
-    and FileSaveTool reads that `content` attribute.
+KB-3. To save results to a file: define a Report entity with file_path BEFORE
+      the analysis goal, then add "ensure save file." as the final goal.
 
-KB-4. When an MCP server is also connected AND the user refers to a project,
-    team, or domain by name rather than by numeric ID, add a RAGTool lookup
-    goal FIRST to resolve the name to a project_id, then call the MCP tool.
-    WRONG:  ensure read issue.   (with project_id unknown)
-    RIGHT:
-      ensure retrieve information about <project name> from the knowledge base.
-      ensure analyse context and write report.
-      ensure read issue.
+KB-4. When an MCP server is connected and the user refers to a project by name
+      rather than numeric ID, add a RAGTool lookup first to resolve the name,
+      then call the MCP tool.
 
-KB-5. When the user asks about label meaning, workflow conventions, or domain
-    terminology (e.g. "what does gDoing mean?", "what is ILM?", "TR-ESOR?"),
-    use RAGTool — do NOT guess or use WebSearchTool.
+KB-5. For label/terminology questions use RAGTool — do NOT guess or use web
+      search.
 
-### Example: "How does authentication work?"
-define Query as "Authentication question".
-Query has topic of "authentication".
-ensure retrieve information about authentication from the knowledge base.
+### Example: answer a domain question
+define Query as "Domain question".
+Query has topic of "authentication flow".
+ensure retrieve information about authentication flow from the knowledge base.
 ensure analyse context and write report.
 
-### Example: "Summarise our error handling guidelines and save to file"
+### Example: answer and save to file
 define Query as "Error handling summary".
 Query has topic of "error handling".
-define Report as "Error handling summary report".
-Report has file_path of "error_handling.txt".
-ensure retrieve information about error handling guidelines from the knowledge base.
+define Report as "Error handling report".
+Report has file_path of "error_handling.md".
+ensure retrieve information about error handling from the knowledge base.
 ensure analyse context and write report.
 ensure save file.
-
-### Example: "Read my open issues in the KGS content service project" (MCP + RAG)
-define Query as "Project ID lookup".
-Query has topic of "KGS content service project ID".
-define Task as "Read open issues".
-Task has state of "opened".
-ensure retrieve information about KGS content service project from the knowledge base.
-ensure analyse context and write report.
-ensure list my issues.
-
-### Example: "What does gDoing mean?" (knowledge base lookup)
-define Query as "Label definition lookup".
-Query has topic of "gDoing label meaning".
-ensure retrieve information about gDoing label from the knowledge base.
-ensure analyse context and write report.
-
-### Example: "Analyse project 123, how is it related to TR-ESOR? Write a report and save to file."
-define Query as "DSEngine TR-ESOR analysis".
-Query has topic of "DSEngine project 123 TR-ESOR relationship".
-define Report as "DSEngine TR-ESOR analysis report".
-Report has file_path of "dsengine_tr_esor_report.txt".
-ensure retrieve information about DSEngine project 123 TR-ESOR from the knowledge base.
-ensure analyse context and write report.
-ensure save file.
-
-### Example: "Read issue 10 in the storage backend and explain it using domain knowledge"
-define Task as "Read and explain GitLab issue".
-Task has project_id of "311".
-Task has issue_iid of 10.
-ensure read issue.
-ensure retrieve information about storage backend SecDocs domain from the knowledge base.
-ensure analyse context and write report.
 """
-
-
-def _make_mcp_hint(mcp_tools: list) -> str:
-    """
-    Build the MCP servers section appended to ``_PLANNER_SYSTEM_BASE``
-    when one or more MCPClientTool instances are registered.
-
-    Parameters
-    ----------
-    mcp_tools:
-        List of ``(server_name, description, keywords, discovered_tools)``
-        tuples, one per registered MCPClientTool.  ``discovered_tools`` is
-        the list of raw MCP Tool objects from ``tools/list`` (may be empty
-        when eager_connect was not used).
-
-    Returns an empty string when *mcp_tools* is empty.
-    """
-    if not mcp_tools:
-        return ""
-
-    lines = [
-        "\n## MCP Servers (active)",
-        "The following MCP tool servers are connected.  Each sub-tool is listed",
-        "with its trigger phrase.  Use EXACTLY these phrases in ensure statements",
-        "— do NOT use the bare server name as a goal.\n",
-    ]
-
-    for entry in mcp_tools:
-        server_name = entry[0]
-        description = entry[1]
-        keywords: list[str] = entry[2]
-        discovered_tools: list = entry[3] if len(entry) > 3 else []
-
-        lines.append(f"### Server: {server_name}")
-        if description:
-            lines.append(f"  {description}")
-        lines.append("")
-
-        if discovered_tools:
-            # Emit each MCP sub-tool with its description and an example goal.
-            for tool_def in discovered_tools:
-                t_name: str = getattr(tool_def, "name", "") or ""
-                t_desc: str = (getattr(tool_def, "description", "") or "").strip()
-                if not t_name:
-                    continue
-                # Build the natural-language trigger phrase from the tool name.
-                # e.g. "list_my_issues" → "list my issues"
-                phrase = t_name.replace("_", " ").replace("-", " ").lower()
-                lines.append(f"  Tool:    {t_name}")
-                if t_desc:
-                    lines.append(f"  Desc:    {t_desc}")
-                lines.append(f'  Trigger: "{phrase}"')
-
-                # Emit required parameters so the planner knows to set them
-                # as entity attributes before calling the tool.
-                schema: dict = getattr(tool_def, "inputSchema", None) or {}
-                props: dict = schema.get("properties", {})
-                required: list = schema.get("required", [])
-                optional_params = [k for k in props if k not in required]
-                if required:
-                    req_str = ", ".join(f"{k} ({props[k].get('type', 'any')})" for k in required)
-                    lines.append(f"  Required params: {req_str}")
-                if optional_params:
-                    opt_str = ", ".join(
-                        f"{k} ({props[k].get('type', 'any')})" for k in optional_params
-                    )
-                    lines.append(f"  Optional params: {opt_str}")
-
-                # Build a realistic example that includes required attributes.
-                if required:
-                    example_lines = [f'define Task as "{t_name} call".']
-                    for k in required:
-                        ptype = props[k].get("type", "any")
-                        if ptype == "integer":
-                            example_lines.append(f"Task has {k} of 1.")
-                        elif ptype == "string":
-                            example_lines.append(f'Task has {k} of "value".')
-                        else:
-                            example_lines.append(f"Task has {k} of 1.")
-                    example_lines.append(f"ensure {phrase}.")
-                    lines.append(f"  Example:")
-                    for el in example_lines:
-                        lines.append(f"    {el}")
-                else:
-                    lines.append(f"  Example: ensure {phrase}.")
-                lines.append("")
-        else:
-            # No eager-connect — fall back to auto-discovered keywords.
-            kw_str = "  /  ".join(f'"{k}"' for k in keywords[:8])
-            lines.append(f"  Triggers: {kw_str}")
-            lines.append("")
-
-    lines += [
-        "## MCP Planning rules",
-        "1. ALWAYS use one of the exact trigger phrases above as the ensure goal.",
-        '2. NEVER use the bare server name (e.g. "ensure gitlab.") — it will',
-        "   route to the wrong sub-tool.  Use the specific tool phrase instead.",
-        "3. Pass parameters via entity attributes, not inside the ensure phrase.",
-        "   WRONG: ensure read gitlab issue 42.",
-        "   RIGHT: Task has issue_iid of 42.  ensure read issue.",
-        "4. When a tool has REQUIRED params (listed above), you MUST set every",
-        "   required param as an entity attribute BEFORE the ensure statement.",
-        "   The tool will FAIL with a validation error if any required param is",
-        "   missing from the entity snapshot.  Use the exact attribute name shown",
-        "   in 'Required params' above.",
-        "   WRONG: ensure select card.   ← card_number is required but not set",
-        "   RIGHT: Task has card_number of 1.  ensure select card.",
-        "5. For tools that select a numbered item from a list (select_card,",
-        "   buy_pack, choose_artifact, pick_card_draft, remove_card, pick_reward),",
-        "   always default to index 1 when no specific index is known yet.",
-        "   The game response will show what was selected so subsequent steps",
-        "   can use a better index if needed.",
-        "6. When the user wants to save MCP output to a file, add a second goal:",
-        "   ensure save file.",
-        '   and set  Result has file_path of "output.txt"  on an entity.',
-        "",
-        "## MCP Examples",
-        "",
-        '### Request: "list my open gitlab issues"',
-        'define Task as "List open GitLab issues".',
-        "ensure list my issues.",
-        "",
-        '### Request: "read the top gitlab issue"',
-        'define Task as "Read top GitLab issue".',
-        "Task has issue_iid of 1.",
-        "ensure list my issues.",
-        "",
-        '### Request: "read issue 42 in myteam/backend"',
-        'define Task as "Read GitLab issue".',
-        'Task has project_id of "myteam/backend".',
-        "Task has issue_iid of 42.",
-        "ensure read issue.",
-        "",
-        '### Request: "read the top issue and save to file"',
-        'define Task as "Read and save top GitLab issue".',
-        'define Result as "Saved issue details".',
-        'Result has file_path of "top_issue.txt".',
-        "ensure list my issues.",
-        "ensure save file.",
-        "",
-        '### Request: "read issue 10 of project 123, analyse what to do, save to markdown"',
-        'define Task as "Read and analyse GitLab issue".',
-        'Task has project_id of "123".',
-        "Task has issue_iid of 10.",
-        'define Report as "Issue 10 analysis report".',
-        'Report has file_path of "issue_10_analysis.md".',
-        "ensure read issue.",
-        "ensure analyse context and write report.",
-        "ensure save file.",
-        "",
-        '### Request: "read issue 7 and explain what needs to be done, save as markdown"',
-        'define Task as "Read and explain GitLab issue".',
-        "Task has issue_iid of 7.",
-        'define Report as "Issue 7 action plan".',
-        'Report has file_path of "issue_7_action_plan.md".',
-        "ensure read issue.",
-        "ensure analyse context and write report.",
-        "ensure save file.",
-        "",
-        "### Game example: selecting a card in battle (card_number is REQUIRED)",
-        '### Request: "select card 2 and play it"',
-        'define Task as "Select and play a card".',
-        "Task has card_number of 2.",
-        "ensure select card.",
-        "ensure play cards.",
-        "",
-        "### Game example: buying a shop pack (pack_number is REQUIRED)",
-        '### Request: "buy the first pack in the shop"',
-        'define Task as "Buy shop pack".',
-        "Task has pack_number of 1.",
-        "ensure buy pack.",
-        "",
-        "### Game example: choosing an artifact (artifact_number is REQUIRED)",
-        '### Request: "choose the first artifact"',
-        'define Task as "Choose artifact".',
-        "Task has artifact_number of 1.",
-        "ensure choose artifact.",
-        "",
-        "### Game example: full turn loop",
-        '### Request: "play a full turn of the game"',
-        'define Task as "Pattern RPG turn".',
-        'Task has deck of "standard".',
-        "Task has stake of 1.",
-        "Task has card_number of 1.",
-        "Task has pack_number of 1.",
-        "Task has artifact_number of 1.",
-        "ensure start game.",
-        "ensure get status.",
-        "ensure get hand.",
-        "ensure get enemies.",
-        "ensure select card.",
-        "ensure play cards.",
-        "ensure get shop.",
-        "ensure buy pack.",
-        "ensure choose artifact.",
-        "ensure end turn.",
-        "ensure get status.",
-        "",
-    ]
-
-    return "\n".join(lines) + "\n"
-
-
-def _build_planner_system(
-    knowledge_hint: str = "",
-    mcp_hint: str = "",
-    generated_tools_hint: str = "",
-) -> str:
-    """
-    Assemble the full planner system prompt from its optional extension blocks.
-
-    Parameters
-    ----------
-    knowledge_hint:
-        Produced by :func:`_make_knowledge_hint`; empty string → omitted.
-    mcp_hint:
-        Produced by :func:`_make_mcp_hint`; empty string → omitted.
-    generated_tools_hint:
-        Produced by ``ROFSession._generated_tools_hint()``; empty → omitted.
-
-    Returns the complete system prompt string.
-    """
-    parts = [_PLANNER_SYSTEM_BASE]
-    if knowledge_hint:
-        parts.append(knowledge_hint)
-    if mcp_hint:
-        parts.append(mcp_hint)
-    if generated_tools_hint:
-        parts.append(generated_tools_hint)
-    return "\n".join(parts)
 
 
 # ===========================================================================
@@ -627,22 +351,32 @@ class Planner:
     Stage 1: calls the LLM with the planner system prompt to produce a
     validated RelateLang (.rl) workflow.
 
+    The system prompt is assembled from three independent layers:
+
+      1. ``_PLANNER_SYSTEM_BASE``  — syntax rules (static, never changes).
+      2. Tool catalogue            — built from ``ToolSchema`` objects; rebuilt
+                                     whenever tools are added/connected.
+      3. Knowledge hint            — injected when a knowledge dir is active.
+
     Retries up to *retries* times when the parser rejects the LLM output,
-    injecting the parser error message as feedback on each retry.
+    injecting the parser error as feedback on each retry.
 
     Parameters
     ----------
     llm:
-        Any :class:`LLMProvider` (or ``RetryManager`` wrapping one).
+        Any ``LLMProvider`` (or ``RetryManager`` wrapping one).
     retries:
         Maximum number of repair attempts after a ``ParseError``.
     max_tokens:
         Token budget for each LLM call.
+    tool_schemas:
+        Initial list of ``ToolSchema`` objects (builtin tools).  Can be
+        extended later via ``update_tool_catalogue()``.
+    mcp_schemas:
+        Dict mapping server_name → list[ToolSchema] for MCP tools.
+        Rendered as separate server sections in the catalogue.
     knowledge_hint:
-        Pre-built knowledge-base hint; forwarded to
-        :func:`_build_planner_system` and cached for later dynamic rebuilds.
-    mcp_hint:
-        Pre-built MCP hint; same lifecycle as *knowledge_hint*.
+        Pre-built knowledge-base hint string.
     """
 
     def __init__(
@@ -650,22 +384,76 @@ class Planner:
         llm: "LLMProvider",
         retries: int = 2,
         max_tokens: int = 512,
+        tool_schemas: Optional[list] = None,
+        mcp_schemas: Optional[dict] = None,
         knowledge_hint: str = "",
-        mcp_hint: str = "",
     ) -> None:
         self._llm = llm
         self._retries = retries
         self._max_tokens = max_tokens
-        # Store individual hint blocks so rebuild_system() can combine them
-        # with fresh generated-tools hints without re-constructing everything.
+
+        self._tool_schemas: list = list(tool_schemas or [])
+        self._mcp_schemas: dict = dict(mcp_schemas or {})  # server_name → [ToolSchema]
         self._knowledge_hint = knowledge_hint
-        self._mcp_hint = mcp_hint
         self._generated_tools_hint = ""
-        self._system = _build_planner_system(knowledge_hint, mcp_hint)
+
+        self._system = self._assemble_system()
 
     # ------------------------------------------------------------------
     # System-prompt lifecycle
     # ------------------------------------------------------------------
+
+    def _assemble_system(self) -> str:
+        """Rebuild the full system prompt from current state."""
+        catalogue_parts: list[str] = []
+
+        # Builtin tools first
+        if self._tool_schemas:
+            catalogue_parts.append(build_tool_catalogue(self._tool_schemas))
+
+        # MCP servers — one section per server
+        for server_name, schemas in self._mcp_schemas.items():
+            if schemas:
+                catalogue_parts.append(build_tool_catalogue(schemas, server_name=server_name))
+
+        tool_catalogue = "\n".join(catalogue_parts)
+
+        return _build_planner_system(
+            tool_catalogue=tool_catalogue,
+            knowledge_hint=self._knowledge_hint,
+            generated_tools_hint=self._generated_tools_hint,
+        )
+
+    def update_tool_catalogue(
+        self,
+        tool_schemas: Optional[list] = None,
+        mcp_schemas: Optional[dict] = None,
+    ) -> None:
+        """
+        Replace tool schemas and rebuild the system prompt.
+
+        Called by ``ROFSession._try_register_generated_tools`` after new tools
+        are dynamically registered during a run.
+
+        Parameters
+        ----------
+        tool_schemas:
+            Full replacement list of builtin ``ToolSchema`` objects.
+            Pass ``None`` to keep the existing list.
+        mcp_schemas:
+            Full replacement dict of MCP schemas (server_name → list).
+            Pass ``None`` to keep the existing dict.
+        """
+        if tool_schemas is not None:
+            self._tool_schemas = list(tool_schemas)
+        if mcp_schemas is not None:
+            self._mcp_schemas = dict(mcp_schemas)
+        self._system = self._assemble_system()
+
+    def update_knowledge_hint(self, knowledge_hint: str) -> None:
+        """Replace the knowledge hint block and rebuild the system prompt."""
+        self._knowledge_hint = knowledge_hint
+        self._system = self._assemble_system()
 
     def rebuild_system(self, generated_tools_hint: str = "") -> None:
         """
@@ -674,20 +462,18 @@ class Planner:
         after each new tool is registered so future REPL turns see it.
         """
         self._generated_tools_hint = generated_tools_hint
-        self._system = _build_planner_system(
-            self._knowledge_hint,
-            self._mcp_hint,
-            self._generated_tools_hint,
-        )
+        self._system = self._assemble_system()
 
-    def update_mcp_hint(self, mcp_hint: str) -> None:
-        """Replace the MCP hint block and rebuild the system prompt."""
-        self._mcp_hint = mcp_hint
-        self._system = _build_planner_system(
-            self._knowledge_hint,
-            self._mcp_hint,
-            self._generated_tools_hint,
-        )
+    # ------------------------------------------------------------------
+    # Backward-compatibility shims used by legacy session.py call-sites
+    # ------------------------------------------------------------------
+
+    def update_mcp_hint(self, _mcp_hint: str) -> None:
+        """
+        Deprecated shim — MCP hints are now built from ToolSchema objects.
+        This method is a no-op kept for backward compatibility.
+        """
+        pass  # MCP catalogue is managed via update_tool_catalogue()
 
     # ------------------------------------------------------------------
     # Core planning call
@@ -720,13 +506,11 @@ class Planner:
                     system=self._system,
                     max_tokens=self._max_tokens,
                     temperature=0.1,
-                    output_mode="rl",  # planner always produces .rl text, never JSON
+                    output_mode="rl",
                 )
             )
 
             # Strip <think>…</think> blocks from reasoning models
-            # (qwen3, deepseek-r1) before fence-stripping so the
-            # chain-of-thought prose never reaches RLParser.
             raw_content = re.sub(
                 r"<think>.*?</think>", "", resp.content, flags=re.DOTALL | re.IGNORECASE
             ).strip()

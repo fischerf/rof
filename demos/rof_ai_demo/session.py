@@ -117,7 +117,8 @@ from output_layout import render_result
 from planner import (
     Planner,
     _make_knowledge_hint,
-    _make_mcp_hint,
+    build_mcp_tool_schemas,
+    build_tool_catalogue,
 )
 from telemetry import _STATS, _attach_debug_hooks
 
@@ -417,8 +418,39 @@ class ROFSession:
             else ""
         )
 
-        # ── MCP hint ──────────────────────────────────────────────────────
-        _mcp_hint = _make_mcp_hint(self._mcp_tool_meta) if self._mcp_tool_meta else ""
+        # ── Tool schemas for planner catalogue (Layer 2) ──────────────────
+        # Collect ToolSchema from every registered builtin tool instance.
+        # Tools that have been patched via tools/tools/__init__.py return a
+        # rich schema; others fall back to the ABC default (name + triggers).
+        _builtin_schemas: list = []
+        for _t in self._tools:
+            try:
+                _builtin_schemas.append(_t.tool_schema())
+            except Exception:
+                pass  # defensive — never crash session init for a bad schema
+
+        # MCP schemas: one list per server, keyed by server name.
+        # build_mcp_tool_schemas() converts raw MCP Tool objects → ToolSchema.
+        _mcp_schemas: dict = {}
+        for _meta in self._mcp_tool_meta:
+            _srv_name: str = _meta[0]
+            _discovered: list = _meta[3] if len(_meta) > 3 else []
+            if _discovered:
+                _mcp_schemas[_srv_name] = build_mcp_tool_schemas(_discovered)
+            else:
+                # Eager connect not used — fall back to keyword-only schema
+                # so the planner still sees the server's trigger phrases.
+                from rof_framework.core.interfaces.tool_provider import ToolSchema as _TS
+
+                _kws: list = list(_meta[2])
+                if _kws:
+                    _mcp_schemas[_srv_name] = [
+                        _TS(
+                            name=_srv_name,
+                            description=_meta[1] or f"MCP server '{_srv_name}'",
+                            triggers=_kws[:8],
+                        )
+                    ]
 
         # ── Step retry / fallback settings ───────────────────────────────
         self._step_retries: int = max(0, step_retries)
@@ -427,8 +459,9 @@ class ROFSession:
         # ── Planner ───────────────────────────────────────────────────────
         self._planner = Planner(
             llm=self._llm,
+            tool_schemas=_builtin_schemas,
+            mcp_schemas=_mcp_schemas,
             knowledge_hint=_knowledge_hint,
-            mcp_hint=_mcp_hint,
         )
 
         # ── URL-enrichment settings ───────────────────────────────────────
@@ -1314,9 +1347,18 @@ class ROFSession:
                         except Exception:
                             pass
 
-                # Rebuild the planner system prompt so the new tool appears
-                # in all future REPL turns.
-                self._planner.rebuild_system(self._generated_tools_hint())
+                        # Rebuild the planner system prompt so the new tool appears
+                        # in all future REPL turns.
+                        # Add the newly registered tool's schema to the builtin list.
+                        try:
+                            _new_schema = tool.tool_schema()
+                            _existing = list(self._planner._tool_schemas)
+                            if not any(s.name == _new_schema.name for s in _existing):
+                                _existing.append(_new_schema)
+                            self._planner.update_tool_catalogue(tool_schemas=_existing)
+                        except Exception:
+                            pass
+                        self._planner.rebuild_system(self._generated_tools_hint())
 
     def _generated_tools_hint(self) -> str:
         """Return a planner system-prompt appendix listing registered generated tools."""
