@@ -2,6 +2,10 @@
 
 ---
 
+> **What's new:** three correctness fixes landed in `session.py` and
+> `mcp_server/server.py` that affect every game run.  See the
+> **Failure handling** section for the updated retry behaviour.
+
 ## Module structure
 
 The demo is split into nine focused modules that live side-by-side in
@@ -14,7 +18,7 @@ other concern lives in its own file.
 | `telemetry.py` | `_SessionStats`, `_STATS` singleton, `_StatsTracker`, `_CommsLogger`, `_attach_debug_hooks` |
 | `console.py` | ANSI colour helpers, `_box` / `_print_box`, `banner` / `section` / `step` / `warn` / `err` / `info`, headline bar |
 | `planner.py` | `_PLANNER_SYSTEM_BASE`, `_build_planner_system`, `_make_knowledge_hint`, `_make_mcp_hint`, `Planner` |
-| `session.py` | `ROFSession` — tool wiring, MCP registration, run loop, retry logic, RAG, routing memory, artifacts |
+| `session.py` | `ROFSession` — tool wiring, MCP registration, run loop, retry/coercion logic, RAG, routing memory, artifacts |
 | `output_layout.py` | Tool-aware result renderer — `render_result()`, 11 named layouts, `_SKIP_ATTRS`, `_TRUNCATE_ATTRS` |
 | `agent.py` | File-watching agent mode — `run_agent()`, `_Capture` stream proxy, command deduplication, log file writer |
 | `wizard.py` | `_setup_wizard`, `_print_config_box`, provider defaults, GitHub Copilot + generic provider paths |
@@ -47,10 +51,11 @@ other concern lives in its own file.
   Stage 2b — FAILURE RECOVERY  (_execute_with_retry)
           │  for each FAILED step (in order):
           │    1. dependency guard — skip if a prior required step failed
-          │    2. retry up to --step-retries times (single-goal re-run)
-          │    3. LLM fallback — strip tool keywords, inject error as context
+          │    2. param fix — inject missing params OR coerce wrong-typed values
+          │    3. retry up to --step-retries times (single-goal re-run)
+          │    4. LLM fallback — strip tool keywords, inject error as context
           ▼
-  Final RunResult { success, merged steps }
+  Final RunResult { success, last-step-per-goal dedup }
 ```
 
 ---
@@ -222,6 +227,27 @@ decisions are fully auditable after the fact.
 
 ## Failure handling
 
+### How `final_success` is computed
+
+After all retries and fallbacks complete, `_execute_with_retry` computes the
+run outcome by inspecting only the **last recorded step for each goal
+expression**.  Earlier attempts (which may be `FAILED`) are kept in
+`all_steps` for audit history but are excluded from the success calculation:
+
+```
+last_step_per_goal = { step.goal_expr: step   ← last wins
+                       for step in all_steps }
+final_success = all( s.status == ACHIEVED
+                     for s in last_step_per_goal.values() )
+```
+
+This means a run where every goal was *eventually* achieved — even if some
+needed a retry — correctly reports `✔ SUCCESS`.  Before this fix, a
+recovered step left its original `FAILED` entry in the list and the whole
+run reported `✗ FAILED` even though nothing actually failed at the end.
+
+---
+
 ### The problem without recovery
 
 The base `Orchestrator` marks a step `FAILED` and (with `pause_on_error=True`)
@@ -233,7 +259,7 @@ passed to the LLM, and no way to recover.
 
 `ROFSession` sets `pause_on_error=False` and wraps every `orch.run()` call in
 `_execute_with_retry()`.  The orchestrator runs all goals in the workflow; then
-the recovery loop processes each failed step in three stages:
+the recovery loop processes each failed step in four stages:
 
 ```
 for each FAILED step (original order):
@@ -243,12 +269,31 @@ for each FAILED step (original order):
   │      (e.g. SearchResult, KnowledgeDoc).  If any appear in a later
   │      goal, that later goal is SKIPPED — its required input is missing.
   │
-  ├─ 2. Retry loop (up to --step-retries times) ──────────────────────
-  │      Re-run the single failed goal as a minimal one-goal workflow.
+  ├─ 2. Param fix (_inject_missing_mcp_params) ───────────────────────
+  │      Triggered when the error contains "Field required" OR
+  │      "Input should be a valid".
+  │
+  │      Case A — Field required:
+  │        A required MCP parameter is completely absent from the entity
+  │        snapshot.  A default value is injected (1 for integers,
+  │        "value" for strings).  Type is read from the tool's inputSchema.
+  │        Example: pack_number, artifact_number, card_number.
+  │
+  │      Case B — Input should be a valid X:
+  │        A parameter IS present but has the wrong Python type — e.g. the
+  │        planner stored seed = 12345 (int) but the tool declares
+  │        seed: str | None.  The value is coerced in-place:
+  │          int(12345) → str("12345")
+  │        The coercion walks ALL entity attributes (not just the Task
+  │        entity) so the fix applies wherever the value was stored.
+  │
+  ├─ 3. Retry loop (up to --step-retries times) ──────────────────────
+  │      Re-run the single failed goal as a minimal one-goal workflow,
+  │      seeded with the (possibly fixed) accumulated snapshot.
   │      On success → mark achieved, continue to next failed step.
   │      On failure → update error message, try next attempt.
   │
-  └─ 3. LLM fallback (unless --no-llm-fallback) ──────────────────────
+  └─ 4. LLM fallback (unless --no-llm-fallback) ──────────────────────
          Strip all tool trigger keywords from the goal expression so
          the router returns None and the LLM handles it directly.
          Inject failed_goal + tool_error as a FallbackContext entity
@@ -285,6 +330,30 @@ so the model knows what was tried and why it failed before answering.
 
 ### Live output during recovery
 
+**Case A — missing parameter (Field required), auto-injected default:**
+
+```
+  ⚠ WARN    2 step(s) failed — starting retry loop (max 1 retry/step, llm_fallback=True)
+  ⚠ WARN    Retry 1/1: 'buy pack'
+  ⚠ WARN      ↳ Auto-injecting missing param 'pack_number' = 1 (type=integer) for retry
+  ▸ GOAL    buy pack
+  ▸ TOOL    MCPClientTool[game]  success=True
+  ▸ RETRY   succeeded on attempt 1: 'buy pack'
+```
+
+**Case B — wrong type (Input should be a valid string), auto-coerced:**
+
+```
+  ⚠ WARN    1 step(s) failed — starting retry loop (max 1 retry/step, llm_fallback=True)
+  ⚠ WARN    Retry 1/1: 'start game'
+  ⚠ WARN      ↳ Auto-coercing param 'seed' int(12345) → str('12345') for retry
+  ▸ GOAL    start game
+  ▸ TOOL    MCPClientTool[game]  success=True
+  ▸ RETRY   succeeded on attempt 1: 'start game'
+```
+
+**Case C — all retries exhausted, LLM fallback:**
+
 ```
   ⚠ WARN    1 step(s) failed — starting retry loop (max 1 retry/step, llm_fallback=True)
   ⚠ WARN    Retry 1/1: 'retrieve web_information about latest AI news'
@@ -311,6 +380,11 @@ If a later goal was blocked by the dependency guard:
 |------|---------|-------------|
 | `--step-retries N` | `1` | Max retries per failed step before falling back to the LLM. `0` disables retries entirely (goes straight to LLM fallback if enabled). |
 | `--no-llm-fallback` | off | Disable the LLM fallback. Failed steps remain failed after all retries are exhausted. |
+
+> **Note on param auto-fix:** missing-param injection and type-coercion both
+> happen *inside* the retry loop — they cost no extra LLM request.  A step
+> that fails only because of a missing or wrong-typed parameter is typically
+> fixed on retry attempt 1 without ever reaching the LLM fallback.
 
 ### Common configurations
 
@@ -350,10 +424,17 @@ to work normally.
    `MCPToolFactory` to build one `MCPClientTool` per config.
 3. Each `MCPClientTool` is appended to `self._tools` alongside all
    built-in tools.
-4. Discovered trigger keywords are fed into `_make_mcp_hint()` in
-   `planner.py`, which appends a `## MCP Servers` block to the planner
-   system prompt so the LLM routes goals correctly.
-5. At REPL exit (or after a one-shot run) `session.close_mcp()` cleanly
+4. When `--mcp-eager` is set, `tools/list` is called at startup.
+   The discovered `Tool` objects (name + description + inputSchema) are
+   stored in `_mcp_tool_meta` and fed to `planner.py` via
+   `build_mcp_tool_schemas()` → `build_tool_catalogue()`, which appends
+   a per-server `## MCP Tools` section to the planner system prompt.
+   This gives the planner precise tool names, parameter names, and types
+   so it generates correct `ensure` goals and entity attributes.
+5. The same inputSchema data is used by `_inject_missing_mcp_params` at
+   retry time to determine the correct type (string vs integer) for any
+   missing or wrong-typed parameter.
+6. At REPL exit (or after a one-shot run) `session.close_mcp()` cleanly
    terminates all subprocess / HTTP sessions.
 
 ### Adding a stdio server (local subprocess)
@@ -432,6 +513,21 @@ python rof_ai_demo.py --provider github_copilot \
   ℹ       MCP: 1 server(s) connected (lazy connect)
   ℹ       MCP servers   : 1 configured
 ```
+
+### Soft-failure detection
+
+MCP tool responses whose human-readable text begins with `⚠️` are treated as
+`success=False` by the server's `_run()` function, even though the underlying
+HTTP/subprocess call succeeded.  This covers game-level rejections such as:
+
+- `⚠️ Combat log is empty!` — `export_replay` before any battle
+- `⚠️ Stake N not unlocked` — `start_game` with a locked difficulty level
+- `⚠️ No run is active` — any in-run tool called from the menu screen
+- `⚠️ No artifacts to choose from!` — `choose_artifact` with no pending pack
+
+Because the MCP tool now returns `success=False` for these, the retry loop in
+`_execute_with_retry` treats them as genuine failures and attempts recovery —
+rather than silently treating a rejected game action as a successful outcome.
 
 ### Run summary
 
@@ -749,7 +845,7 @@ Every run writes the following files into `--output-dir` (default `./rof_output`
 | File | Description |
 |------|-------------|
 | `rof_plan_<id8>.rl` | The generated RelateLang workflow (.rl source) — includes any auto-appended synthesis or fallback goals |
-| `rof_run_<id8>.json` | Run summary: `run_id`, `success`, `steps`, `snapshot` — steps include retry and fallback attempts |
+| `rof_run_<id8>.json` | Run summary: `run_id`, `success`, `steps`, `snapshot` — steps include all original, retry, and fallback attempts; `success` reflects only the last outcome per goal |
 | `rof_generated_<ts>.<ext>` | Source file saved by `AICodeGenTool` (`.py`, `.lua`, `.js`, …) |
 | `rof_transcript_<ts>.txt` | Turn-by-turn play transcript saved by `LLMPlayerTool` |
 | `rof_fallback_<ts>.<ext>` | Raw LLM output saved when the planner produced 0 goals |
@@ -757,6 +853,11 @@ Every run writes the following files into `--output-dir` (default `./rof_output`
 | `chroma_store/` | ChromaDB embedding database directory (only with `--rag-backend chromadb`) |
 | `comms_log/comms_<ts>.jsonl` | Full LLM request/response log (only with `--log-comms`) |
 | `audit_logs/audit_<ts>.jsonl` | Structured governance audit log — one JSON record per EventBus event (only when `--audit-sink jsonlines`, which is the default) |
+
+> **Reading `rof_run_*.json` after recovery:** the `steps` array contains
+> every attempt in order, including original failures.  To determine the true
+> final outcome of each goal, take the last entry for each unique `goal_expr`.
+> The top-level `success` field already reflects this deduplication.
 
 ---
 

@@ -360,6 +360,13 @@ ROF is **not** a replacement for:
       registry/tool_registry.py        ToolRegistry, ToolRegistrationError
       registry/factory.py              create_default_registry()
       router/tool_router.py            ToolRouter, RoutingStrategy, RouteResult
+      tools/tool_schemas.py            ToolSchema, ToolParam, ALL_BUILTIN_SCHEMAS
+                                         schema_ai_codegen · schema_code_runner
+                                         schema_llm_player · schema_web_search
+                                         schema_api_call   · schema_file_reader
+                                         schema_file_save  · schema_validator
+                                         schema_human_in_loop · schema_rag
+                                         schema_database   · schema_lua_run
       tools/web_search.py              WebSearchTool
       tools/rag.py                     RAGTool
       tools/code_runner.py             CodeRunnerTool
@@ -844,6 +851,99 @@ ROF is **not** a replacement for:
 ### rof-tools
 
 ```
+  ToolSchema  (dataclass)
+  │   Full self-description of a tool — the ROF equivalent of an MCP Tool
+  │   object.  The planner reads this at runtime to know which ``ensure``
+  │   phrase activates the tool, what entity attributes it requires, and
+  │   what it does.  Defined in core/interfaces/tool_provider.py so it is
+  │   available to both the core framework and the tool implementations
+  │   without a circular import.
+  │
+  │   Fields:
+  │     name        – stable programmatic name (e.g. "AICodeGenTool")
+  │     description – one-paragraph plain-English description
+  │     triggers    – ordered list of trigger phrases; triggers[0] is the
+  │                   canonical phrase used in ``ensure`` statements
+  │     params      – list[ToolParam] — required params MUST be set as
+  │                   entity attributes before the ensure goal
+  │     notes       – optional list of short caveat bullets shown to the LLM
+  │
+  │   Properties:
+  │     schema.canonical_trigger  → triggers[0] or ""
+  │     schema.required_params    → [p for p in params if p.required]
+  │     schema.optional_params    → [p for p in params if not p.required]
+  │
+  │   from rof_framework.core.interfaces.tool_provider import ToolSchema, ToolParam
+  │   schema = ToolSchema(
+  │       name="MyTool",
+  │       description="Does something useful.",
+  │       triggers=["do something", "perform action"],
+  │       params=[
+  │           ToolParam("target", "string", "What to act on", required=True),
+  │           ToolParam("count",  "integer", "How many times", required=False, default=1),
+  │       ],
+  │       notes=["Do not use inside an AICodeGenTool goal phrase."],
+  │   )
+  │
+  ToolParam  (dataclass)
+  │   Describes one input parameter of a tool — mirrors MCP inputSchema.
+  │   Fields:
+  │     name        – parameter name as it appears in the entity attribute
+  │     type        – JSON Schema primitive: "string" | "integer" | "boolean"
+  │                   | "number" | "array" | "object"
+  │     description – one sentence shown to the planner LLM
+  │     required    – True → planner MUST set this as an entity attribute
+  │     default     – default value for optional params (None = no default)
+  │
+  tool_schemas.py  (tools/tools/tool_schemas.py)
+  │   Rich ToolSchema declarations for every built-in ROF tool.
+  │   Each function returns the canonical ToolSchema for one tool.
+  │   The schemas are consumed by the planner's tool-catalogue builder
+  │   so the LLM always sees a structured, accurate description of every
+  │   available tool — exactly like an MCP server exposes its inputSchema.
+  │
+  │   Functions (one per tool):
+  │     schema_ai_codegen()    schema_code_runner()   schema_llm_player()
+  │     schema_web_search()    schema_api_call()      schema_file_reader()
+  │     schema_file_save()     schema_validator()     schema_human_in_loop()
+  │     schema_rag()           schema_database()      schema_lua_run()
+  │
+  │   ALL_BUILTIN_SCHEMAS  – list[ToolSchema] of all 12 schemas in display
+  │                          order; import this to feed the planner catalogue
+  │                          builder without constructing tool instances.
+  │
+  │   Adding a new tool:
+  │     1. Write schema_<toolname>() here.
+  │     2. Add it to ALL_BUILTIN_SCHEMAS.
+  │     3. Override tool_schema() in your ToolProvider subclass to call it.
+  │
+  │   from rof_framework.tools.tools.tool_schemas import ALL_BUILTIN_SCHEMAS
+  │   from demos.rof_ai_demo.planner import build_tool_catalogue
+  │   catalogue_block = build_tool_catalogue(ALL_BUILTIN_SCHEMAS)
+  │
+  ToolProvider  (ABC — core/interfaces/tool_provider.py)
+  │   Extension point for all tool implementations.  Every concrete tool
+  │   SHOULD override tool_schema() to return a rich ToolSchema so the
+  │   planner always sees accurate parameter names and types.  The default
+  │   implementation derives a minimal schema from name + trigger_keywords.
+  │
+  │   Abstract properties / methods:
+  │     name              → str
+  │     trigger_keywords  → list[str]
+  │     execute(request)  → ToolResponse
+  │
+  │   Self-description method:
+  │     tool_schema() → ToolSchema
+  │       Default: builds ToolSchema(name, description, triggers) from the
+  │                class docstring and trigger_keywords.  No params or notes.
+  │       Override: return the matching schema_<toolname>() result for full
+  │                 planner catalogue accuracy.
+  │
+  │   Example override:
+  │     def tool_schema(self) -> ToolSchema:
+  │         from rof_framework.tools.tools.tool_schemas import schema_web_search
+  │         return schema_web_search()
+  │
   ToolRegistry
   │   Central registry. Queryable by name, keyword, or tag.
   │   registry.register(WebSearchTool(), tags=["web", "retrieval"])
@@ -919,8 +1019,15 @@ ROF is **not** a replacement for:
   │   Languages: python · lua · javascript · shell
   │   Output: language, saved_to (file path), filename
   │   Constructor: AICodeGenTool(llm, output_dir=None, max_tokens=4096)
-  │   Trigger keywords: "generate python code", "generate lua code",
-  │                     "generate code", "write code", "implement code"
+  │   Canonical trigger: "generate python code"
+  │   All triggers: see schema_ai_codegen() in tool_schemas.py
+  │   Schema notes:
+  │     - NEVER include web-search words ("retrieve", "search", "web") in
+  │       the ensure phrase — the router will mis-route to WebSearchTool.
+  │     - For non-interactive scripts follow with: ensure run python code.
+  │     - For interactive programs follow with:
+  │       ensure play game with llm player and record choices.
+  │     - NEVER pair with both CodeRunnerTool AND LLMPlayerTool.
   │
   ├── CodeRunnerTool
   │   Executes non-interactive scripts produced by AICodeGenTool (or any
@@ -1006,8 +1113,12 @@ ROF is **not** a replacement for:
   │                               timeout_per_turn=15.0, max_turns=30)
   │   Output: transcript (list of {game_output, llm_choice}),
   │           transcript_file (path), turns, script, returncode
-  │   Trigger keywords: "run interactively", "let llm drive",
-  │                     "automate program", "play interactively"
+  │   Canonical trigger: "play game with llm player and record choices"
+  │   Schema notes:
+  │     - Use ONLY after AICodeGenTool for interactive programs.
+  │     - Do NOT pair with CodeRunnerTool for the same script.
+  │     - Only use when the task explicitly mentions: interactive, game,
+  │       questionnaire, menu, play, or adventure.
   │
   ├── MCP Tool Layer  ─────────────────────────────────────────────────
   │
@@ -1110,6 +1221,48 @@ ROF is **not** a replacement for:
       JavaScriptTool       – load and execute a JS snippet/file as a tool
                              (runs via py_mini_racer or Node.js)
       FunctionTool         – wraps a callable, used internally by @rof_tool
+
+  Note: FileSaveTool and FileReaderTool are registered by create_default_registry()
+  but intentionally omitted from the factory.py import list — they are only
+  included when explicitly passed to registry.register().  FileSaveTool has no
+  constructor arguments; FileReaderTool accepts base_dir for sandboxing.
+
+  Planner catalogue integration
+  ─────────────────────────────
+  The planner system prompt is assembled in three layers:
+
+    Layer 1  _PLANNER_SYSTEM_BASE   — RelateLang syntax rules (static)
+    Layer 2  Tool catalogue         — built from ToolSchema objects at session
+                                      start; one section per server for MCP tools
+    Layer 3  Knowledge hint         — injected when --knowledge-dir is active
+
+  Layer 2 is produced by build_tool_catalogue(schemas) in planner.py, which
+  renders each ToolSchema as a YAML-style block the LLM can read without
+  special parsing:
+
+    ### AICodeGenTool
+      Description: Generates source code …
+      Trigger:     "generate python code"
+      Also:        "generate lua code"  /  "write code"  /  …
+      Params:
+        language   (string, optional, default=python) — Target language …
+        description (string, optional) — Plain-English description …
+      Notes:
+        - NEVER include WebSearchTool trigger words …
+        - For non-interactive scripts follow with: ensure run python code.
+
+  MCP tools discovered via tools/list are converted to ToolSchema objects by
+  build_mcp_tool_schemas() (planner.py) using the server's inputSchema, then
+  rendered as a separate "## <server_name> MCP Tools" section.  This means
+  the planner sees every MCP sub-tool name, description, and required
+  parameters — giving it the same level of accuracy as built-in tools.
+
+  The same ToolSchema.params[].type information is consumed by
+  _inject_missing_mcp_params() in session.py at retry time to coerce
+  wrong-typed entity attribute values (e.g. seed: int → str) before
+  replaying the failed step.
+```
+
 ```
 
 ---

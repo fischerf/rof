@@ -1026,7 +1026,10 @@ class ROFSession:
                 #   "1 validation error … <field>  Field required"
                 # and this block ensures the retry has the missing attribute.
                 retry_snapshot = accumulated_snapshot
-                if "Field required" in error_msg:
+                _needs_param_fix = (
+                    "Field required" in error_msg or "Input should be a valid" in error_msg
+                )
+                if _needs_param_fix:
                     retry_snapshot = self._inject_missing_mcp_params(
                         accumulated_snapshot, error_msg
                     )
@@ -1098,7 +1101,16 @@ class ROFSession:
                 else:
                     err(f"Could not build LLM fallback AST for '{goal_expr[:60]}'")
 
-        final_success = all(s.status == _GoalStatus.ACHIEVED for s in all_steps if s is not None)
+        # A goal that originally FAILED but was later recovered by a retry or
+        # LLM fallback must not count against final_success.  We keep the
+        # original steps in all_steps for audit/history purposes, but when
+        # computing success we only look at the *last* recorded step for each
+        # goal expression — that is the most-recent (and authoritative) outcome.
+        last_step_per_goal: dict[str, Any] = {}
+        for s in all_steps:
+            if s is not None:
+                last_step_per_goal[s.goal_expr] = s
+        final_success = all(s.status == _GoalStatus.ACHIEVED for s in last_step_per_goal.values())
         return _RunResult(
             run_id=result.run_id,
             success=final_success,
@@ -1109,33 +1121,63 @@ class ROFSession:
 
     def _inject_missing_mcp_params(self, snapshot: dict, error_msg: str) -> dict:
         """
-        Parse a Pydantic "Field required" error message to find missing
-        parameter names and inject default values into the Task entity of
-        *snapshot* (or create a minimal Task entity if none exists).
+        Parse Pydantic validation error messages and fix the snapshot so that
+        the retry succeeds without needing the LLM fallback.
 
-        Returns a shallow-copied snapshot with the injected attributes so
-        the original *accumulated_snapshot* is never mutated.
+        Two classes of error are handled:
 
-        Examples of error messages handled::
+        1. **Field required** — a required parameter is completely absent from
+           the entity snapshot.  A sensible default is injected (``1`` for
+           integers, ``"value"`` for strings).
 
-            1 validation error for select_cardArguments
-            card_number
-              Field required [type=missing, …]
+           Example error::
 
-            1 validation error for buy_packArguments
-            pack_number
-              Field required [type=missing, …]
+               1 validation error for buy_packArguments
+               pack_number
+                 Field required [type=missing, …]
 
-        For integer parameters the default injected value is ``1``.
-        For string parameters the default is ``"value"``.
-        The parameter type is inferred from the MCP tool's inputSchema when
-        an eager-connected MCPClientTool is available; otherwise ``integer``
-        is assumed (all current game index parameters are integers).
+        2. **Type mismatch** — the parameter *is* present in the snapshot but
+           has the wrong Python type (e.g. the planner stored ``seed = 12345``
+           as an ``int`` but the MCP tool declares ``seed: str | None``).
+           The existing value is coerced to the type required by the schema.
+
+           Example error::
+
+               1 validation error for start_gameArguments
+               seed
+                 Input should be a valid string [type=string_type,
+                 input_value=12345, input_type=int]
+
+        Returns a deep-copied snapshot with all fixups applied so the
+        original *accumulated_snapshot* is never mutated.
         """
         import copy
         import re as _re
 
-        # Extract field names from error lines that precede "Field required".
+        # ------------------------------------------------------------------
+        # Build a type map from connected MCP tools' inputSchema so we can
+        # inject the right type (int vs str) and coerce mismatched values.
+        # ------------------------------------------------------------------
+        param_types: dict[str, str] = {}
+        for tool_meta in self._mcp_tool_meta:
+            for tool_def in tool_meta[3]:  # discovered_tools list
+                schema: dict = getattr(tool_def, "inputSchema", None) or {}
+                for fname, fschema in schema.get("properties", {}).items():
+                    if fname not in param_types:
+                        # anyOf / oneOf handling: pick the first non-null type
+                        if "anyOf" in fschema:
+                            for sub in fschema["anyOf"]:
+                                if sub.get("type") not in (None, "null"):
+                                    param_types[fname] = sub["type"]
+                                    break
+                            else:
+                                param_types[fname] = "string"
+                        else:
+                            param_types[fname] = fschema.get("type", "integer")
+
+        # ------------------------------------------------------------------
+        # Case 1: "Field required" — parameter is entirely missing.
+        # ------------------------------------------------------------------
         # Pydantic v2 formats errors as:
         #   <field_name>\n  Field required [type=missing, …]
         missing_fields: list[str] = _re.findall(
@@ -1144,36 +1186,48 @@ class ROFSession:
             _re.MULTILINE,
         )
         if not missing_fields:
-            # Fallback: grab bare identifiers on lines immediately before
-            # "Field required" using a lookahead variant.
             missing_fields = _re.findall(
                 r"(\w+)\s+Field required",
                 error_msg,
             )
-        if not missing_fields:
-            return snapshot
 
-        # Build a type map from connected MCP tools' inputSchema so we can
-        # inject the right type (int vs str).
-        param_types: dict[str, str] = {}
-        for tool_meta in self._mcp_tool_meta:
-            for tool_def in tool_meta[3]:  # discovered_tools list
-                schema: dict = getattr(tool_def, "inputSchema", None) or {}
-                for fname, fschema in schema.get("properties", {}).items():
-                    if fname not in param_types:
-                        param_types[fname] = fschema.get("type", "integer")
+        # ------------------------------------------------------------------
+        # Case 2: "Input should be a valid X" — parameter present but wrong
+        # type.  Extract (field_name, bad_value, required_type) triples.
+        #
+        # Pydantic v2 format:
+        #   <field_name>
+        #     Input should be a valid string [type=string_type,
+        #     input_value=12345, input_type=int]
+        # ------------------------------------------------------------------
+        # Match: field name on its own line, followed by the error detail.
+        type_mismatch_fields: list[tuple[str, str]] = _re.findall(
+            r"^(\w+)\s*\n\s*Input should be a valid (\w+)",
+            error_msg,
+            _re.MULTILINE,
+        )
+        # Also pick up the compact single-line variant some versions emit.
+        if not type_mismatch_fields:
+            type_mismatch_fields = _re.findall(
+                r"(\w+)\s+Input should be a valid (\w+)",
+                error_msg,
+            )
+
+        if not missing_fields and not type_mismatch_fields:
+            return snapshot
 
         new_snapshot = copy.deepcopy(snapshot)
         entities = new_snapshot.setdefault("entities", {})
 
-        # Find the first Task-like entity to attach params to, or create one.
+        # ------------------------------------------------------------------
+        # Locate the best entity to attach / patch params on.
+        # ------------------------------------------------------------------
         task_key: str | None = None
         for ent_name in entities:
             if ent_name.lower() in ("task", "game", "runtask"):
                 task_key = ent_name
                 break
         if task_key is None:
-            # Use the first non-routing entity, or create "Task".
             for ent_name in entities:
                 if not ent_name.startswith("RoutingTrace") and not ent_name.startswith("MCP"):
                     task_key = ent_name
@@ -1188,6 +1242,9 @@ class ROFSession:
 
         task_attrs: dict = entities[task_key].setdefault("attributes", {})
 
+        # ------------------------------------------------------------------
+        # Apply Case-1 fixes: inject missing params with a default value.
+        # ------------------------------------------------------------------
         for field in missing_fields:
             if field in task_attrs:
                 continue  # already present — do not overwrite
@@ -1198,6 +1255,48 @@ class ROFSession:
                 f"  ↳ Auto-injecting missing param '{field}' = {default_val!r} "
                 f"(type={ptype}) for retry"
             )
+
+        # ------------------------------------------------------------------
+        # Apply Case-2 fixes: coerce wrong-typed values that are already in
+        # the snapshot.  The required type comes from the error message itself
+        # (most reliable) and is cross-checked against the schema map.
+        # ------------------------------------------------------------------
+        _coerce_map: dict[str, type] = {
+            "string": str,
+            "integer": int,
+            "number": float,
+            "boolean": bool,
+        }
+        for field, required_type_name in type_mismatch_fields:
+            # Prefer the schema's declared type; fall back to what the error
+            # message says (e.g. "valid string" → "string").
+            schema_type = param_types.get(field, required_type_name)
+            coerce_to = _coerce_map.get(schema_type, _coerce_map.get(required_type_name, str))
+
+            # Walk ALL entities — the bad value might not be in task_key.
+            coerced = False
+            for ent_data in entities.values():
+                attrs = ent_data.get("attributes", {})
+                if field in attrs and not isinstance(attrs[field], coerce_to):
+                    old_val = attrs[field]
+                    try:
+                        attrs[field] = coerce_to(old_val)
+                        warn(
+                            f"  ↳ Auto-coercing param '{field}' "
+                            f"{type(old_val).__name__}({old_val!r}) → "
+                            f"{coerce_to.__name__}({attrs[field]!r}) for retry"
+                        )
+                        coerced = True
+                    except (ValueError, TypeError) as exc:
+                        warn(f"  ↳ Could not coerce param '{field}' to {coerce_to.__name__}: {exc}")
+            if not coerced:
+                # Value wasn't found anywhere; inject a correctly-typed default.
+                default_val = coerce_to(1) if coerce_to in (int, float) else coerce_to("value")
+                task_attrs[field] = default_val
+                warn(
+                    f"  ↳ Auto-injecting coerced param '{field}' = {default_val!r} "
+                    f"(type={coerce_to.__name__}) for retry"
+                )
 
         return new_snapshot
 
