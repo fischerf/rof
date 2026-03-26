@@ -982,6 +982,22 @@ class ROFSession:
             for attempt in range(1, self._step_retries + 1):
                 warn(f"Retry {attempt}/{self._step_retries}: '{goal_expr[:70]}'")
 
+                # ── Missing-parameter injection ───────────────────────────
+                # When the error is a Pydantic "Field required" validation
+                # failure, the retry snapshot is enriched with a default
+                # value (1 for integers, "value" for strings) for every
+                # missing required parameter extracted from the error message.
+                # This handles the common case where the planner forgets to
+                # set card_number / pack_number / artifact_number on the Task
+                # entity — the MCPClientTool then fails with
+                #   "1 validation error … <field>  Field required"
+                # and this block ensures the retry has the missing attribute.
+                retry_snapshot = accumulated_snapshot
+                if "Field required" in error_msg:
+                    retry_snapshot = self._inject_missing_mcp_params(
+                        accumulated_snapshot, error_msg
+                    )
+
                 # Always build a seeded AST so the retry receives the full
                 # accumulated entity context (including 'saved_to' written by a
                 # previously-succeeded AICodeGenTool, URL content for analysis
@@ -989,9 +1005,7 @@ class ROFSession:
                 # context and is the primary cause of LLMPlayerTool not finding
                 # the generated script on retry.
                 try:
-                    single_ast = self._build_seeded_ast(
-                        goal_expr, accumulated_snapshot, _url_contents
-                    )
+                    single_ast = self._build_seeded_ast(goal_expr, retry_snapshot, _url_contents)
                 except Exception as exc:
                     warn(f"  ↳ Seeded AST build failed ({exc}), falling back to plain retry")
                     try:
@@ -1060,8 +1074,101 @@ class ROFSession:
             error=result.error,
         )
 
-    @staticmethod
-    def _deep_merge_snapshots(base: dict, overlay: dict) -> dict:
+    def _inject_missing_mcp_params(self, snapshot: dict, error_msg: str) -> dict:
+        """
+        Parse a Pydantic "Field required" error message to find missing
+        parameter names and inject default values into the Task entity of
+        *snapshot* (or create a minimal Task entity if none exists).
+
+        Returns a shallow-copied snapshot with the injected attributes so
+        the original *accumulated_snapshot* is never mutated.
+
+        Examples of error messages handled::
+
+            1 validation error for select_cardArguments
+            card_number
+              Field required [type=missing, …]
+
+            1 validation error for buy_packArguments
+            pack_number
+              Field required [type=missing, …]
+
+        For integer parameters the default injected value is ``1``.
+        For string parameters the default is ``"value"``.
+        The parameter type is inferred from the MCP tool's inputSchema when
+        an eager-connected MCPClientTool is available; otherwise ``integer``
+        is assumed (all current game index parameters are integers).
+        """
+        import copy
+        import re as _re
+
+        # Extract field names from error lines that precede "Field required".
+        # Pydantic v2 formats errors as:
+        #   <field_name>\n  Field required [type=missing, …]
+        missing_fields: list[str] = _re.findall(
+            r"^(\w+)\s*\n\s*Field required",
+            error_msg,
+            _re.MULTILINE,
+        )
+        if not missing_fields:
+            # Fallback: grab bare identifiers on lines immediately before
+            # "Field required" using a lookahead variant.
+            missing_fields = _re.findall(
+                r"(\w+)\s+Field required",
+                error_msg,
+            )
+        if not missing_fields:
+            return snapshot
+
+        # Build a type map from connected MCP tools' inputSchema so we can
+        # inject the right type (int vs str).
+        param_types: dict[str, str] = {}
+        for tool_meta in self._mcp_tool_meta:
+            for tool_def in tool_meta[3]:  # discovered_tools list
+                schema: dict = getattr(tool_def, "inputSchema", None) or {}
+                for fname, fschema in schema.get("properties", {}).items():
+                    if fname not in param_types:
+                        param_types[fname] = fschema.get("type", "integer")
+
+        new_snapshot = copy.deepcopy(snapshot)
+        entities = new_snapshot.setdefault("entities", {})
+
+        # Find the first Task-like entity to attach params to, or create one.
+        task_key: str | None = None
+        for ent_name in entities:
+            if ent_name.lower() in ("task", "game", "runtask"):
+                task_key = ent_name
+                break
+        if task_key is None:
+            # Use the first non-routing entity, or create "Task".
+            for ent_name in entities:
+                if not ent_name.startswith("RoutingTrace") and not ent_name.startswith("MCP"):
+                    task_key = ent_name
+                    break
+        if task_key is None:
+            task_key = "Task"
+            entities[task_key] = {
+                "description": "Injected task entity",
+                "attributes": {},
+                "predicates": [],
+            }
+
+        task_attrs: dict = entities[task_key].setdefault("attributes", {})
+
+        for field in missing_fields:
+            if field in task_attrs:
+                continue  # already present — do not overwrite
+            ptype = param_types.get(field, "integer")
+            default_val: Any = 1 if ptype == "integer" else "value"
+            task_attrs[field] = default_val
+            warn(
+                f"  ↳ Auto-injecting missing param '{field}' = {default_val!r} "
+                f"(type={ptype}) for retry"
+            )
+
+        return new_snapshot
+
+    def _deep_merge_snapshots(self, base: dict, overlay: dict) -> dict:
         """
         Return a new snapshot dict that is *base* deep-merged with *overlay*.
 

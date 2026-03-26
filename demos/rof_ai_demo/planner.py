@@ -437,7 +437,39 @@ def _make_mcp_hint(mcp_tools: list) -> str:
                 if t_desc:
                     lines.append(f"  Desc:    {t_desc}")
                 lines.append(f'  Trigger: "{phrase}"')
-                lines.append(f"  Example: ensure {phrase}.")
+
+                # Emit required parameters so the planner knows to set them
+                # as entity attributes before calling the tool.
+                schema: dict = getattr(tool_def, "inputSchema", None) or {}
+                props: dict = schema.get("properties", {})
+                required: list = schema.get("required", [])
+                optional_params = [k for k in props if k not in required]
+                if required:
+                    req_str = ", ".join(f"{k} ({props[k].get('type', 'any')})" for k in required)
+                    lines.append(f"  Required params: {req_str}")
+                if optional_params:
+                    opt_str = ", ".join(
+                        f"{k} ({props[k].get('type', 'any')})" for k in optional_params
+                    )
+                    lines.append(f"  Optional params: {opt_str}")
+
+                # Build a realistic example that includes required attributes.
+                if required:
+                    example_lines = [f'define Task as "{t_name} call".']
+                    for k in required:
+                        ptype = props[k].get("type", "any")
+                        if ptype == "integer":
+                            example_lines.append(f"Task has {k} of 1.")
+                        elif ptype == "string":
+                            example_lines.append(f'Task has {k} of "value".')
+                        else:
+                            example_lines.append(f"Task has {k} of 1.")
+                    example_lines.append(f"ensure {phrase}.")
+                    lines.append(f"  Example:")
+                    for el in example_lines:
+                        lines.append(f"    {el}")
+                else:
+                    lines.append(f"  Example: ensure {phrase}.")
                 lines.append("")
         else:
             # No eager-connect — fall back to auto-discovered keywords.
@@ -453,7 +485,19 @@ def _make_mcp_hint(mcp_tools: list) -> str:
         "3. Pass parameters via entity attributes, not inside the ensure phrase.",
         "   WRONG: ensure read gitlab issue 42.",
         "   RIGHT: Task has issue_iid of 42.  ensure read issue.",
-        "4. When the user wants to save MCP output to a file, add a second goal:",
+        "4. When a tool has REQUIRED params (listed above), you MUST set every",
+        "   required param as an entity attribute BEFORE the ensure statement.",
+        "   The tool will FAIL with a validation error if any required param is",
+        "   missing from the entity snapshot.  Use the exact attribute name shown",
+        "   in 'Required params' above.",
+        "   WRONG: ensure select card.   ← card_number is required but not set",
+        "   RIGHT: Task has card_number of 1.  ensure select card.",
+        "5. For tools that select a numbered item from a list (select_card,",
+        "   buy_pack, choose_artifact, pick_card_draft, remove_card, pick_reward),",
+        "   always default to index 1 when no specific index is known yet.",
+        "   The game response will show what was selected so subsequent steps",
+        "   can use a better index if needed.",
+        "6. When the user wants to save MCP output to a file, add a second goal:",
         "   ensure save file.",
         '   and set  Result has file_path of "output.txt"  on an entity.',
         "",
@@ -499,6 +543,45 @@ def _make_mcp_hint(mcp_tools: list) -> str:
         "ensure read issue.",
         "ensure analyse context and write report.",
         "ensure save file.",
+        "",
+        "### Game example: selecting a card in battle (card_number is REQUIRED)",
+        '### Request: "select card 2 and play it"',
+        'define Task as "Select and play a card".',
+        "Task has card_number of 2.",
+        "ensure select card.",
+        "ensure play cards.",
+        "",
+        "### Game example: buying a shop pack (pack_number is REQUIRED)",
+        '### Request: "buy the first pack in the shop"',
+        'define Task as "Buy shop pack".',
+        "Task has pack_number of 1.",
+        "ensure buy pack.",
+        "",
+        "### Game example: choosing an artifact (artifact_number is REQUIRED)",
+        '### Request: "choose the first artifact"',
+        'define Task as "Choose artifact".',
+        "Task has artifact_number of 1.",
+        "ensure choose artifact.",
+        "",
+        "### Game example: full turn loop",
+        '### Request: "play a full turn of the game"',
+        'define Task as "Pattern RPG turn".',
+        'Task has deck of "standard".',
+        "Task has stake of 1.",
+        "Task has card_number of 1.",
+        "Task has pack_number of 1.",
+        "Task has artifact_number of 1.",
+        "ensure start game.",
+        "ensure get status.",
+        "ensure get hand.",
+        "ensure get enemies.",
+        "ensure select card.",
+        "ensure play cards.",
+        "ensure get shop.",
+        "ensure buy pack.",
+        "ensure choose artifact.",
+        "ensure end turn.",
+        "ensure get status.",
         "",
     ]
 
