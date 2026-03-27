@@ -1,6 +1,8 @@
 # How-to: ROF AI Agent — observe → decide → act → learn
 
-A practical guide to the four new agent abilities added to `rof_ai_demo`.
+A practical guide to the four new agent abilities added to `rof_ai_demo`,
+covering both the **interactive REPL** (the default mode) and **agent mode**
+(`--agent`).
 
 ---
 
@@ -12,6 +14,171 @@ A practical guide to the four new agent abilities added to `rof_ai_demo`.
 | **Episode memory** | `memory.py` | Every run is scored and recorded; quality history survives restarts |
 | **Proactive observation** | `observe.py` | Scheduled ticks check artefact health, evaluate a mission goal, write a heartbeat |
 | **Goal-driven loop** | `agent.py` | `while not done` — the loop exits when a mission is satisfied or a cycle limit is reached |
+
+---
+
+## Using the new features in interactive REPL mode
+
+The REPL is the default entry point — no flags required.  Three of the four
+new abilities are directly usable from it.
+
+```sh
+python demos/rof_ai_demo/rof_ai_demo.py --provider github_copilot
+```
+
+### REPL Recipe A — Ask the agent what it can do
+
+`knowledge/agent.md` is loaded into RAGTool automatically on every startup.
+You can retrieve it with a plain question at the `rof>` prompt:
+
+```
+rof> What can you do? Retrieve your agent skills from the knowledge base.
+```
+
+```
+rof> What tools are available to you?
+```
+
+```
+rof> How do you handle failures?
+```
+
+The agent routes the goal to RAGTool, retrieves the relevant section of
+`agent.md`, and synthesises a plain-language answer.  No `--knowledge-dir`
+flag is needed — the built-in directory is always loaded.
+
+Confirm it loaded with the `knowledge` command:
+
+```
+rof> knowledge
+── Knowledge base (RAGTool) ──────────────────────────────────────
+  Backend   : in_memory
+  Documents : 1
+```
+
+If `Documents : 0` is shown, `rof_tools` is not installed or the `knowledge/`
+folder is empty.
+
+---
+
+### REPL Recipe B — Read episode history from prior agent sessions
+
+The `episodes` command reads `<output-dir>/agent_episodes.jsonl` — the same
+file the agent loop writes to.  If you have run `--agent` before in the same
+`--output-dir`, the REPL will show that history:
+
+```
+rof> episodes
+── Episode memory (learn phase) ──────────────────────────────────
+  Total episodes  :  8
+  Succeeded       :  7
+  Failed          :  1
+  Avg quality     :  0.741
+  Last cycle      :  8
+  Episode file    :  ./rof_output/agent_episodes.jsonl
+
+  Recent episodes  (newest last)
+    #  4  q=0.847  ok    Search the web for AI news and save…
+    #  5  q=0.231  fail  Retrieve issue 999 in project that …
+    #  6  q=0.612  retry Generate a Python script that draws…
+    #  7  q=0.891  ok    Analyse the report and save to file…
+    #  8  q=0.755  ok    List all my open GitLab issues and …
+```
+
+> **Important:** the REPL does **not** write new episode records.  Episodes
+> are only recorded in `--agent` mode, where `session.evaluate_outcome()` is
+> called after every run.  In pure REPL mode the `episodes` command is
+> read-only — it shows history from prior agent sessions stored in the same
+> `--output-dir`.  The `agent_heartbeat.json` and `agent_state.json` files
+> also only exist when `--agent` has been used at least once.
+
+---
+
+### REPL Recipe C — Use quality scores to improve your prompts
+
+Even though the REPL does not write new episodes, you can use a short agent
+session to score a prompt, then continue iterating in the REPL.
+
+**The feedback loop:**
+
+**Step 1.** Run a prompt you want to test in the REPL:
+
+```
+rof> Search the web for the latest Python news
+```
+
+**Step 2.** Switch to a quick one-cycle agent run with the same prompt:
+
+```sh
+# Write the prompt to the watch file, then start a single-cycle agent
+echo Search the web for the latest Python news > rof_input.txt
+
+python demos/rof_ai_demo/rof_ai_demo.py \
+    --provider github_copilot \
+    --agent \
+    --agent-watch      rof_input.txt \
+    --agent-log        rof_output.txt \
+    --agent-max-cycles 1
+```
+
+**Step 3.** Read the score back in the REPL:
+
+```
+rof> episodes
+    #  1  q=0.412  retry  Search the web for the latest Pyth…
+```
+
+A `retry` score (0.40 – 0.69) usually means useful work was done but nothing
+was saved to disk.  The artefact signal (weight 15%) scores 0 when no file is
+written.
+
+**Step 4.** Refine the prompt — add an explicit save instruction:
+
+```
+rof> Search the web for the latest Python news and save a summary report to a file
+```
+
+Run a second single-cycle agent with the new phrasing.  The score should
+improve because `FileSaveTool` now fires and the artefact signal contributes.
+
+**Quality score signals — quick reference:**
+
+| Signal | Weight | How to improve it |
+|--------|--------|------------------|
+| Tool success rate | 40% | Check `✗ ERR` lines; fix missing params or bad prompt phrasing |
+| Snapshot delta | 35% | More `ensure` goals = more entity attributes written |
+| Artefact produced | 15% | Add "save … to a file" to any prompt that produces output |
+| Keyword coverage | 10% | Use specific nouns from your goal — they appear in snapshot values |
+
+**Score thresholds:**
+
+| Score | Label | What to do |
+|-------|-------|-----------|
+| ≥ 0.70 | `ok` | Good — no action needed |
+| 0.40 – 0.69 | `retry` | Add a save step or be more specific |
+| < 0.40 | `review` | Check the `error` field in `agent_episodes.jsonl` |
+
+---
+
+### REPL Recipe D — Inspect routing memory
+
+Routing memory accumulates across all sessions — REPL and agent alike — and
+is the one learning artifact that *does* update in pure REPL mode.  After a
+few runs you can inspect it:
+
+```
+rof> routing
+── Learned routing memory ────────────────────────────────────────
+  WebSearchTool    patterns: 3   avg ema: 0.821   reliability: 0.80
+  FileSaveTool     patterns: 2   avg ema: 0.941   reliability: 1.00
+  AICodeGenTool    patterns: 4   avg ema: 0.763   reliability: 0.60
+  Persistence file: ./rof_output/routing_memory.json
+```
+
+High `ema` means the orchestrator has learned to route those goal patterns
+to that tool with high confidence.  Low `reliability` (< 0.30) means fewer
+than 3 observations — the score is still a prior and will converge with more
+runs.
 
 ---
 
@@ -369,6 +536,11 @@ the snapshot — check `rof_run_*.json` for an empty `entities` block; (b) no
 file is being saved — add a "save the result to a file" clause to your prompt;
 (c) the tool is failing silently — look for `✗ ERR` lines in the console
 output or check `error` in the episode JSONL.
+
+**`episodes` shows 0 records in the REPL even after running prompts.**
+This is expected.  The REPL does not call `evaluate_outcome()`, so no episode
+records are written during interactive use.  Run at least one `--agent` session
+(even `--agent-max-cycles 1`) in the same `--output-dir` to seed the file.
 
 **`knowledge/agent.md` is not being retrieved.**
 The built-in knowledge directory is auto-loaded only when `RAGTool` is
