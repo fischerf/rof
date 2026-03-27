@@ -332,14 +332,27 @@ ROF is **not** a replacement for:
     core/                              Core framework
       ast/nodes.py                     StatementType, RLNode, WorkflowAST + all node types
       parser/rl_parser.py              RLParser, StatementParser ABC, all *Parser classes
+                                         RLParser.parse(variables=)      (new §3.3)
+                                         RLParser.parse_file(variables=) (new §3.3)
+                                         render_template()               (new §3.3)
+                                         TemplateError                   (new §3.3)
       graph/workflow_graph.py          GoalStatus, EntityState, GoalState, WorkflowGraph
       state/state_manager.py           StateAdapter, InMemoryStateAdapter, StateManager
+                                         StateAdapter.list()      (new §1.3 — abstract)
+                                         StateAdapter.list_meta() (new §1.3 — abstract)
       events/event_bus.py              Event, EventHandler, EventBus
       context/context_injector.py      ContextProvider, ContextInjector
+                                         ContextInjector(llm_provider=)  (new §1.4)
+                                         ContextInjector.set_llm_provider()
+                                         _estimate_tokens()  (new §1.4)
       conditions/condition_evaluator.py ConditionEvaluator
       interfaces/llm_provider.py       LLMRequest, LLMResponse, UsageInfo, LLMProvider ABC
+                                         LLMRequest.scrub_metadata()  (new §5.2)
+                                         SENSITIVE_METADATA_KEYS      (new §5.2)
       interfaces/tool_provider.py      ToolRequest, ToolResponse, ToolProvider ABC
       orchestrator/orchestrator.py     OrchestratorConfig, StepResult, RunResult, Orchestrator
+                                         ROF_GRAPH_UPDATE_SCHEMA_V1  (new §2.5)
+                                         _build_json_preamble()      (new §2.5)
 
     llm/                               LLM Gateway — providers, retry, renderer, tracking
       providers/openai_provider.py     OpenAIProvider, AzureOpenAIProvider
@@ -391,6 +404,8 @@ ROF is **not** a replacement for:
 
     pipeline/                          Pipeline Runner — multi-stage .rl workflow chaining
       stage.py                         PipelineStage, FanOutGroup
+                                         PipelineStage.variables  (new §3.3)
+                                         PipelineStage._resolved_variables(snapshot)
       config.py                        PipelineConfig, OnFailure, SnapshotMerge
       result.py                        StageResult, FanOutGroupResult, PipelineResult
       serializer.py                    SnapshotSerializer
@@ -455,19 +470,6 @@ ROF is **not** a replacement for:
       02_interact.rl                 Stage 2: LuaRunTool runs the script interactively
       03_evaluate.rl                 Stage 3: LLM evaluates the results
 ```
-
----
-
-> **Migration note (v0.1 → package layout)**
-> The implementation has moved from six flat monolith files into typed
-> sub-packages (`rof_framework.core`, `.llm`, `.tools`, `.pipeline`,
-> `.routing`, `.cli`, `.testing`). All existing imports of the form
-> `from rof_framework.rof_core import Orchestrator` continue to work
-> unchanged — each `rof_*.py` file is now a thin backward-compatibility
-> shim that re-exports every public name from the canonical sub-package.
-> Prefer the new paths (e.g. `from rof_framework.core import Orchestrator`)
-> for any new code; the shims are guaranteed to remain in place for the
-> full v0.x series.
 
 ---
 
@@ -625,6 +627,12 @@ ROF is **not** a replacement for:
   │   Tokenises .rl source. Delegates to registered StatementParsers.
   │   Extend: parser.register(MyStatementParser())
   │
+  │   Template variables (new §3.3):
+  │     ast = parser.parse(source, variables={"name": "Alice", "score": 750})
+  │     ast = parser.parse_file("workflow.rl", variables={"region": "EMEA"})
+  │     # {{name}} and {{dotted.path}} placeholders resolved before tokenisation.
+  │     # variables=None (default) → no substitution, fully backward-compatible.
+  │
   WorkflowAST
   │   Typed dataclass tree — Definition, Attribute, Predicate,
   │   Relation, Condition, Goal nodes (source_line preserved for errors).
@@ -639,6 +647,19 @@ ROF is **not** a replacement for:
   │   Only entities / conditions relevant to the current goal are included.
   │   Extend: injector.register_provider(RAGContextProvider())
   │
+  │   Context-window overflow guard (new §1.4):
+  │     injector = ContextInjector(llm_provider=my_llm)
+  │     # or: injector.set_llm_provider(my_llm)
+  │     # Warns (ResourceWarning + log) at >85% of context_limit.
+  │     # Trims least-relevant entities automatically at ≥100%.
+  │     # Uses tiktoken when installed, falls back to len(text)//4.
+  │     # No provider attached → guard disabled (backward-compatible default).
+  │
+  │   Entity-relevance fix (§1.6):
+  │     _find_relevant_entities() now uses iterative transitive closure via
+  │     conditions rather than the former outer-guard heuristic that could
+  │     inflate context with entirely unrelated entities.
+  │
   ConditionEvaluator
   │   Evaluates if/then conditions against the live graph.
   │   Supports: >, <, >=, <=, ==, !=, and, or, not operators.
@@ -652,13 +673,50 @@ ROF is **not** a replacement for:
   │   Saves / loads WorkflowGraph snapshots via a swappable adapter.
   │   mgr.swap_adapter(RedisStateAdapter())
   │
+  │   Run enumeration (new §1.3):
+  │     mgr.list()                  → list[str]   — all stored run IDs
+  │     mgr.list(prefix="pipe1-")  → list[str]   — filtered by prefix
+  │     mgr.list_meta()             → list[dict]  — id + saved_at + pipeline_id
+  │
+  │   Custom StateAdapter subclasses must now implement two new abstract
+  │   methods: list(prefix) and list_meta(prefix).  See the Migration Guide.
+  │
   OrchestratorConfig
-      Controls the Orchestrator execution loop.
-      output_mode: "auto" | "json" | "rl"
-        "auto"  → use "json" if provider.supports_json_output(), else "rl"
-        "json"  → enforce JSON schema output (structured, schema-validated)
-        "rl"    → ask for RelateLang text output (legacy, regex fallback)
-      system_preamble / system_preamble_json — swapped automatically by mode.
+  │   Controls the Orchestrator execution loop.
+  │   output_mode: "auto" | "json" | "rl"
+  │     "auto"  → use "json" if provider.supports_json_output(), else "rl"
+  │     "json"  → enforce JSON schema output (structured, schema-validated)
+  │     "rl"    → ask for RelateLang text output (legacy, regex fallback)
+  │   system_preamble / system_preamble_json — swapped automatically by mode.
+  │
+  │   system_preamble_json:
+  │     Now composed dynamically from ROF_GRAPH_UPDATE_SCHEMA_V1 via
+  │     __post_init__.  The schema lives in one place — update the constant
+  │     and every config instance picks it up automatically.
+  │
+  ROF_GRAPH_UPDATE_SCHEMA_V1
+  │   Versioned string constant for the graph-update JSON schema.
+  │   '{"attributes":[…],"predicates":[…],"prose":"…","reasoning":"…"}'
+  │   Use _build_json_preamble(schema=MY_SCHEMA) to compose a custom preamble.
+  │
+  render_template(source, variables)
+  │   Standalone template renderer.  Resolves {{name}} and {{a.b.c}} paths.
+  │   Raises TemplateError for missing keys.
+  │
+  TemplateError
+  │   Raised when a {{placeholder}} is missing from the variables mapping.
+  │   e.variable — the missing key name as a string.
+  │
+  SENSITIVE_METADATA_KEYS
+  │   frozenset of lowercase key names considered sensitive
+  │   ("api_key", "token", "secret", "password", "authorization", …).
+  │
+  LLMRequest.scrub_metadata()
+      Returns a copy of the request with sensitive metadata redacted.
+      Two rules: key-name match (SENSITIVE_METADATA_KEYS, case-insensitive)
+      and value-pattern match (sk-…, Bearer …, ghp_…, AIza…, etc.).
+      The Orchestrator calls this automatically before storing any request
+      in StepResult — RunResult.steps[i].llm_request.metadata is always clean.
 ```
 
 ---
@@ -844,6 +902,12 @@ ROF is **not** a replacement for:
                              <ReportEntity>.content so FileSaveTool finds it.
         reasoning   string — internal chain-of-thought scratchpad (audit only)
       Required: attributes, predicates.  prose and reasoning default to "".
+
+  ROF_GRAPH_UPDATE_SCHEMA_V1  (canonical versioned constant — rof_framework.core)
+      Identical schema, now also exported from rof_framework.core as a versioned
+      constant (§2.5).  Use this in any code that composes custom preambles so
+      schema evolution only requires changing one place.  The rof-llm copy in
+      providers/base.py is kept for internal provider use and remains unchanged.
 ```
 
 ---
@@ -1261,8 +1325,6 @@ ROF is **not** a replacement for:
   _inject_missing_mcp_params() in session.py at retry time to coerce
   wrong-typed entity attribute values (e.g. seed: int → str) before
   replaying the failed step.
-```
-
 ```
 
 ---

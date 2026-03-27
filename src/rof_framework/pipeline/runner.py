@@ -408,9 +408,14 @@ class Pipeline:
         )
         rl_source = _route_hint_re.sub("", rl_source)
 
-        # ── Parse ────────────────────────────────────────────────────
+        # ── Parse (with optional template variable substitution) ─────
+        # If the stage declares ``variables``, resolve them (including
+        # late-binding the live snapshot under the "snapshot" key when
+        # the stage asked for it) and pass them to RLParser.parse() so
+        # that {{placeholder}} tokens are expanded before tokenisation.
         parser = RLParser()
-        ast = parser.parse(rl_source)
+        stage_variables = stage._resolved_variables(snapshot=snapshot_in)
+        ast = parser.parse(rl_source, variables=stage_variables)
 
         # ── Orchestrate ──────────────────────────────────────────────
         orch_cfg = stage.orch_config or self._orch_config

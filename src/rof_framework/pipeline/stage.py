@@ -56,6 +56,26 @@ class PipelineStage:
     context_filter: Optional[Callable[[dict], dict]] = None
     inject_context: bool = True
     tags: list[str] = field(default_factory=list)
+    variables: Optional[dict[str, Any]] = None
+    """
+    Optional template-variable mapping for ``{{placeholder}}`` substitution.
+
+    When set, every ``{{name}}`` placeholder in the stage's .rl source is
+    replaced with the corresponding value from this dict before parsing.
+    Dotted paths (e.g. ``{{snapshot.Customer.name}}``) are resolved via
+    nested dict lookup, enabling late-binding from the accumulated snapshot.
+
+    Example::
+
+        PipelineStage(
+            name="classify",
+            rl_source="classify.rl",
+            variables={"customer_name": "Alice", "monthly_spend": 1500},
+        )
+
+    Pass ``None`` (default) to skip template substitution entirely, which
+    preserves full backward compatibility with existing stages.
+    """
 
     def _resolved_rl_source(self) -> str:
         """Return raw RL text, loading from file if rl_source looks like a path."""
@@ -63,6 +83,31 @@ class PipelineStage:
         if p.suffix.lower() == ".rl" and p.exists():
             return p.read_text(encoding="utf-8")
         return self.rl_source
+
+    def _resolved_variables(self, snapshot: dict | None = None) -> dict[str, Any] | None:
+        """
+        Return the effective variable mapping for template substitution.
+
+        When the stage's ``variables`` dict contains a ``"snapshot"`` key that
+        maps to the string sentinel ``"__snapshot__"``, it is replaced with the
+        live *snapshot* dict so that ``{{snapshot.Entity.attr}}`` references
+        resolve at execution time rather than at stage-definition time.
+
+        Returns ``None`` when the stage has no variables defined, which tells
+        the parser to skip template substitution entirely.
+
+        Args:
+            snapshot: The accumulated pipeline snapshot at the point of stage
+                      execution.  Pass ``None`` when no snapshot is available.
+        """
+        if self.variables is None:
+            return None
+
+        resolved = dict(self.variables)
+        # Late-bind snapshot when caller passed one and the stage asked for it.
+        if snapshot is not None and resolved.get("snapshot") == "__snapshot__":
+            resolved["snapshot"] = snapshot
+        return resolved
 
 
 @dataclass

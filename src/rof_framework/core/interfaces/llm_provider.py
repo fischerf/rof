@@ -2,16 +2,55 @@
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 __all__ = [
+    "SENSITIVE_METADATA_KEYS",
     "LLMRequest",
     "LLMResponse",
     "UsageInfo",
     "LLMProvider",
 ]
+
+# ---------------------------------------------------------------------------
+# Sensitive-field scrubbing (5.2)
+# ---------------------------------------------------------------------------
+# Keys in LLMRequest.metadata that are considered sensitive and must be
+# redacted before any serialisation (snapshots, --json CLI output, audit logs).
+#
+# The set deliberately uses lowercase names because metadata keys are
+# normalised to lowercase during scrubbing (see LLMRequest.scrub_metadata).
+# Add any project-specific key names that carry credentials here.
+SENSITIVE_METADATA_KEYS: frozenset[str] = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "api-key",
+        "key",
+        "token",
+        "access_token",
+        "auth_token",
+        "bearer_token",
+        "secret",
+        "secret_key",
+        "password",
+        "passwd",
+        "credential",
+        "credentials",
+        "authorization",
+        "x-api-key",
+        "x_api_key",
+    }
+)
+
+# Compiled pattern that matches anything that looks like a bearer / API key
+# (long alphanumeric+punctuation strings, e.g. sk-…, Bearer eyJ…, etc.).
+_SECRET_VALUE_RE = re.compile(
+    r"^(?:sk-|Bearer\s|ghp_|ghu_|glpat-|xoxb-|xoxp-|AIza)[A-Za-z0-9_.+/\-]{8,}$"
+)
 
 
 @dataclass
@@ -27,6 +66,47 @@ class LLMRequest:
     # "rl"   — expect RelateLang text; RetryManager re-prompts with RL hint on failure
     # "raw"  — free-form response (code, player input, prose); RetryManager skips
     #          parse-retry entirely — never emit "Response is not valid RL" warnings
+
+    def scrub_metadata(self) -> "LLMRequest":
+        """
+        Return a **copy** of this request with sensitive keys removed from
+        ``metadata``.
+
+        The original ``LLMRequest`` is never mutated.  Use the returned copy
+        whenever the request object is serialised (snapshots, ``--json`` CLI
+        output, audit logs, test fixtures):
+
+            safe_request = request.scrub_metadata()
+            dataclasses.asdict(safe_request)   # safe to write to disk
+
+        Scrubbing rules
+        ---------------
+        1. Any key whose **lowercase** name appears in
+           :data:`SENSITIVE_METADATA_KEYS` is replaced with ``"[REDACTED]"``.
+        2. Any key whose **value** matches :data:`_SECRET_VALUE_RE`
+           (common API-key / token prefixes) is also replaced with
+           ``"[REDACTED]"`` even when the key name is not on the sensitive
+           list.  This catches accidental injections like
+           ``metadata={"provider_token": "sk-abc123…"}``.
+
+        Returns
+        -------
+        A new :class:`LLMRequest` with a sanitised ``metadata`` dict.
+        All other fields are shared by reference (they are immutable values
+        or non-sensitive objects).
+        """
+        import dataclasses as _dc
+
+        scrubbed: dict[str, Any] = {}
+        for k, v in self.metadata.items():
+            if k.lower() in SENSITIVE_METADATA_KEYS:
+                scrubbed[k] = "[REDACTED]"
+            elif isinstance(v, str) and _SECRET_VALUE_RE.match(v):
+                scrubbed[k] = "[REDACTED]"
+            else:
+                scrubbed[k] = v
+
+        return _dc.replace(self, metadata=scrubbed)
 
 
 @dataclass
