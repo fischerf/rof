@@ -191,7 +191,7 @@ ROF is **not** a replacement for:
             ┌───────▼────────┐      ┌─────────▼──────────────────────┐
             │   RL Parser    │      │   rof_cli  (CLI entry point)    │
             │tokenise·validate│      │  lint · inspect · run · debug  │
-            │      · AST     │      │  generate · test               │
+            │      · AST     │      │  generate · test                │
             └───────┬────────┘      │  pipeline run · pipeline debug  │
                     │               └─────────────────────────────────┘
   ┌─────────────────▼───────────────────────────────────────────────────┐
@@ -205,16 +205,16 @@ ROF is **not** a replacement for:
   │    Tier 2 – session      within-run observations (SessionMemory)    │
   │    Tier 3 – historical   cross-run EMA learning (RoutingMemory)     │
   │                                                                     │
-  │  RoutingMemoryUpdater  ← EventBus-driven feedback loop             │
-  │  RoutingHintExtractor  ← declarative hints from .rl files          │
-  │  RoutingMemoryInspector ← human-readable confidence summaries      │
-  │  RoutingTraceWriter    ← writes RoutingTrace entities to snapshot  │
+  │  RoutingMemoryUpdater  ← EventBus-driven feedback loop              │
+  │  RoutingHintExtractor  ← declarative hints from .rl files           │
+  │  RoutingMemoryInspector ← human-readable confidence summaries       │
+  │  RoutingTraceWriter    ← writes RoutingTrace entities to snapshot   │
   └──────────────────────────────┬──────────────────────────────────────┘
                                  │
   ┌──────────────────────────────▼──────────────────────────────────────┐
   │              rof-pipeline  Pipeline Runner                          │
   │                                                                     │
-  │  PipelineBuilder → [stage₁] → [stage₂] → [fan-out] → [stage₄]      │
+  │  PipelineBuilder → [stage₁] → [stage₂] → [fan-out] → [stage₄]       │
   │                                    ↑                                │
   │            accumulated snapshot injected as RL context              │
   │                                                                     │
@@ -226,7 +226,7 @@ ROF is **not** a replacement for:
   │                                                                     │
   │  1. ROUTE ────► keyword/embedding match → ToolProvider             │
   │  2. INJECT ───► ContextInjector (minimal, no overflow)             │
-  │  3. EXECUTE ──► resolve output_mode ("auto"→json|rl) →            │
+  │  3. EXECUTE ──► resolve output_mode ("auto"→json|rl) →             │
   │                 ToolProvider.execute()  OR  LLM.complete()         │
   │  4. PARSE ────► dual strategy:                                     │
   │                   json mode → JSON schema enforced → parse JSON    │
@@ -256,7 +256,7 @@ ROF is **not** a replacement for:
   │  TrackingProvider   │       │  HumanInLoopTool stdin/cb/file    │   │
   │  UsageAccumulator   │       │  LuaRunTool      interactive Lua  │   │
   │  CostGuard          │       │  AICodeGenTool   LLM code gen     │   │
-  └─────────────────────┘       │  LLMPlayerTool   LLM-driven I/O  │   │
+  └─────────────────────┘       │  LLMPlayerTool   LLM-driven I/O   │   │
                                 │                                   │   │
                                 │  MCP Layer (optional)             │   │
                                 │  MCPClientTool  stdio/HTTP        │   │
@@ -266,13 +266,13 @@ ROF is **not** a replacement for:
                                 │  SDK: @rof_tool · LuaScriptTool   │   │
                                 │       JavaScriptTool              │   │
                                 └───────────────────────────────────┘   │
-                                                                         │
-  ┌──────────────────────────────────────────────────────────────────────▼──┐
+                                                                        │
+  ┌─────────────────────────────────────────────────────────────────────▼───┐
   │              rof-governance  Governance Layer                           │
   │                                                                         │
-  │  AuditSubscriber  ← wildcard EventBus subscriber ("*")                 │
+  │  AuditSubscriber  ← wildcard EventBus subscriber ("*")                  │
   │    filters events (include/exclude lists)                               │
-  │    builds AuditRecord  ← schema_version · audit_id · timestamp         │
+  │    builds AuditRecord  ← schema_version · audit_id · timestamp          │
   │                          event_name · actor · level · run_id            │
   │                          pipeline_id · payload (verbatim)               │
   │    enqueues to background writer thread  (non-blocking, never on the    │
@@ -282,7 +282,7 @@ ROF is **not** a replacement for:
   │    ├── NullSink        silent discard  (tests / dry-runs)               │
   │    ├── StdoutSink      JSON line per record  (container log shipping)   │
   │    └── JsonLinesSink   append-only JSONL on disk  (production default)  │
-  │          day / run / none rotation  ·  bounded queue  ·  drop counter  │
+  │          day / run / none rotation  ·  bounded queue  ·  drop counter   │
   │          natively ingestible by ELK · Splunk · Datadog · Vector         │
   │                                                                         │
   │  CLI:  rof run        --audit-log [--audit-dir DIR]                     │
