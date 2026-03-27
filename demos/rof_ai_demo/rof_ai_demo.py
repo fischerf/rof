@@ -161,6 +161,7 @@ _EXAMPLE_PROMPTS = [
     "Generate a JavaScript function to validate email addresses",
     "Write a Lua script that implements a simple calculator",
     "List the files in /tmp using the filesystem MCP server",  # MCP example
+    "What can you do? Retrieve your agent skills from the knowledge base",  # RAG / agent.md
 ]
 
 _HELP_COMMANDS = (
@@ -169,6 +170,7 @@ _HELP_COMMANDS = (
     ("routing", "Print learned routing memory summary"),
     ("save routing", "Flush routing memory to disk immediately"),
     ("knowledge", "Print RAGTool backend and document count"),
+    ("episodes", "Print episode memory summary (quality scores, cycle count)"),
     ("mcp", "List connected MCP servers and their trigger keywords"),
     ("tools", "List all registered tools and their trigger keywords"),
     ("audit", "Show audit log status (sink type, output path, drop count)"),
@@ -310,6 +312,44 @@ def _repl(session: ROFSession) -> None:
                 if excl:
                     print(f"  Exclude     : {dim(', '.join(excl))}")
                 print()
+            continue
+
+        if low == "episodes":
+            section("Episode memory (learn phase)")
+            try:
+                from memory import EpisodeMemory  # type: ignore
+
+                _ep_file = output_dir / "agent_episodes.jsonl"
+                _ep_mem = EpisodeMemory(path=_ep_file)
+                s = _ep_mem.summary()
+                print(f"  {dim('Total episodes  :')}  {bold(str(s['total']))}")
+                print(f"  {dim('Succeeded       :')}  {green(str(s['succeeded']))}")
+                print(f"  {dim('Failed          :')}  {red(str(s['failed']))}")
+                _avg_q_str = f"{s['avg_quality']:.3f}"
+                print(f"  {dim('Avg quality     :')}  {bold(_avg_q_str)}")
+                print(f"  {dim('Last cycle      :')}  {bold(str(s['last_cycle']))}")
+                print(f"  {dim('Episode file    :')}  {dim(s['path'])}")
+                recent = _ep_mem.recent(5)
+                if recent:
+                    print()
+                    print(f"  {bold('Recent episodes')}  {dim('(newest last)')}")
+                    for ep in recent:
+                        _q = ep.quality_score
+                        _qc = green if _q >= 0.70 else (yellow if _q >= 0.40 else red)
+                        _cycle_str = f"#{ep.cycle:>3}"
+                        _q_str = f"q={_q:.3f}"
+                        _cmd_str = ep.command[:60] + ("…" if len(ep.command) > 60 else "")
+                        print(
+                            f"    {dim(_cycle_str)}  "
+                            f"{_qc(_q_str)}"
+                            f"  {green('ok') if ep.success else red('fail')}"
+                            f"  {dim(_cmd_str)}"
+                        )
+            except ImportError:
+                print(f"  {dim('Episode memory not available (memory.py not found).')}")
+            except Exception as _ep_exc:
+                print(f"  {dim(f'Episode memory error: {_ep_exc}')}")
+            print()
             continue
 
         if low == "tools":
@@ -1038,13 +1078,15 @@ def _parse_args() -> argparse.Namespace:
     # Agent mode options                                                  #
     # ------------------------------------------------------------------ #
     agent = p.add_argument_group(
-        "Agent mode (file-watching)",
+        "Agent mode (observe → decide → act → learn)",
         (
-            "In agent mode the demo watches a plain-text file for commands written by "
-            "an external actor (e.g. a OneDrive-synced file edited from Teams / Notepad).  "
-            "Each new, previously-unseen command is fed directly into the ROF pipeline.  "
-            "After the command is consumed the watch file is cleared automatically.  "
-            "All console output is tee'd to a log file so a remote viewer can read results."
+            "In agent mode the demo runs a continuous four-phase loop.  "
+            "OBSERVE: polls a watch file for incoming commands and (optionally) runs "
+            "proactive environment ticks on --agent-observe-interval.  "
+            "DECIDE + ACT: each new command is planned (NL → RelateLang) and executed.  "
+            "LEARN: every run is scored and recorded as an episode in --agent-episode-file.  "
+            "The loop exits when Ctrl-C is pressed, --agent-max-cycles is reached, or "
+            "--agent-goal is satisfied with sufficient quality."
         ),
     )
     agent.add_argument(
@@ -1100,6 +1142,60 @@ def _parse_args() -> argparse.Namespace:
             "fenced code blocks.  The log is always written to exactly the path "
             "given by --agent-log, regardless of format.  "
             "Choices: text | markdown"
+        ),
+    )
+    agent.add_argument(
+        "--agent-goal",
+        dest="agent_goal",
+        metavar="GOAL",
+        default="",
+        help=(
+            "High-level natural-language mission goal for the agent.  "
+            "When set, the agent evaluates this goal against the episode memory "
+            "on every proactive observation tick.  Once a recent episode satisfies "
+            "the goal with a quality score ≥ 0.70 the agent declares the mission "
+            "complete, writes a final agent_state.json, and exits cleanly.  "
+            'Example: --agent-goal "Produce a report summarising the top 5 AI news stories"'
+        ),
+    )
+    agent.add_argument(
+        "--agent-max-cycles",
+        dest="agent_max_cycles",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Stop the agent loop after N completed act phases (i.e. N successful "
+            "session.run() calls).  0 (default) means run indefinitely until "
+            "Ctrl-C or --agent-goal is satisfied."
+        ),
+    )
+    agent.add_argument(
+        "--agent-observe-interval",
+        dest="agent_observe_interval",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help=(
+            "How often (in seconds) to run a proactive observation tick even when "
+            "the watch file is empty.  Each tick checks artefact health, evaluates "
+            "the mission goal, detects consecutive failures, and writes a heartbeat "
+            "file to <output-dir>/agent_heartbeat.json.  "
+            "0 (default) disables proactive observation so the agent only reacts "
+            "to watch-file writes."
+        ),
+    )
+    agent.add_argument(
+        "--agent-episode-file",
+        dest="agent_episode_file",
+        metavar="PATH",
+        default="",
+        help=(
+            "Path to the JSONL file where episode records are appended after every "
+            "run.  Each line is a JSON object with: cycle, run_id, command, success, "
+            "quality_score, recommendation, tools_used, snapshot_delta, artefact_paths, "
+            "plan_ms, exec_ms, error.  "
+            "Defaults to <output-dir>/agent_episodes.jsonl."
         ),
     )
 
@@ -1196,6 +1292,26 @@ def main() -> None:
     knowledge_dir_str: str = getattr(args, "knowledge_dir", "").strip()
     knowledge_dir: Optional[Path] = Path(knowledge_dir_str) if knowledge_dir_str else None
 
+    # Auto-seed the built-in knowledge/ directory (contains agent.md) when
+    # the caller has not supplied an explicit --knowledge-dir.  This ensures
+    # the agent's skills manifest is always available to RAGTool without
+    # requiring the user to pass an extra flag.
+    _builtin_knowledge = _DEMO_DIR / "knowledge"
+    if knowledge_dir is None and _builtin_knowledge.is_dir():
+        # Only activate when the directory is non-empty so we don't register
+        # a knowledge hint that points at an empty folder.
+        _has_docs = any(
+            f.suffix.lower() in {".txt", ".md", ".rst", ".html", ".json", ".csv"}
+            for f in _builtin_knowledge.rglob("*")
+            if f.is_file()
+        )
+        if _has_docs:
+            knowledge_dir = _builtin_knowledge
+            info(
+                f"Knowledge dir : {bold(cyan(str(knowledge_dir)))}  "
+                f"{dim('(built-in agent.md — override with --knowledge-dir)')}"
+            )
+
     # ── MCP server configs ───────────────────────────────────────────────
     mcp_server_configs: list = _build_mcp_configs(args)
     mcp_eager_connect: bool = getattr(args, "mcp_eager", False)
@@ -1278,6 +1394,10 @@ def main() -> None:
     _agent_log_path: Optional[Path] = None
     _agent_poll: float = 2.0
     _agent_log_format: str = "text"
+    _agent_goal: str = ""
+    _agent_max_cycles: int = 0
+    _agent_observe_interval: float = 0.0
+    _agent_episode_file: Optional[Path] = None
     if _agent_mode:
         _agent_watch_str: str = getattr(args, "agent_watch", "").strip()
         _agent_watch_path = Path(_agent_watch_str) if _agent_watch_str else None
@@ -1291,12 +1411,28 @@ def main() -> None:
         )
         _agent_poll = max(0.1, float(getattr(args, "agent_poll", 2.0)))
         _agent_log_format = getattr(args, "agent_log_format", "text").strip().lower()
+        _agent_goal = getattr(args, "agent_goal", "").strip()
+        _agent_max_cycles = max(0, int(getattr(args, "agent_max_cycles", 0) or 0))
+        _agent_observe_interval = max(
+            0.0, float(getattr(args, "agent_observe_interval", 0.0) or 0.0)
+        )
+        _agent_ep_str: str = getattr(args, "agent_episode_file", "").strip()
+        _agent_episode_file = (
+            Path(_agent_ep_str) if _agent_ep_str else output_dir / "agent_episodes.jsonl"
+        )
 
         info(f"Agent mode    : {bold(cyan('active'))}")
         info(f"  watch file  : {dim(str(_agent_watch_path))}")
         info(f"  log  file   : {dim(str(_agent_log_path))}")
         info(f"  poll        : {dim(str(_agent_poll) + ' s')}")
         info(f"  log format  : {dim(_agent_log_format)}")
+        if _agent_goal:
+            info(f"  mission     : {dim(_agent_goal[:80])}")
+        if _agent_max_cycles:
+            info(f"  max cycles  : {dim(str(_agent_max_cycles))}")
+        if _agent_observe_interval > 0:
+            info(f"  observe     : {dim(str(_agent_observe_interval) + ' s')}")
+        info(f"  episodes    : {dim(str(_agent_episode_file))}")
 
     # ── Run ──────────────────────────────────────────────────────────────
     if _agent_mode and _agent_watch_path is not None and _agent_log_path is not None:
@@ -1306,6 +1442,11 @@ def main() -> None:
             log_file=_agent_log_path,
             poll_interval=_agent_poll,
             log_format=_agent_log_format,
+            episode_file=_agent_episode_file,
+            output_dir=output_dir,
+            mission_goal=_agent_goal,
+            max_cycles=_agent_max_cycles,
+            observe_interval=_agent_observe_interval,
         )
     elif args.one_shot:
         try:

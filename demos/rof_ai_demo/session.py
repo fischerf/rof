@@ -272,6 +272,10 @@ class ROFSession:
         immediately during __init__.  Surfaces misconfigurations early.
     """
 
+    # Holds the snapshot from the most recently completed run.
+    # Initialised here so the property is always defined even before run().
+    _last_snapshot: dict = {}
+
     def __init__(
         self,
         llm: Any,
@@ -642,12 +646,121 @@ class ROFSession:
         self.close_audit()
 
     # ======================================================================
+    # Current snapshot (used by the agent loop for pre/post delta scoring)
+    # ======================================================================
+
+    @property
+    def current_snapshot(self) -> dict:
+        """
+        Return a shallow copy of the last RunResult snapshot, or an empty
+        dict when no run has been executed yet in this session.
+
+        Used by the agent loop to capture a ``pre_snapshot`` immediately
+        before calling :meth:`run`, so the episode memory can measure how
+        many new entity attributes were written during the run.
+        """
+        return dict(self._last_snapshot) if self._last_snapshot else {}
+
+    # ======================================================================
+    # Outcome evaluation – feeds the learn phase
+    # ======================================================================
+
+    def evaluate_outcome(
+        self,
+        command: str,
+        result: Any,
+        pre_snapshot: dict,
+        plan_ms: int,
+        exec_ms: int,
+        episode_memory: Any,  # EpisodeMemory – typed as Any to avoid circular import
+    ) -> Any:
+        """
+        Score the outcome of the most recent run and record it as an episode.
+
+        This is the **learn** phase entry point.  It:
+
+        1. Extracts step-level metrics from *result*.
+        2. Computes a composite quality score via
+           :func:`memory.score_outcome`.
+        3. Appends an :class:`~memory.EpisodeRecord` to *episode_memory*.
+        4. Logs a one-line summary (quality score + recommendation).
+        5. Returns the :class:`~memory.EpisodeRecord` for the caller to
+           inspect or persist.
+
+        Parameters
+        ----------
+        command        : str           – the raw user prompt / goal
+        result         : RunResult     – return value of :meth:`run`
+        pre_snapshot   : dict          – snapshot captured BEFORE :meth:`run`
+                                         (use :attr:`current_snapshot` for this)
+        plan_ms        : int           – planning stage duration in ms
+        exec_ms        : int           – execution stage duration in ms
+        episode_memory : EpisodeMemory – the live episode store to append to
+
+        Returns
+        -------
+        EpisodeRecord
+        """
+        # Collect the last error string from failed steps
+        error_msg = ""
+        if not result.success:
+            for s in reversed(result.steps or []):
+                msg = getattr(s, "error", "") or ""
+                if msg:
+                    error_msg = msg
+                    break
+            if not error_msg and result.error:
+                error_msg = str(result.error)
+
+        episode = episode_memory.record(
+            run_id=result.run_id,
+            command=command,
+            success=result.success,
+            steps=result.steps or [],
+            pre_snapshot=pre_snapshot,
+            post_snapshot=result.snapshot or {},
+            plan_ms=plan_ms,
+            exec_ms=exec_ms,
+            error=error_msg,
+        )
+
+        # One-line learn summary
+        from memory import QUALITY_THRESHOLD_HIGH, QUALITY_THRESHOLD_LOW  # type: ignore
+
+        q = episode.quality_score
+        if q >= QUALITY_THRESHOLD_HIGH:
+            q_colour = green
+        elif q >= QUALITY_THRESHOLD_LOW:
+            q_colour = yellow
+        else:
+            q_colour = red
+
+        step(
+            "LEARN",
+            f"cycle={bold(str(episode.cycle))}  "
+            f"quality={q_colour(f'{q:.3f}')}  "
+            f"rec={dim(episode.recommendation)}  "
+            f"delta={episode.snapshot_delta}attr  "
+            f"artefacts={len(episode.artefact_paths)}",
+        )
+
+        if episode.recommendation == "review":
+            warn(
+                f"Learn: low quality score ({q:.3f}) for "
+                f"{dim(command[:60])}  — consider reviewing the episode log."
+            )
+
+        return episode
+
+    # ======================================================================
     # Main run entry-point
     # ======================================================================
 
     def run(self, user_prompt: str) -> RunResult:
         """Execute *user_prompt* end-to-end and return the RunResult."""
         _STATS.total_runs += 1
+        # Reset last snapshot so current_snapshot reflects this run only
+        self._last_snapshot = {}
 
         # ── Stage 1: Plan ──────────────────────────────────────────────────
         section("Stage 1  |  Planning  (NL → RelateLang)")
@@ -776,6 +889,8 @@ class ROFSession:
             print(f"  {dim(f'{label:<10}')}  {value}")
 
         self._save_run_artifacts(result.run_id, rl_src, result)
+        # Persist snapshot for current_snapshot property (used by learn phase)
+        self._last_snapshot = dict(result.snapshot) if result.snapshot else {}
 
         # ── Result (entity state + routing decisions) ──────────────────────
         print(

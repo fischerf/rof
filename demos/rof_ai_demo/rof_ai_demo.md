@@ -1,14 +1,20 @@
-### Two-stage AI demo pipeline (rof\_ai\_demo)
+### ROF AI Demo — observe → decide → act → learn agent
 
 ---
 
-> **What's new:** three correctness fixes landed in `session.py` and
-> `mcp_server/server.py` that affect every game run.  See the
-> **Failure handling** section for the updated retry behaviour.
+> **What's new:** the demo now implements a full four-phase agent loop.
+> The `agent.py` file-watcher has been upgraded from a passive command
+> dispatcher to a goal-driven loop with a `done` predicate, proactive
+> environment observation, structured episode memory, and a learn phase
+> that scores every run and persists quality records across sessions.
+> Two new modules — `memory.py` and `observe.py` — and a built-in
+> `knowledge/agent.md` skills manifest complete the picture.
+> See the **Agent loop**, **Episode memory**, and **Proactive observation**
+> sections for details.
 
 ## Module structure
 
-The demo is split into nine focused modules that live side-by-side in
+The demo is split into focused modules that live side-by-side in
 `demos/rof_ai_demo/`.  `rof_ai_demo.py` is the thin entry-point; every
 other concern lives in its own file.
 
@@ -17,12 +23,15 @@ other concern lives in its own file.
 | `imports.py` | Bootstrap: `_try_import`, all `rof_framework` imports, `_HAS_TOOLS` / `_HAS_ROUTING` / `_HAS_MCP` / `_HAS_AUDIT` flags |
 | `telemetry.py` | `_SessionStats`, `_STATS` singleton, `_StatsTracker`, `_CommsLogger`, `_attach_debug_hooks` |
 | `console.py` | ANSI colour helpers, `_box` / `_print_box`, `banner` / `section` / `step` / `warn` / `err` / `info`, headline bar |
-| `planner.py` | `_PLANNER_SYSTEM_BASE`, `_build_planner_system`, `_make_knowledge_hint`, `_make_mcp_hint`, `Planner` |
-| `session.py` | `ROFSession` — tool wiring, MCP registration, run loop, retry/coercion logic, RAG, routing memory, artifacts |
+| `planner.py` | `_PLANNER_SYSTEM_BASE`, `_build_planner_system`, `_make_knowledge_hint`, `Planner` |
+| `session.py` | `ROFSession` — tool wiring, MCP registration, run loop, retry/coercion logic, RAG, routing memory, `current_snapshot`, `evaluate_outcome()`, artifacts |
 | `output_layout.py` | Tool-aware result renderer — `render_result()`, 11 named layouts, `_SKIP_ATTRS`, `_TRUNCATE_ATTRS` |
-| `agent.py` | File-watching agent mode — `run_agent()`, `_Capture` stream proxy, command deduplication, log file writer |
+| `memory.py` | `EpisodeRecord`, `EpisodeMemory`, `score_outcome()` — learn-phase episode store backed by JSONL |
+| `observe.py` | `ObservationResult`, `observe()`, `write_heartbeat()`, `save_agent_state()`, `load_agent_state()` — proactive observation layer |
+| `agent.py` | Full observe → decide → act → learn loop — `run_agent()`, `_Capture` proxy, deduplication, log writer |
 | `wizard.py` | `_setup_wizard`, `_print_config_box`, provider defaults, GitHub Copilot + generic provider paths |
-| `rof_ai_demo.py` | REPL, `_print_help`, `_parse_args` (all CLI flags including MCP + agent), `_build_mcp_configs`, `main()` |
+| `rof_ai_demo.py` | REPL, `_print_help`, `_parse_args` (all CLI flags), `_build_mcp_configs`, `main()` |
+| `knowledge/agent.md` | Built-in skills manifest — identity, tool catalogue, goal patterns, guardrails, episode signal definitions |
 
 ---
 
@@ -80,12 +89,13 @@ automatically selects the right layout based on the snapshot content:
 | `mcp` | `MCPResult.server` |
 | `generic` | *(fallback — any other shape)* |
 
-Two rendering modes are supported:
+Three rendering modes are supported:
 
 | Mode | Used by | Output |
 |------|---------|--------|
 | `"cli"` | interactive REPL, `--one-shot` | ANSI-coloured, truncated at 120 chars per value |
-| `"agent"` | agent log file | Plain text, no ANSI, no pipeline scaffolding, truncated at 300 chars |
+| `"agent"` | agent log file (text format) | Plain text, no ANSI, no pipeline scaffolding, truncated at 300 chars |
+| `"agent_md"` | agent log file (markdown format) | GitHub-Flavoured Markdown with headings, tables, and fenced code blocks |
 
 Two global attribute filter sets apply across all layouts and all tools:
 
@@ -94,19 +104,14 @@ Two global attribute filter sets apply across all layouts and all tools:
 | `_SKIP_ATTRS` | `rl_context`, `raw` | Completely hidden — internal pipeline plumbing |
 | `_TRUNCATE_ATTRS` | `content`, `body`, `rows`, `stdout`, `stderr`, `text`, `snippet`, `result` | Shown but capped at the mode's truncation limit |
 
-**Extending:** add a new `_Layout` entry to `_LAYOUTS` in `output_layout.py`
-before the `generic` fallback.  No other files need to change.
-
 ---
 
 ## Pipeline overview — with knowledge
 
 When `rof_tools` is installed every session has a live `RAGTool` registered
-alongside all other tools.  Any workflow goal that contains keywords like
-`retrieve`, `lookup`, `knowledge base`, or `rag query` is automatically routed
-to it.  By default the tool starts empty (`in_memory` backend).  The options
-below let you seed it with documents and keep the vector store on disk so
-knowledge accumulates across sessions.
+alongside all other tools.  The built-in `knowledge/agent.md` skills manifest
+is automatically loaded into RAGTool at startup — no `--knowledge-dir` flag is
+required.  Add `--knowledge-dir` to layer your own documents on top.
 
 When a tool fails the demo does not stop — it enters a configurable recovery
 loop (retries → dependency guard → LLM fallback) before reporting the final
@@ -117,7 +122,6 @@ outcome.  See the **Failure handling** section for details.
 ## Quick start
 
 ### Interactive REPL
-
 
 ```sh
 # Ollama (local)
@@ -143,25 +147,50 @@ python rof_ai_demo.py --provider github_copilot \
 
 ### Agent mode
 
-Agent mode watches a plain-text file for commands written by an external
-actor (e.g. a OneDrive-synced file edited from Teams or Notepad) and
-executes each new command automatically.
+Agent mode runs the full **observe → decide → act → learn** loop.  The agent
+watches a plain-text file for commands written by an external actor (e.g. a
+OneDrive-synced file edited from Teams or Notepad), executes each new command
+automatically, scores the outcome, and records it as an episode.
 
 ```sh
-# no Default watch file ("C:\Users\{UserName}\OneDrive\rof_input.txt")
-python rof_ai_demo.py --provider github_copilot --agent
-
-# Custom paths
+# Minimal — reactive only, run until Ctrl-C
 python rof_ai_demo.py --provider github_copilot \
     --agent \
-    --agent-watch "C:\Users\{UserName}\OneDrive\rof_input.txt" \
-    --agent-log   "C:\Users\{UserName}\OneDrive\rof_output.txt" \
-    --agent-poll  3
+    --agent-watch  "C:\Users\<you>\OneDrive\rof_input.txt" \
+    --agent-log    "C:\Users\<you>\OneDrive\rof_output.txt"
+
+# With a mission goal — agent stops when goal is satisfied (quality ≥ 0.70)
+python rof_ai_demo.py --provider github_copilot \
+    --agent \
+    --agent-watch  "C:\Users\<you>\OneDrive\rof_input.txt" \
+    --agent-log    "C:\Users\<you>\OneDrive\rof_output.txt" \
+    --agent-goal   "Produce a report summarising the top 5 AI news stories"
+
+# With proactive observation every 60 seconds
+python rof_ai_demo.py --provider github_copilot \
+    --agent \
+    --agent-watch            "C:\Users\<you>\OneDrive\rof_input.txt" \
+    --agent-log              "C:\Users\<you>\OneDrive\rof_output.txt" \
+    --agent-observe-interval 60
+
+# Hard cycle limit — stop after 10 completed runs
+python rof_ai_demo.py --provider github_copilot \
+    --agent \
+    --agent-watch      "C:\Users\<you>\OneDrive\rof_input.txt" \
+    --agent-log        "C:\Users\<you>\OneDrive\rof_output.txt" \
+    --agent-max-cycles 10
+
+# Markdown log (readable in VS Code / GitHub preview)
+python rof_ai_demo.py --provider github_copilot \
+    --agent \
+    --agent-watch      "C:\Users\<you>\OneDrive\rof_input.txt" \
+    --agent-log        "C:\Users\<you>\OneDrive\rof_output.md" \
+    --agent-log-format markdown
 ```
 
 Write any prompt into the watch file and save it.  The agent picks it up
 within `--agent-poll` seconds, executes the workflow, writes the result to
-the log file, then clears the watch file so you can send the next command.
+the log file, clears the watch file, then returns to the observe phase.
 
 The log file always contains only the **latest completed run** — it is fully
 overwritten on each execution so the remote viewer sees a clean, consistent
@@ -169,59 +198,310 @@ result rather than an ever-growing trace.
 
 ---
 
+## Agent loop
+
+The agent runs a continuous four-phase cycle until a termination condition
+is met.
+
+```
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │                    while not done                                   │
+  │                                                                     │
+  │  ① OBSERVE ──────────────────────────────────────────────────────  │
+  │    • Poll watch file (every --agent-poll seconds)                  │
+  │    • If observe_interval fires: run full proactive tick             │
+  │        – check artefact health                                      │
+  │        – evaluate mission goal against episode memory               │
+  │        – count consecutive failures for current goal pattern        │
+  │        – write agent_heartbeat.json                                 │
+  │    • If mission satisfied → done = True → break                    │
+  │                                                                     │
+  │  ② DECIDE ───────────────────────────────────────────────────────  │
+  │    • Capture pre_snapshot (for delta scoring in learn phase)        │
+  │    • Planner LLM: NL → RelateLang AST   (implicit in session.run)  │
+  │                                                                     │
+  │  ③ ACT ──────────────────────────────────────────────────────────  │
+  │    • session.run(command) → Orchestrator → tools → RunResult        │
+  │    • _execute_with_retry: param fix → retry → LLM fallback          │
+  │                                                                     │
+  │  ④ LEARN ────────────────────────────────────────────────────────  │
+  │    • session.evaluate_outcome() scores the result                   │
+  │        – tool success rate (40%)                                    │
+  │        – snapshot delta: new entity attributes written (35%)        │
+  │        – artefact produced: was a file saved? (15%)                 │
+  │        – keyword coverage: goal words in snapshot values (10%)      │
+  │    • EpisodeMemory.record() appends to agent_episodes.jsonl         │
+  │    • save_agent_state() writes agent_state.json                     │
+  │    • Log one-line quality summary:                                  │
+  │        ▸ LEARN  cycle=N  quality=0.847  rec=ok  delta=5attr  …     │
+  │                                                                     │
+  │  Termination conditions (any one exits the loop cleanly):          │
+  │    • Ctrl-C                                                         │
+  │    • --agent-max-cycles N  reached                                  │
+  │    • --agent-goal satisfied with quality ≥ 0.70                    │
+  └─────────────────────────────────────────────────────────────────────┘
+```
+
+### Termination conditions in detail
+
+| Condition | How it works |
+|-----------|-------------|
+| **Ctrl-C** | Caught by `except KeyboardInterrupt`. Routing memory, MCP sessions, and audit log are all flushed before exit. Final episode store summary is printed. |
+| **`--agent-max-cycles N`** | Checked immediately after the learn phase. When `completed_cycles >= N` the loop sets `done = True` and breaks. |
+| **`--agent-goal`** | Evaluated on every proactive observe tick. `EpisodeMemory.mission_satisfied()` returns `True` when a recent episode's normalised goal pattern matches the mission and its quality score is ≥ 0.70. |
+
+### Command deduplication
+
+Commands are deduplicated within a session.  If the external actor saves the
+same text to the watch file twice before the agent has a chance to clear it,
+the second occurrence is silently discarded with a warning.  This prevents
+the same prompt from being executed twice even if the watch file is not
+cleared quickly enough between writes.
+
+---
+
+## Episode memory
+
+Every completed act phase is recorded as a structured `EpisodeRecord` in
+`<output-dir>/agent_episodes.jsonl`.  Each line is a self-contained JSON
+object.
+
+### Episode record schema
+
+```json
+{
+  "cycle":           1,
+  "run_id":          "a1b2c3d4-...",
+  "timestamp":       1737123456.789,
+  "command":         "Search the web for AI news and save a report",
+  "goal_pattern":    "search the web for ai news and save a report",
+  "success":         true,
+  "step_count":      3,
+  "steps_succeeded": 3,
+  "steps_failed":    0,
+  "tools_used":      ["WebSearchTool", "LLMPlayerTool", "FileSaveTool"],
+  "snapshot_delta":  7,
+  "artefact_paths":  ["/abs/path/to/rof_output/report.txt"],
+  "plan_ms":         312,
+  "exec_ms":         4821,
+  "error":           "",
+  "quality_score":   0.847,
+  "recommendation":  "ok"
+}
+```
+
+### Quality score
+
+The composite quality score is a weighted sum of four signals:
+
+| Signal | Weight | Measurement |
+|--------|--------|-------------|
+| Tool success rate | 40% | `steps_succeeded / step_count` |
+| Snapshot delta | 35% | New entity attributes written, capped at 10 |
+| Artefact produced | 15% | Was any file path found in the snapshot? |
+| Keyword coverage | 10% | Fraction of important goal words found in snapshot values |
+
+| Score range | Label | Meaning |
+|-------------|-------|---------|
+| ≥ 0.70 | `ok` | High-quality outcome |
+| 0.40 – 0.69 | `retry` | Marginal — consider adjusting the prompt |
+| < 0.40 | `review` | Poor — human review recommended; warning logged |
+
+### Consecutive failure guard
+
+When three or more consecutive episodes for the same normalised goal pattern
+all fail, the observe phase emits a `WARN` message recommending human review.
+The threshold is not configurable from the CLI but can be overridden
+programmatically by passing `consecutive_failure_threshold` to `observe()`.
+
+### REPL `episodes` command
+
+Type `episodes` at the `rof>` prompt to inspect the episode store without
+leaving the interactive session:
+
+```
+── Episode memory (learn phase) ──────────────────────────────────────
+  Total episodes  :  24
+  Succeeded       :  21
+  Failed          :  3
+  Avg quality     :  0.731
+  Last cycle      :  24
+  Episode file    :  ./rof_output/agent_episodes.jsonl
+
+  Recent episodes  (newest last)
+    # 20  q=0.847  ok    Search the web for the latest AI news…
+    # 21  q=0.612  retry Generate a Python script that draws a…
+    # 22  q=0.231  fail  Retrieve issue 999 in project that doe…
+    # 23  q=0.891  ok    Analyse the retrieved report and save…
+    # 24  q=0.755  ok    List all my open GitLab issues and sav…
+```
+
+The `episodes` command is also available in REPL mode without running
+the agent — it reads whatever `agent_episodes.jsonl` exists in the current
+output directory.
+
+---
+
+## Proactive observation
+
+When `--agent-observe-interval SECONDS` is set, the agent runs a structured
+observation tick on that interval even when the watch file is empty.
+
+### What happens on each tick
+
+1. **Watch-file check** — if the file is non-empty, an external command is
+   waiting.  The tick short-circuits and returns immediately so the act phase
+   can consume the command on the next loop iteration.
+
+2. **Artefact health** — every file path recorded in the most recent episode's
+   `artefact_paths` is stat-checked.  Missing files are reported as warnings.
+
+3. **Mission-goal evaluation** — if `--agent-goal` was set, `EpisodeMemory.
+   mission_satisfied()` checks the 20 most recent episodes for a pattern that
+   matches the mission goal and has quality ≥ 0.70.  When the condition is met
+   `done = True` is set and the loop exits cleanly after the current cycle.
+
+4. **Consecutive-failure guard** — the normalised current goal pattern is
+   looked up in the episode store.  If three or more consecutive failures are
+   found a `WARN` is printed recommending human review.
+
+5. **Heartbeat** — `agent_heartbeat.json` is written atomically to
+   `<output-dir>/`.  External monitors can read this file to confirm the agent
+   is alive and check the latest cycle count and quality score.
+
+### Heartbeat file
+
+```json
+{
+  "ts":           "2025-01-15T14:32:07Z",
+  "cycle":        12,
+  "last_quality": 0.847,
+  "last_command": "Search the web for AI news and save a report",
+  "last_success": true,
+  "mission_goal": "Produce a report summarising the top 5 AI news stories",
+  "done":         false
+}
+```
+
+### Agent state file
+
+After every completed learn phase, `agent_state.json` is written to
+`<output-dir>/`.  When the agent process is restarted it loads this file and
+resumes from the correct cycle count without re-executing already-completed
+episodes.
+
+```json
+{
+  "ts":           "2025-01-15T14:32:08Z",
+  "mission_goal": "Produce a report summarising the top 5 AI news stories",
+  "cycle":        12,
+  "done":         false,
+  "last_command": "Search the web for AI news and save a report",
+  "last_quality": 0.847
+}
+```
+
+---
+
+## Skills manifest (`knowledge/agent.md`)
+
+The demo ships a built-in `knowledge/agent.md` file that is loaded into
+`RAGTool` automatically at startup — no `--knowledge-dir` flag is required.
+
+The manifest documents:
+
+- **Identity** — what the agent is and how the observe → decide → act → learn
+  loop works
+- **Tool catalogue** — all registered tools with `when to use` guidance
+- **Goal decomposition patterns** — ready-to-use `.rl` template patterns for
+  the five most common multi-step workflows
+- **Guardrails** — always / never rules (e.g. always use `FileSaveTool` when
+  the goal says "save"; never execute destructive operations without
+  `HumanInLoopTool`)
+- **Episode quality signals** — precise definitions of the four scoring signals
+- **Scheduled self-observation** — explanation of proactive tick behaviour
+- **Memory layout** — the contract for every file the agent writes
+
+The manifest is retrievable via any RAGTool-triggering prompt:
+
+```
+What can you do? Retrieve your agent skills from the knowledge base.
+What tools are available to you?
+How do you handle failures?
+What is your memory layout?
+```
+
+Override or supplement the built-in manifest by passing `--knowledge-dir`
+with a directory that contains your own `.md` / `.txt` documents — they are
+layered on top of the built-in knowledge.
+
+---
+
 ## Learned routing & persistence
 
-When `rof_routing` is installed the demo automatically upgrades from the
-plain `Orchestrator` to `ConfidentOrchestrator`. This adds three-tier
-composite confidence scoring on every routing decision:
+When `rof_routing` is installed the demo automatically uses
+`ConfidentOrchestrator` instead of the plain `Orchestrator`.  This gives the
+agent a three-tier routing confidence system:
 
-| Tier | Source | Lifetime |
-|------|--------|----------|
-| 1 | Static similarity (keyword / embedding match) | always |
-| 2 | Session memory — outcomes within this run | process |
-| 3 | Historical memory — EMA across all past runs | **persisted to disk** |
+| Tier | Source | Effect |
+|------|--------|--------|
+| Tier 1 — Static | Keyword matching defined in each tool's `trigger_keywords` | Always active; provides a baseline confidence score |
+| Tier 2 — Session | `SessionMemory` — within-run confidence from outcomes earlier in the same run | Resets between runs |
+| Tier 3 — Historical | `RoutingMemory` (EMA scores) — persisted across sessions | Loaded at startup; improves with every run |
 
-Tier 3 is what improves across sessions. After each run the demo writes the
-`RoutingMemory` to a JSON file so the next invocation starts with all
-previously learned confidence scores already loaded.
+The composite confidence from all three tiers is logged on every routing
+decision:
+
+```
+  ▸ ROUTE   WebSearchTool  composite=0.823  tier=historical
+  ▸ ROUTE   FileSaveTool   composite=0.941  tier=static
+```
 
 ### Default persistence path
+
+Routing memory is loaded from and saved to:
 
 ```
 <output-dir>/routing_memory.json
 ```
 
-The file is created automatically on first exit and merged on every
-subsequent startup. You never need to manage it manually.
+The file is written automatically on exit (REPL `quit`, Ctrl-C, or end of
+agent session).  It accumulates across sessions — every run makes routing
+decisions marginally better for future runs.
 
 ### Routing persistence CLI flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--routing-memory PATH` | `<output-dir>/routing_memory.json` | Explicit path for the JSON persistence file. Useful when sharing one memory file across multiple output directories or projects. |
-| `--no-persist-routing` | off | Disable disk persistence. Learned confidence still accumulates within the session but is discarded on exit. |
-| `--no-routing` | off | Disable learned routing entirely. Uses the plain static `ToolRouter` instead of `ConfidentOrchestrator`. Implies no persistence. |
+| `--routing-memory PATH` | `<output-dir>/routing_memory.json` | Custom path for the routing memory JSON file |
+| `--no-persist-routing` | off | Keep routing in-memory for this session; discard on exit |
+| `--no-routing` | off | Disable `rof_routing` entirely; use static keyword routing only |
 
 ### Sharing routing memory across projects
 
 ```sh
-# Both invocations read from and write to the same file
-python rof_ai_demo.py --provider ollama  --routing-memory ~/rof_routing.json
-python rof_ai_demo.py --provider openai  --routing-memory ~/rof_routing.json
+# Write to a shared path so all projects benefit from the same history
+python rof_ai_demo.py --provider ollama \
+    --routing-memory ~/rof_shared/routing_memory.json
+
+# Read-only session — accumulate in memory but do not overwrite the shared file
+python rof_ai_demo.py --provider ollama \
+    --routing-memory ~/rof_shared/routing_memory.json \
+    --no-persist-routing
 ```
 
 ### In-session routing events
 
-Every routing decision is printed live:
+The routing decisions are visible in the real-time console output:
 
 ```
-  ▸ ROUTE   AICodeGenTool  composite=0.821  tier=historical
-  ▸ ROUTE   LLMPlayerTool  composite=0.654  tier=session
-  ⚠ WARN    Uncertain routing: WebSearchTool  composite=0.412  (threshold=0.50)
+  ▸ ROUTE   WebSearchTool  composite=0.823  tier=historical
+  ⚠ WARN    Uncertain routing: FileSaveTool  composite=0.481  (threshold=0.60)
 ```
 
-Routing trace entities are also written into the run snapshot JSON so
-decisions are fully auditable after the fact.
+`composite` is the weighted blend of all active tiers.  When composite falls
+below the threshold the orchestrator logs a warning but still dispatches to
+the highest-scoring tool.
 
 ---
 
@@ -242,11 +522,7 @@ final_success = all( s.status == ACHIEVED
 ```
 
 This means a run where every goal was *eventually* achieved — even if some
-needed a retry — correctly reports `✔ SUCCESS`.  Before this fix, a
-recovered step left its original `FAILED` entry in the list and the whole
-run reported `✗ FAILED` even though nothing actually failed at the end.
-
----
+needed a retry — correctly reports `✔ SUCCESS`.
 
 ### The problem without recovery
 
@@ -277,15 +553,10 @@ for each FAILED step (original order):
   │        A required MCP parameter is completely absent from the entity
   │        snapshot.  A default value is injected (1 for integers,
   │        "value" for strings).  Type is read from the tool's inputSchema.
-  │        Example: pack_number, artifact_number, card_number.
   │
   │      Case B — Input should be a valid X:
-  │        A parameter IS present but has the wrong Python type — e.g. the
-  │        planner stored seed = 12345 (int) but the tool declares
-  │        seed: str | None.  The value is coerced in-place:
-  │          int(12345) → str("12345")
-  │        The coercion walks ALL entity attributes (not just the Task
-  │        entity) so the fix applies wherever the value was stored.
+  │        A parameter IS present but has the wrong Python type.
+  │        The value is coerced in-place (e.g. int → str).
   │
   ├─ 3. Retry loop (up to --step-retries times) ──────────────────────
   │      Re-run the single failed goal as a minimal one-goal workflow,
@@ -298,21 +569,18 @@ for each FAILED step (original order):
          the router returns None and the LLM handles it directly.
          Inject failed_goal + tool_error as a FallbackContext entity
          so the LLM sees what was attempted and why it failed.
-         The fallback .rl source is printed so nothing is hidden.
 ```
 
 ### Dependency guard in detail
 
 A later goal is considered dependent on a failed goal when the failed goal's
 expression contains a capitalised token (proxy entity name) that also appears
-in the later goal.  Examples that are correctly caught:
+in the later goal.  Examples:
 
 | Failed goal | Blocked later goal | Reason |
 |---|---|---|
 | `retrieve web_information about SearchResult` | `generate python code for writing SearchResult to csv` | `SearchResult` appears in both |
 | `retrieve information about KnowledgeDoc from knowledge base` | `synthesise the retrieved KnowledgeDoc entities` | `KnowledgeDoc` appears in both |
-
-Goals that share no entity names are **not** blocked and run independently.
 
 ### LLM fallback in detail
 
@@ -325,9 +593,6 @@ FallbackContext has tool_error of "Connection refused".
 ensure <goal expression with tool keywords stripped>.
 ```
 
-The `ContextInjector` includes `FallbackContext` attributes in the LLM prompt,
-so the model knows what was tried and why it failed before answering.
-
 ### Live output during recovery
 
 **Case A — missing parameter (Field required), auto-injected default:**
@@ -335,56 +600,27 @@ so the model knows what was tried and why it failed before answering.
 ```
   ⚠ WARN    2 step(s) failed — starting retry loop (max 1 retry/step, llm_fallback=True)
   ⚠ WARN    Retry 1/1: 'buy pack'
-  ⚠ WARN      ↳ Auto-injecting missing param 'pack_number' = 1 (type=integer) for retry
   ▸ GOAL    buy pack
   ▸ TOOL    MCPClientTool[game]  success=True
   ▸ RETRY   succeeded on attempt 1: 'buy pack'
 ```
 
-**Case B — wrong type (Input should be a valid string), auto-coerced:**
-
-```
-  ⚠ WARN    1 step(s) failed — starting retry loop (max 1 retry/step, llm_fallback=True)
-  ⚠ WARN    Retry 1/1: 'start game'
-  ⚠ WARN      ↳ Auto-coercing param 'seed' int(12345) → str('12345') for retry
-  ▸ GOAL    start game
-  ▸ TOOL    MCPClientTool[game]  success=True
-  ▸ RETRY   succeeded on attempt 1: 'start game'
-```
-
-**Case C — all retries exhausted, LLM fallback:**
+**Case B — all retries exhausted, LLM fallback:**
 
 ```
   ⚠ WARN    1 step(s) failed — starting retry loop (max 1 retry/step, llm_fallback=True)
   ⚠ WARN    Retry 1/1: 'retrieve web_information about latest AI news'
   ✗ ERR     Retry 1 failed: Connection refused
-  ⚠ WARN    All retries exhausted for 'retrieve web_information...' — trying LLM fallback
-  ▸ FALLBK  LLM fallback: 'retrieve web_information about ...'
-    define FallbackContext as "LLM fallback after tool failure".
-    FallbackContext has failed_goal of "...".
-    FallbackContext has tool_error of "Connection refused".
-    ensure  about latest AI news.
+  ⚠ WARN    All retries exhausted — trying LLM fallback
   ▸ FALLBK  LLM fallback succeeded for 'retrieve web_information about ...'
-```
-
-If a later goal was blocked by the dependency guard:
-
-```
-  ⚠ WARN    Skipping 'generate python code for writing SearchResult to csv'
-             — depends on failed goal 'retrieve web_information about SearchResult'
 ```
 
 ### CLI flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--step-retries N` | `1` | Max retries per failed step before falling back to the LLM. `0` disables retries entirely (goes straight to LLM fallback if enabled). |
-| `--no-llm-fallback` | off | Disable the LLM fallback. Failed steps remain failed after all retries are exhausted. |
-
-> **Note on param auto-fix:** missing-param injection and type-coercion both
-> happen *inside* the retry loop — they cost no extra LLM request.  A step
-> that fails only because of a missing or wrong-typed parameter is typically
-> fixed on retry attempt 1 without ever reaching the LLM fallback.
+| `--step-retries N` | `1` | Max retries per failed step before falling back to the LLM. `0` disables retries. |
+| `--no-llm-fallback` | off | Disable the LLM fallback. Failed steps remain failed after all retries. |
 
 ### Common configurations
 
@@ -392,7 +628,7 @@ If a later goal was blocked by the dependency guard:
 # Default — 1 retry then LLM fallback
 python rof_ai_demo.py --provider ollama
 
-# Aggressive retry, no LLM fallback (pure tool retry)
+# Aggressive retry, no LLM fallback
 python rof_ai_demo.py --provider ollama --step-retries 3 --no-llm-fallback
 
 # No retry, immediate LLM fallback on first failure
@@ -413,81 +649,63 @@ a first-class ROF tool.  No adapter code is required: the server's
 routing keywords, which are also injected into the planner's system prompt
 so the LLM knows how to route goals to the MCP server.
 
-Requires `pip install mcp>=1.0` (or `pip install "rof[mcp]"`).  The demo
-degrades gracefully when the package is absent — all other tools continue
-to work normally.
-
 ### How it works
 
-1. `--mcp-stdio` / `--mcp-http` flags build `MCPServerConfig` objects.
-2. `ROFSession.__init__` calls `_register_mcp_tools()`, which uses
-   `MCPToolFactory` to build one `MCPClientTool` per config.
-3. Each `MCPClientTool` is appended to `self._tools` alongside all
-   built-in tools.
-4. When `--mcp-eager` is set, `tools/list` is called at startup.
-   The discovered `Tool` objects (name + description + inputSchema) are
-   stored in `_mcp_tool_meta` and fed to `planner.py` via
-   `build_mcp_tool_schemas()` → `build_tool_catalogue()`, which appends
-   a per-server `## MCP Tools` section to the planner system prompt.
-   This gives the planner precise tool names, parameter names, and types
-   so it generates correct `ensure` goals and entity attributes.
-5. The same inputSchema data is used by `_inject_missing_mcp_params` at
-   retry time to determine the correct type (string vs integer) for any
-   missing or wrong-typed parameter.
-6. At REPL exit (or after a one-shot run) `session.close_mcp()` cleanly
-   terminates all subprocess / HTTP sessions.
+```
+  session.run(prompt)
+        │
+        ▼  Stage 1 — Planner
+  "… retrieve issue 447 …"
+        │  MCPClientTool[gitlab-issues] appears in tool catalogue
+        │  Planner emits: ensure retrieve issue 447 from gitlab-issues.
+        │
+        ▼  Stage 2 — Execution
+  MCPClientTool[gitlab-issues].run(goal_expr, snapshot)
+        │  Parses entity attributes → MCP tool arguments
+        │  Opens MCP session (lazy on first use, unless --mcp-eager)
+        │  Calls tools/call on the remote server
+        │  Injects response as MCPResult entity into snapshot
+        ▼
+  RunResult { snapshot.MCPResult.content = "..." }
+```
 
 ### Adding a stdio server (local subprocess)
 
 ```sh
-# Filesystem server via npx (auto-downloaded on first run)
+# Filesystem MCP server via npx
 python rof_ai_demo.py --provider github_copilot \
     --mcp-stdio filesystem \
         npx -y @modelcontextprotocol/server-filesystem /tmp
 
-# Multiple stdio servers
+# GitLab MCP server (Python subprocess)
+python rof_ai_demo.py --provider ollama \
+    --mcp-stdio gitlab-issues \
+        python D:/Github/rof/tools/gitlab_mcp/server.py
+
+# Multiple servers at once
 python rof_ai_demo.py --provider github_copilot \
     --mcp-stdio filesystem npx -y @modelcontextprotocol/server-filesystem /tmp \
-    --mcp-stdio git-server uvx mcp-server-git --repository /path/to/repo
+    --mcp-stdio gitlab-issues python D:/Github/rof/tools/gitlab_mcp/server.py
 ```
-
-The format for `--mcp-stdio` is:
-
-```
---mcp-stdio  NAME  CMD  [ARG ...]
-```
-
-`NAME` is a unique identifier used in log output and the planner prompt.
-`CMD` and the optional `ARG` tokens are passed verbatim to `subprocess.Popen`.
 
 ### Adding an HTTP server (remote)
 
 ```sh
-# Sentry MCP server with bearer auth
+# Sentry MCP (bearer token)
 python rof_ai_demo.py --provider github_copilot \
     --mcp-http sentry https://mcp.sentry.io/mcp \
     --mcp-token sntrys_...
 
-# Multiple HTTP servers (token is applied to all of them)
+# Internal server with corporate CA (skip TLS verification)
 python rof_ai_demo.py --provider github_copilot \
-    --mcp-http sentry  https://mcp.sentry.io/mcp \
-    --mcp-http metrics https://metrics.corp.internal/mcp \
-    --mcp-token corp-internal-token
-```
-
-The format for `--mcp-http` is:
-
-```
---mcp-http  NAME  URL
+    --mcp-http internal https://mcp.corp.internal/api \
+    --mcp-ssl-no-verify
 ```
 
 ### Eager connection
 
-By default MCP sessions open lazily on the first `execute()` call.  Pass
-`--mcp-eager` to connect all servers at startup and surface any
-misconfiguration errors before the first prompt:
-
 ```sh
+# Open all MCP sessions at startup — surface misconfigurations before first prompt
 python rof_ai_demo.py --provider github_copilot \
     --mcp-stdio filesystem npx -y @modelcontextprotocol/server-filesystem /tmp \
     --mcp-eager
@@ -495,11 +713,8 @@ python rof_ai_demo.py --provider github_copilot \
 
 ### Custom trigger keywords
 
-By default, trigger keywords are auto-discovered from the server's
-`tools/list` response.  Override them with `--mcp-keywords` (applied to
-all configured MCP servers):
-
 ```sh
+# Override auto-discovered keywords for all MCP servers
 python rof_ai_demo.py --provider github_copilot \
     --mcp-stdio filesystem npx -y @modelcontextprotocol/server-filesystem /tmp \
     --mcp-keywords "read file" "list directory" "write file"
@@ -508,67 +723,51 @@ python rof_ai_demo.py --provider github_copilot \
 ### Startup output
 
 ```
-  ℹ       MCP stdio server queued: filesystem  cmd='npx'  args=['-y', '...', '/tmp']
-  ℹ       MCP tool registered: MCPClientTool[filesystem]  (3 trigger keyword(s))
-  ℹ       MCP: 1 server(s) connected (lazy connect)
-  ℹ       MCP servers   : 1 configured
+  ℹ       MCP servers   : 2 configured  (eager connect)
+  ℹ       MCP stdio 'filesystem' connected — 6 tool(s) discovered
+  ℹ       MCP stdio 'gitlab-issues' connected — 12 tool(s) discovered
 ```
 
 ### Soft-failure detection
 
-MCP tool responses whose human-readable text begins with `⚠️` are treated as
-`success=False` by the server's `_run()` function, even though the underlying
-HTTP/subprocess call succeeded.  This covers game-level rejections such as:
-
-- `⚠️ Combat log is empty!` — `export_replay` before any battle
-- `⚠️ Stake N not unlocked` — `start_game` with a locked difficulty level
-- `⚠️ No run is active` — any in-run tool called from the menu screen
-- `⚠️ No artifacts to choose from!` — `choose_artifact` with no pending pack
-
-Because the MCP tool now returns `success=False` for these, the retry loop in
-`_execute_with_retry` treats them as genuine failures and attempts recovery —
-rather than silently treating a rejected game action as a successful outcome.
+When an MCP server returns a result that contains `isError: true` or a
+`content` array with an `error` type, `MCPClientTool` records the failure
+in the step result so the retry loop can attempt recovery.
 
 ### Run summary
 
-When MCP servers are active, the run summary includes an extra row:
+When MCP servers are connected the run summary shows the server count:
 
 ```
-  MCP         1 server(s) connected
+  MCP        2 server(s) connected
 ```
 
 ### Programmatic usage
 
-For full lifecycle control you can construct `MCPServerConfig` objects
-directly and pass them to `ROFSession`:
-
 ```python
 from rof_framework.tools.tools.mcp import MCPServerConfig
-from session import ROFSession
 
 configs = [
     MCPServerConfig.stdio(
         name="filesystem",
         command="npx",
         args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-        trigger_keywords=["read file", "list directory"],
     ),
     MCPServerConfig.http(
         name="sentry",
         url="https://mcp.sentry.io/mcp",
         auth_bearer="sntrys_...",
-        trigger_keywords=["sentry error", "exception tracking"],
     ),
 ]
 
-with ROFSession(llm=llm, output_dir=output_dir,
-                mcp_server_configs=configs,
-                mcp_eager_connect=True) as session:
-    session.run("List the files in /tmp")
+session = ROFSession(
+    llm=llm,
+    output_dir=Path("./rof_output"),
+    mcp_server_configs=configs,
+    mcp_eager_connect=True,
+)
+result, plan_ms, exec_ms = session.run("List my recent Sentry errors")
 ```
-
-The context-manager form (`with` statement) calls `session.close_mcp()`
-automatically on exit.
 
 ---
 
@@ -578,9 +777,11 @@ automatically on exit.
 
 `RAGTool` sits in the tool registry from the moment the session starts.  When
 a workflow goal triggers it the tool performs a cosine similarity search over
-all previously ingested documents and injects the top-K results as
-`KnowledgeDoc` entities into the `WorkflowGraph` so downstream goals and the
-LLM can use them.
+all ingested documents and injects the top-K results as `KnowledgeDoc` entities
+into the `WorkflowGraph` so downstream goals and the LLM can use them.
+
+The built-in `knowledge/agent.md` skills manifest is loaded automatically.
+Pass `--knowledge-dir` to add domain documents on top.
 
 ### Backends
 
@@ -595,24 +796,22 @@ LLM can use them.
 |------|---------|-------------|
 | `--rag-backend in_memory\|chromadb` | `in_memory` | Vector store backend |
 | `--rag-persist-dir PATH` | `<output-dir>/chroma_store` | ChromaDB storage directory (only used with `--rag-backend chromadb`) |
-| `--knowledge-dir PATH` | — | Directory of documents to pre-load at startup. Extensions `.txt`, `.md`, `.rst`, `.html`, `.json`, `.csv` are scanned recursively. |
+| `--knowledge-dir PATH` | `knowledge/` (built-in) | Directory of documents to pre-load at startup. Extensions `.txt`, `.md`, `.rst`, `.html`, `.json`, `.csv` are scanned recursively. |
 
 ### Seeding the knowledge base
 
 ```sh
-# In-memory — documents loaded fresh every run (good for testing)
+# In-memory — built-in agent.md loaded automatically, your docs layered on top
 python rof_ai_demo.py --provider ollama \
     --knowledge-dir ./my_docs
 
-# ChromaDB — documents stored on disk, survive between sessions
-# Only pass --knowledge-dir the FIRST time to seed the store;
-# subsequent runs load the embeddings from disk automatically.
+# ChromaDB — persistent store, seed once and reuse across sessions
 python rof_ai_demo.py --provider ollama \
     --rag-backend chromadb \
     --rag-persist-dir ./knowledge_store \
     --knowledge-dir ./my_docs
 
-# Later runs — knowledge already in ChromaDB, no need for --knowledge-dir
+# Later runs — knowledge already in ChromaDB
 python rof_ai_demo.py --provider ollama \
     --rag-backend chromadb \
     --rag-persist-dir ./knowledge_store
@@ -638,36 +837,28 @@ python rof_ai_demo.py --provider openai \
 | Extension | Notes |
 |-----------|-------|
 | `.txt` | Plain text |
-| `.md` | Markdown |
+| `.md` | Markdown (including `knowledge/agent.md`) |
 | `.rst` | reStructuredText |
 | `.html` | HTML (raw text extracted) |
 | `.json` | JSON (ingested as raw text) |
 | `.csv` | CSV (ingested as raw text) |
 
-All files in the directory are scanned recursively.  Each file becomes one
-document entry with its relative path as the stable document ID, so
-re-indexing the same directory into ChromaDB is safe — existing entries are
-updated rather than duplicated.
-
 ### Triggering RAGTool from a prompt
 
-RAGTool is triggered automatically by goal keywords.  These prompts will
-route to it:
+RAGTool is triggered automatically by goal keywords:
 
 ```
 Retrieve information about authentication from the knowledge base
 Look up our API rate limits
-Search the knowledge base for error handling guidelines
+What can you do? Retrieve your agent skills from the knowledge base.
+How do you handle failures?
 ```
 
 ### Startup output
 
-When the session starts you will see a line confirming the active backend:
-
 ```
-  ℹ       RAG backend   : in_memory
-  ℹ       RAG backend   : chromadb  →  ./knowledge_store
-  ℹ       Knowledge loaded: 42 document(s) from ./my_docs  (backend=chromadb)
+  ℹ       Knowledge dir : demos/rof_ai_demo/knowledge  (built-in agent.md — override with --knowledge-dir)
+  ℹ       Knowledge loaded: 1 document(s) from demos/rof_ai_demo/knowledge  (backend=in_memory)
 ```
 
 ---
@@ -687,6 +878,7 @@ python rof_ai_demo.py --provider github_copilot
 | `routing` | Print learned routing memory summary and persistence path |
 | `save routing` | Flush routing memory to disk immediately (without exiting) |
 | `knowledge` | Print RAGTool backend, document count, and persist path |
+| `episodes` | Print episode memory summary — total, quality scores, cycle count, and 5 most recent records |
 | `mcp` | List all connected MCP servers and their trigger keywords |
 | `tools` | List every registered tool (built-in + MCP + generated) and its trigger keywords |
 | `audit` | Show audit log status: sink type, current file path, records written, dropped count, and active filters |
@@ -695,20 +887,13 @@ python rof_ai_demo.py --provider github_copilot
 | `quit` / `exit` | Exit — routing memory, MCP sessions, and the audit log are all cleaned up automatically |
 
 > **Auto-save:** routing memory is always saved automatically when you `quit`
-> the REPL or when a `--one-shot` run finishes (including on error).  The
-> `save routing` command is only needed if you want to checkpoint mid-session.
+> the REPL or when a `--one-shot` run finishes.  The `save routing` command
+> is only needed for mid-session checkpoints.
 
-> **MCP shutdown:** all MCP subprocess / HTTP sessions are closed cleanly on
-> exit whether you type `quit`, hit Ctrl-C, or use `--one-shot`.
-
-> **Audit shutdown:** the audit subscriber is always flushed and closed
-> automatically on exit (REPL `quit`, Ctrl-C, or `--one-shot`).  Any records
-> still in the write queue at that point are drained before the file is closed.
-> A warning is printed if any records were dropped due to a full queue.
-
-> **Knowledge persistence:** when `--rag-backend chromadb` is used, ChromaDB
-> manages its own disk writes — there is no separate save step.  The `knowledge`
-> command shows the current document count as reported by ChromaDB.
+> **Episode memory in the REPL:** the `episodes` command reads
+> `<output-dir>/agent_episodes.jsonl` — the same file the agent loop writes
+> to.  Running a few REPL sessions and then switching to agent mode means the
+> agent already has historical episode data from the REPL runs.
 
 ---
 
@@ -718,24 +903,15 @@ python rof_ai_demo.py --provider github_copilot
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--agent` | off | Activate agent mode. Watches `--agent-watch` for commands instead of opening the interactive REPL. |
-| `--agent-watch PATH` | `C:\Users\{UserName}\OneDrive\rof_input.txt` | File polled for incoming commands. Created automatically if it does not exist. After a command is consumed the file is cleared so the next command can be written. |
-| `--agent-log PATH` | `<output-dir>/agent_output.txt` | File where the result of each run is written. Fully overwritten after every completed run — always contains only the latest result. |
-| `--agent-poll SECONDS` | `2.0` | How often the watch file is checked. Uses file modification time so CPU usage is negligible between writes. |
-
-The agent log is rendered in `"agent"` mode by `output_layout.render_result()`:
-plain text, no ANSI colour codes, no pipeline scaffolding (no Stage 1/2
-headers, no RL source, no step trace).  Each log entry starts with:
-
-```
-Command : <the command that was executed>
-Time    : YYYY-MM-DD HH:MM  |  SUCCESS  |  plan NNNms  exec NNNms
-------------------------------------------------------------
-<tool-specific result>
-```
-
-The watch file and log file can be the same OneDrive / SharePoint path that
-is shared with a remote colleague — they write commands, you see results.
+| `--agent` | off | Activate agent mode. Watches `--agent-watch` for commands and runs the full observe → decide → act → learn loop. |
+| `--agent-watch PATH` | — | File polled for incoming commands. Created automatically if it does not exist. Cleared immediately after a command is consumed. |
+| `--agent-log PATH` | `<output-dir>/agent_output.txt` | File where the rendered result of each run is written. Fully overwritten after every completed run. |
+| `--agent-poll SECONDS` | `2.0` | How often the watch file is checked for new commands. |
+| `--agent-log-format text\|markdown` | `text` | Output format for the agent log file. `text` — plain text. `markdown` — GitHub-Flavoured Markdown. |
+| `--agent-goal GOAL` | — | High-level natural-language mission goal. When set, the agent checks `EpisodeMemory.mission_satisfied()` on every proactive observe tick and stops the loop when the mission is accomplished with quality ≥ 0.70. |
+| `--agent-max-cycles N` | `0` (unlimited) | Stop the agent after N completed act phases. 0 means run until Ctrl-C or `--agent-goal` is satisfied. |
+| `--agent-observe-interval SECONDS` | `0.0` (disabled) | How often to run a proactive observation tick (artefact health, mission check, heartbeat). 0 disables proactive observation so the agent only reacts to watch-file writes. |
+| `--agent-episode-file PATH` | `<output-dir>/agent_episodes.jsonl` | Path to the JSONL file where episode records are appended after every run. |
 
 ### Core options
 
@@ -753,7 +929,7 @@ is shared with a remote colleague — they write commands, you see results.
 | `--no-persist-routing` | off | Keep routing in-memory only; discard on exit |
 | `--rag-backend in_memory\|chromadb` | `in_memory` | Vector store backend for RAGTool |
 | `--rag-persist-dir PATH` | `<output-dir>/chroma_store` | ChromaDB storage directory |
-| `--knowledge-dir PATH` | — | Directory of documents to pre-load into RAGTool |
+| `--knowledge-dir PATH` | `knowledge/` (built-in) | Directory of documents to pre-load into RAGTool |
 | `--step-retries N` | `1` | Max retries per failed step before LLM fallback |
 | `--no-llm-fallback` | off | Disable LLM fallback after exhausted retries |
 | `--log-comms` | off | Save every LLM request/response to `<output-dir>/comms_log/` as JSONL |
@@ -770,34 +946,31 @@ is shared with a remote colleague — they write commands, you see results.
 
 ### Audit log options (`--audit-*`)
 
-Requires `rof_framework.governance.audit` (bundled with `rof_framework`).
-When the package is not present a warning is printed and auditing is silently
-disabled — the rest of the demo continues normally.
-
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--audit-sink TYPE` | `jsonlines` | `jsonlines` — JSONL files on disk; `stdout` — one JSON line per event to stdout; `null` — disable auditing entirely |
-| `--audit-dir PATH` | `<output-dir>/audit_logs` | Directory for JSONL audit files (`jsonlines` sink only). Created automatically if it does not exist. |
-| `--audit-rotate MODE` | `run` | `run` — one file per process start; `day` — one file per UTC calendar day; `none` — single file named `audit.jsonl` |
-| `--audit-exclude EVENT …` | *(nothing excluded)* | Space-separated event names to suppress, e.g. `state.attribute_set state.predicate_added` |
-| `--audit-include EVENT …` | `*` (all events) | Whitelist of event names to record. When set, only the listed events are written; all others are ignored. |
+| `--audit-sink TYPE` | `jsonlines` | `jsonlines` — JSONL files on disk; `stdout` — one JSON line per event; `null` — disable entirely |
+| `--audit-dir PATH` | `<output-dir>/audit_logs` | Directory for JSONL audit files. Created automatically. |
+| `--audit-rotate MODE` | `run` | `run` — one file per process start; `day` — one file per UTC calendar day; `none` — single `audit.jsonl` |
+| `--audit-exclude EVENT …` | *(nothing)* | Event names to suppress, e.g. `state.attribute_set` |
+| `--audit-include EVENT …` | `*` (all) | Whitelist of event names to record |
 
 ### MCP options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--mcp-stdio NAME CMD [ARG ...]` | — | Add a local stdio MCP server. `NAME` is a unique identifier; `CMD` and optional `ARG` tokens are the subprocess command. May be repeated for multiple servers. |
-| `--mcp-http NAME URL` | — | Add a remote HTTP MCP server. `NAME` is a unique identifier; `URL` is the base endpoint. May be repeated for multiple servers. |
-| `--mcp-token TOKEN` | — | Bearer token applied to all HTTP MCP servers. Typically a Sentry DSN, GitHub PAT, or similar credential. |
-| `--mcp-eager` | off | Eagerly open all MCP sessions and run `tools/list` discovery at startup. Surfaces misconfiguration errors before the first prompt. |
-| `--mcp-keywords KW [KW ...]` | auto-discovered | Static trigger keywords forwarded to all MCP servers. When omitted, keywords are auto-discovered from each server's `tools/list` response. |
+| `--mcp-stdio NAME CMD [ARG ...]` | — | Add a local stdio MCP server. May be repeated. |
+| `--mcp-http NAME URL` | — | Add a remote HTTP MCP server. May be repeated. |
+| `--mcp-token TOKEN` | — | Bearer token applied to all HTTP MCP servers. |
+| `--mcp-eager` | off | Eagerly open all MCP sessions and run `tools/list` at startup. |
+| `--mcp-keywords KW [KW ...]` | auto-discovered | Static trigger keywords forwarded to all MCP servers. |
+| `--mcp-ssl-no-verify` | off | Disable SSL certificate verification for all MCP servers. Use only for trusted internal hosts. |
 
 ### GitHub Copilot options
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--github-token TOKEN` | env / cache | Supply `ghu_…` or `ghp_…` token directly; skips device-flow |
-| `--no-browser` | off | Print device-activation URL instead of opening the system browser |
+| `--no-browser` | off | Print device-activation URL instead of opening the browser |
 | `--invalidate-cache` | off | Delete cached OAuth token and force a fresh browser login |
 | `--copilot-cache PATH` | `~/.config/rof/copilot_oauth.json` | Custom path for the OAuth token cache file |
 | `--ghe-base-url URL` | — | GitHub Enterprise Server root URL |
@@ -808,9 +981,8 @@ disabled — the rest of the demo continues normally.
 
 ### Generic providers (`rof_providers` package)
 
-Generic providers are optional extensions that live outside `rof_framework` and
-are discovered automatically at runtime from `rof_providers.PROVIDER_REGISTRY`.
-Install the package to make them available:
+Generic providers are optional extensions discovered automatically from
+`rof_providers.PROVIDER_REGISTRY`.  Install the package to make them available:
 
 ```sh
 pip install rof-providers
@@ -818,9 +990,7 @@ pip install rof-providers
 
 Use `--provider <name>` where `<name>` is any key in the registry.  Run the demo
 without `--provider` to see a full interactive menu that includes all discovered
-generic providers.  Each generic provider declares its own API key constructor
-argument and environment variable — pass `--api-key KEY` or set the appropriate
-env var as shown in its documentation.
+generic providers.
 
 ---
 
@@ -828,15 +998,18 @@ env var as shown in its documentation.
 
 ### Agent mode artifacts
 
-When running in agent mode (`--agent`), one additional file is written per
-completed run:
+When running in agent mode (`--agent`), the following additional files are
+written to `<output-dir>` (or custom paths where flags allow):
 
 | File | Description |
 |------|-------------|
-| `agent_output.txt` (or `--agent-log PATH`) | Clean plain-text result of the most recent run.  Overwritten on each run — always reflects the latest command. |
+| `agent_output.txt` (or `--agent-log PATH`) | Clean plain-text (or Markdown) result of the most recent run. Fully overwritten on each run. |
+| `agent_episodes.jsonl` (or `--agent-episode-file PATH`) | Append-only JSONL episode log. One record per completed act phase. Persists across sessions. |
+| `agent_heartbeat.json` | Latest heartbeat — cycle count, last quality, last command, mission status. Overwritten atomically on every proactive observe tick. |
+| `agent_state.json` | Current agent state — mission goal, cycle count, done flag. Written after every learn phase. Loaded on restart to resume cycle count. |
 
 The standard per-run artifacts (`rof_plan_*.rl`, `rof_run_*.json`, etc.) are
-still written to `--output-dir` as usual.
+still written to `<output-dir>` as usual.
 
 ### Run artifacts
 
@@ -844,15 +1017,15 @@ Every run writes the following files into `--output-dir` (default `./rof_output`
 
 | File | Description |
 |------|-------------|
-| `rof_plan_<id8>.rl` | The generated RelateLang workflow (.rl source) — includes any auto-appended synthesis or fallback goals |
-| `rof_run_<id8>.json` | Run summary: `run_id`, `success`, `steps`, `snapshot` — steps include all original, retry, and fallback attempts; `success` reflects only the last outcome per goal |
+| `rof_plan_<id8>.rl` | The generated RelateLang workflow (.rl source) |
+| `rof_run_<id8>.json` | Run summary: `run_id`, `success`, `steps`, `snapshot` |
 | `rof_generated_<ts>.<ext>` | Source file saved by `AICodeGenTool` (`.py`, `.lua`, `.js`, …) |
 | `rof_transcript_<ts>.txt` | Turn-by-turn play transcript saved by `LLMPlayerTool` |
 | `rof_fallback_<ts>.<ext>` | Raw LLM output saved when the planner produced 0 goals |
 | `routing_memory.json` | Persisted learned routing confidence (Tier 3 EMA scores) |
 | `chroma_store/` | ChromaDB embedding database directory (only with `--rag-backend chromadb`) |
 | `comms_log/comms_<ts>.jsonl` | Full LLM request/response log (only with `--log-comms`) |
-| `audit_logs/audit_<ts>.jsonl` | Structured governance audit log — one JSON record per EventBus event (only when `--audit-sink jsonlines`, which is the default) |
+| `audit_logs/audit_<ts>.jsonl` | Structured governance audit log (only with `--audit-sink jsonlines`) |
 
 > **Reading `rof_run_*.json` after recovery:** the `steps` array contains
 > every attempt in order, including original failures.  To determine the true
@@ -928,9 +1101,6 @@ Each record in the JSONL file has this shape (schema_version=1):
 }
 ```
 
-`level` is inferred automatically from the event name: `ERROR` for `*.failed`
-events, `WARN` for uncertain routing, `INFO` for everything else.
-
 ### Quick start
 
 ```sh
@@ -940,17 +1110,11 @@ python rof_ai_demo.py --provider github_copilot
 # Write to stdout instead (container / CI friendly)
 python rof_ai_demo.py --provider github_copilot --audit-sink stdout
 
-# Rotate by calendar day instead of per-run (long-lived services)
-python rof_ai_demo.py --provider github_copilot --audit-rotate day
-
-# Custom directory
-python rof_ai_demo.py --provider github_copilot --audit-dir /var/log/rof/audit
-
 # Suppress noisy low-value events
 python rof_ai_demo.py --provider github_copilot \
     --audit-exclude state.attribute_set state.predicate_added
 
-# Record only the high-signal lifecycle events
+# Record only high-signal lifecycle events
 python rof_ai_demo.py --provider github_copilot \
     --audit-include run.started run.completed run.failed \
                     step.started step.completed step.failed \
@@ -962,29 +1126,11 @@ python rof_ai_demo.py --provider github_copilot --audit-sink null
 
 ### Startup output
 
-When auditing is active the demo prints a one-line summary in the startup
-banner:
-
 ```
   Audit log     : jsonlines  →  ./rof_output/audit_logs  rotate=run
 ```
 
-For a `stdout` sink:
-
-```
-  Audit log     : stdout
-```
-
-When disabled:
-
-```
-  Audit log     : disabled (null sink)
-```
-
 ### REPL `audit` command
-
-Type `audit` at the `rof>` prompt at any time to inspect the live state of
-the audit subscriber:
 
 ```
 ── Audit log ──────────────────────────────────────────────────────
@@ -994,9 +1140,6 @@ the audit subscriber:
 ```
 
 ### Actor inference
-
-The `actor` field in every record is derived automatically from the event name
-prefix so you can filter records by subsystem without parsing `event_name`:
 
 | Event prefix | `actor` value |
 |---|---|
@@ -1010,16 +1153,13 @@ prefix so you can filter records by subsystem without parsing `event_name`:
 
 ### Ingesting audit logs
 
-The JSONL format is natively supported by most log aggregators without any
-adapter configuration:
-
 | Tool | How to ingest |
 |------|---------------|
 | **Elasticsearch / ELK** | Filebeat `log` input type pointing at `audit_logs/*.jsonl` |
-| **Datadog** | Agent file tail with `autodiscovery`, or `datadog-agent` log config |
+| **Datadog** | Agent file tail with `autodiscovery` |
 | **Splunk** | Universal Forwarder `monitor` stanza on the `audit_logs/` directory |
 | **Fluentd / Fluent Bit** | `tail` input plugin with `format json` |
-| **AWS CloudWatch** | CloudWatch Logs Agent or unified agent file source |
+| **AWS CloudWatch** | CloudWatch Logs Agent file source |
 | **Vector** | `file` source with `codec: json` |
 
 ---
@@ -1040,86 +1180,54 @@ Each entry is a self-contained JSON object on one line:
 ```
 
 Error entries additionally include `error_type`, `status_code`, and `traceback`.
-Useful for replaying, auditing, or fine-tuning on real traffic.
 
 ---
 
 ## Web search & corporate SSL
 
-`WebSearchTool` uses [`ddgs`](https://pypi.org/project/ddgs/) (a meta-search
-engine that queries DuckDuckGo, Wikipedia, Brave, Google, Yahoo, and others).
-`ddgs` uses `httpx` internally, which validates TLS certificates against the
-`certifi` CA bundle — **not** the Windows system certificate store.
+`WebSearchTool` uses [`ddgs`](https://pypi.org/project/ddgs/) which validates
+TLS certificates against the `certifi` CA bundle — **not** the Windows system
+certificate store.
 
 On networks with a **corporate SSL-intercepting proxy** (Zscaler, Blue Coat,
-Netskope, etc.) every backend will raise an `SSL: CERTIFICATE_VERIFY_FAILED`
-error.  The errors are caught internally, all backends are exhausted silently,
-and `WebSearchTool` falls back to returning a single mock result:
-
-```
-WARNING  rof.tools: All backends failed; returning mock results.
-snippet='No real search backend available. Install ddgs.'
-```
-
-Even though `ddgs` is installed, the tool appears broken.  There are two fixes:
+Netskope, etc.) every backend will raise `SSL: CERTIFICATE_VERIFY_FAILED`.
 
 ### Option A — disable verification (quick, development only)
 
-`WebSearchTool` accepts a `verify` parameter that is forwarded directly to
-`DDGS(verify=…)`:
-
-```python
-# verify=False is the default in web_search.py — no code change needed
-WebSearchTool(verify=False)
+```sh
+pip install ddgs httpx
+python -c "
+import ssl, certifi, httpx
+# point certifi at an empty bundle to disable — development only
+"
+# Or set env var:
+set REQUESTS_CA_BUNDLE=
+set SSL_CERT_FILE=
 ```
 
 ### Option B — supply your corporate CA bundle (recommended for production)
 
-Export your corporate root certificate as a PEM file and point `verify` at it:
-
 ```sh
-# Export from Windows certificate store (PowerShell)
-$cert = Get-ChildItem Cert:\LocalMachine\Root | Where-Object { $_.Subject -match "YourCorp" }
-Export-Certificate -Cert $cert -FilePath corporate-ca.cer
-certutil -encode corporate-ca.cer corporate-ca.pem
+# Export your corporate CA certificate as PEM and point certifi at it
+set REQUESTS_CA_BUNDLE=C:\path\to\corporate_ca.pem
+set SSL_CERT_FILE=C:\path\to\corporate_ca.pem
+
+python rof_ai_demo.py --provider github_copilot \
+    --one-shot "Search the web for the latest AI news"
 ```
-
-Then pass the path:
-
-```python
-tool = WebSearchTool(verify="/path/to/corporate-ca.pem")
-```
-
-Or append it to the `certifi` bundle so all `httpx` calls trust it:
-
-```sh
-cat corporate-ca.pem >> "$(python -c 'import certifi; print(certifi.where())')"
-```
-
-After appending, the default `verify=True` will work and no code change is
-needed.
 
 ### Verifying the fix
 
 ```sh
 python -c "
-from rof_framework.tools.tools.web_search import WebSearchTool
-from rof_framework.core.interfaces.tool_provider import ToolRequest
-tool = WebSearchTool()
-resp = tool.execute(ToolRequest(name='WebSearchTool', goal='retrieve web_information about Python'))
-print('success:', resp.success)
-print('results:', resp.output.get('WebSearchResults', {}).get('result_count'))
-print('title  :', resp.output.get('SearchResult1', {}).get('title'))
+import httpx
+r = httpx.get('https://duckduckgo.com', follow_redirects=True)
+print(r.status_code)
 "
 ```
 
-Expected output (titles will vary):
-
-```
-success: True
-results: 5
-title  : Python (programming language) - Wikipedia
-```
+If this returns `200` the CA bundle is correctly configured and web search
+will work.
 
 ---
 
@@ -1142,6 +1250,11 @@ Create a small questionnaire for CLI in Lua, run it with the LLM player
 
 # Web search
 Search the web for the latest news about RelateLang
+
+# Knowledge base — agent skills
+What can you do? Retrieve your agent skills from the knowledge base.
+How do you handle failures?
+What tools are available to you?
 
 # MCP (requires --mcp-stdio or --mcp-http at startup)
 List the files in /tmp using the filesystem MCP server
@@ -1172,171 +1285,83 @@ python rof_ai_demo.py --provider ollama \
 #### MCP only — listing and reading
 
 ```
-# Show who you are logged in as
 Who am I on GitLab?
-
-# List all your open issues
 List all my open GitLab issues.
-
-# List issues filtered by label
 List my open issues labelled gDoing.
-
-# List issues filtered by label, limit result
 List my open issues labelled gTodo, show the 5 most recent.
-
-# List issues in a specific project
 List my open issues in project signatureservices/cryptomodule.
-
-# Read a single issue with its full comment thread
 Read issue 447 in project secdocs/secdocs-server-mvn.
-
-# Discover which projects you have access to
 Find all projects in the signatureservices namespace.
-
-# Find a project by keyword
 Find all projects matching "secdocs".
 ```
 
 #### MCP — read and save raw issue to file
 
 ```
-# Save a single issue (title + description + comments) to a markdown file
 Read issue 447 in project secdocs/secdocs-server-mvn and save it to a file.
-
-# Save the full list of open issues to a text file
 List all my open GitLab issues and save the list to open_issues.txt.
-
-# Save filtered issues to file
 List my open issues labelled gDoing and save them to doing_issues.md.
 ```
 
 #### MCP + analysis — read, analyse, save report
 
-These prompts fetch a live issue via MCP, then have the LLM write a
-structured analysis report, then save it to disk with `FileSaveTool`:
-
 ```
-# Analyse the single most recent open issue and write a report
 Analyse the last GitLab issue and write a report to file.
-
-# Full analysis of a specific issue
 Read issue 447 in project secdocs/secdocs-server-mvn, analyse it and write a report to file.
-
-# Analyse what needs to be done to close an issue
 Read issue 108 in project signatureservices/msos and explain what needs to be done to close it. Save the result to a markdown file.
-
-# Root-cause analysis
 Read issue 700 in project signatureservices/cryptomodule and write a root-cause analysis report to file.
-
-# Prioritisation report across all open issues
 List all my open issues, analyse their priority and urgency, and write a prioritisation report to open_issues_priority.md.
-
-# Sprint planning input
 List all my open gTodo issues, group them by project, estimate effort for each, and save a sprint planning summary to sprint_plan.md.
-
-# Status summary of all in-progress work
 List my open issues labelled gDoing and write a concise status report for a team standup. Save to standup_notes.md.
 ```
 
 #### MCP + web search — enrich issue with external context
 
-Combine `MCPClientTool` (live issue) with `WebSearchTool` (external docs
-or CVE data) and an LLM synthesis step:
-
 ```
-# Look up a referenced external spec while reading the issue
 Read issue 684 in project signatureservices/cryptomodule, search the web for information about the referenced DSS proxy issue DSS-3629, and write a combined analysis report to file.
-
-# Enrich with external standard / RFC
 Read issue 698 in project signatureservices/cryptomodule about post-quantum cryptography, search the web for the current BSI post-quantum recommendations, and write a gap analysis report to file.
-
-# Security advisory lookup
-Read issue 696 in project signatureservices/cryptomodule about DiagnosticData missing in VerifyCertificate, search the web for DSS DiagnosticData API documentation, and write a technical analysis to file.
 ```
 
 #### MCP + code generation — script from issue context
 
-Use the live issue as input data, then generate and run a Python script
-that processes it:
-
 ```
-# Generate a changelog entry from issue data
 List my closed issues and generate a Python script that formats them as a CHANGELOG.md entry. Run the script and save the output.
-
-# Issue metrics
 List all my open issues and generate a Python script that counts them by project and label, prints a summary table, and saves it as issues_summary.csv. Run the script.
-
-# Export issues to CSV
 List all my open issues and generate a Python script that writes them to a CSV file with columns: project, issue_id, title, labels, url. Run the script.
 ```
 
 #### MCP + knowledge base — name resolution and domain context
 
-These require `--knowledge-dir D:/Github/rof/tools/gitlab_mcp/knowledge`
-(or an already-seeded ChromaDB store).  RAGTool resolves project names and
-explains domain terminology without a live API call:
-
 ```
-# Resolve project name → ID, then list issues
 List my open issues in the KGS content service project.
-
-# Resolve by alias
 What are my open issues in the storage backend project?
-
-# Explain a label seen on issues
 What does the gDoing label mean?
-
-# Understand a domain term
 What is ILM in the context of our projects?
-
-# Domain term + live issues
 What is TR-ESOR and do I have any open issues related to it?
 ```
 
 #### MCP + knowledge base + analysis + save — full pipeline
 
-The richest pattern: RAGTool resolves context, MCPClientTool fetches live
-data, the LLM synthesises everything, FileSaveTool persists the result:
-
 ```
-# Read and domain-annotate a specific issue
 Read issue 447 in secdocs/secdocs-server-mvn, retrieve domain background about XAIP and SDO-Filter from the knowledge base, and write a technical analysis report to xaip_sdo_analysis.md.
-
-# Full issue triage with domain context
 Read issue 705 in signatureservices/cryptomodule, retrieve background about container image delivery from the knowledge base, analyse the scope and effort, and save an implementation plan to container_image_plan.md.
-
-# Cross-reference: live issue + knowledge base + web
 Read issue 684 in signatureservices/cryptomodule, retrieve what we know about DSS from the knowledge base, search the web for the DSS-3629 ticket, and write a complete impact analysis to dss_proxy_analysis.md.
-
-# Weekly team report: all gDoing issues with domain context
 List my open issues labelled gDoing, retrieve the gDoing workflow definition from the knowledge base, and write a structured weekly progress report to weekly_progress.md.
-
-# Onboarding document for a new team member
 Find all projects in the signatureservices namespace, retrieve the project overview and domain glossary from the knowledge base, and write a project onboarding guide to onboarding_guide.md.
-
-# Risk register from open bugs
 List my open issues labelled gBug, retrieve domain context about affected components from the knowledge base, and produce a risk register with severity and mitigation notes. Save to risk_register.md.
 ```
 
 #### MCP — issue lifecycle actions
 
 ```
-# Post a comment on an issue
 Post a comment on issue 447 in secdocs/secdocs-server-mvn saying the initial findings have been documented.
-
-# Re-label an issue
 Set the label on issue 5 in signatureservices/secdocs-kgs-content-service to gDoing.
-
-# Close an issue with a closing comment
-Close issue 683 in signatureservices/cryptomodule with a comment saying the log message has been improved and the fix is merged.
-
-# Reopen an issue
+Close issue 683 in signatureservices/cryptomodule with a comment saying the fix is merged.
 Reopen issue 683 in signatureservices/cryptomodule.
 ```
 
-> **Tip — one-shot mode:**  any of the above prompts can be run non-interactively
-> with `--one-shot "..."`.  The session exits automatically after the run
-> and saves the plan and run-summary JSON to `--output-dir`.
+> **Tip — one-shot mode:** any of the above prompts can be run non-interactively
+> with `--one-shot "..."`.
 
 ```sh
 python rof_ai_demo.py --provider ollama \
@@ -1355,9 +1380,6 @@ it.  Every code workflow therefore needs a second goal that executes the file:
 | Non-interactive (pure output) | `CodeRunnerTool` | `ensure run python code.` |
 | Interactive — LLM plays it | `LLMPlayerTool` | `ensure play game with llm player and record choices.` |
 | Interactive — human plays it | `LuaRunTool` | `ensure run lua script.` |
-
-The planner is instructed to always emit both goals automatically.  If you
-write prompts by hand, follow the same pattern:
 
 ```
 # Non-interactive
@@ -1389,8 +1411,6 @@ pip install httpx              # GitHub Copilot token exchange + Ollama raw HTTP
 
 # Optional tools
 pip install ddgs httpx         # enables WebSearchTool and APICallTool
-                               # note: corporate SSL proxies need extra setup —
-                               # see "Web search & corporate SSL" above
 pip install lupa               # Lua execution in-process (fallback: lua binary)
 
 # MCP tool integration
@@ -1400,13 +1420,10 @@ pip install "rof[mcp]"
 
 # Optional routing
 # rof_routing ships with rof_framework — no separate install needed
-# when rof_framework is installed from source
 
 # Optional providers
-pip install rof-providers      # additional generic providers (rof_providers.PROVIDER_REGISTRY)
+pip install rof-providers      # additional generic providers
 
 # Knowledge base (ChromaDB persistent backend)
-pip install chromadb sentence-transformers   # persistent vector store + real embeddings
-# sentence-transformers downloads a ~90 MB model on first run
-# Silence a pynvml FutureWarning with: pip install nvidia-ml-py
+pip install chromadb sentence-transformers
 ```
