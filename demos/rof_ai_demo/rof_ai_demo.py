@@ -134,6 +134,7 @@ from console import (  # noqa: E402
     section,
     warn,
     yellow,
+    red,
 )
 from imports import _HAS_AUDIT, _HAS_MCP  # noqa: E402
 
@@ -197,7 +198,7 @@ def _print_help() -> None:
 # ===========================================================================
 
 
-def _repl(session: ROFSession) -> None:
+def _repl(session: ROFSession, output_dir: output_dir) -> None:
     banner(
         "Interactive REPL",
         "type 'help' for commands  \u2502  'quit' to exit  \u2502  or enter any prompt",
@@ -319,9 +320,10 @@ def _repl(session: ROFSession) -> None:
             try:
                 from memory import EpisodeMemory  # type: ignore
 
-                _ep_file = output_dir / "agent_episodes.jsonl"
-                _ep_mem = EpisodeMemory(path=_ep_file)
-                s = _ep_mem.summary()
+                _episode_file = output_dir / "agent_episodes.jsonl"
+
+                episode_memory = EpisodeMemory(path=_episode_file)
+                s = episode_memory.summary()
                 print(f"  {dim('Total episodes  :')}  {bold(str(s['total']))}")
                 print(f"  {dim('Succeeded       :')}  {green(str(s['succeeded']))}")
                 print(f"  {dim('Failed          :')}  {red(str(s['failed']))}")
@@ -329,7 +331,7 @@ def _repl(session: ROFSession) -> None:
                 print(f"  {dim('Avg quality     :')}  {bold(_avg_q_str)}")
                 print(f"  {dim('Last cycle      :')}  {bold(str(s['last_cycle']))}")
                 print(f"  {dim('Episode file    :')}  {dim(s['path'])}")
-                recent = _ep_mem.recent(5)
+                recent = episode_memory.recent(5)
                 if recent:
                     print()
                     print(f"  {bold('Recent episodes')}  {dim('(newest last)')}")
@@ -1461,7 +1463,7 @@ def main() -> None:
             session.close_mcp()
             session.close_audit()
     else:
-        _repl(session)
+        _repl(session=session, output_dir=output_dir)
 
 
 if __name__ == "__main__":
