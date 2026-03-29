@@ -145,6 +145,7 @@ try:
 except ImportError:
     MCPServerConfig = None  # type: ignore[assignment,misc]
 from agent import run_agent  # noqa: E402
+from io_handler import FileIOHandler, IOHandler, SignalIOHandler  # noqa: E402
 from session import ROFSession  # noqa: E402
 from telemetry import _COMMS_DIR_NAME, _STATS  # noqa: E402
 from wizard import _setup_wizard  # noqa: E402
@@ -1083,8 +1084,8 @@ def _parse_args() -> argparse.Namespace:
         "Agent mode (observe → decide → act → learn)",
         (
             "In agent mode the demo runs a continuous four-phase loop.  "
-            "OBSERVE: polls a watch file for incoming commands and (optionally) runs "
-            "proactive environment ticks on --agent-observe-interval.  "
+            "OBSERVE: polls a watch file (default) or Signal messages for incoming commands, "
+            "and (optionally) runs proactive environment ticks on --agent-observe-interval.  "
             "DECIDE + ACT: each new command is planned (NL → RelateLang) and executed.  "
             "LEARN: every run is scored and recorded as an episode in --agent-episode-file.  "
             "The loop exits when Ctrl-C is pressed, --agent-max-cycles is reached, or "
@@ -1100,6 +1101,8 @@ def _parse_args() -> argparse.Namespace:
             "of opening the interactive REPL."
         ),
     )
+
+    # ── File-based I/O (default) ──────────────────────────────────────────
     agent.add_argument(
         "--agent-watch",
         dest="agent_watch",
@@ -1144,6 +1147,84 @@ def _parse_args() -> argparse.Namespace:
             "fenced code blocks.  The log is always written to exactly the path "
             "given by --agent-log, regardless of format.  "
             "Choices: text | markdown"
+        ),
+    )
+
+    # ── Signal-based I/O ─────────────────────────────────────────────────
+    agent.add_argument(
+        "--agent-signal",
+        action="store_true",
+        default=False,
+        dest="agent_signal",
+        help=(
+            "Use Signal messaging as the agent I/O channel instead of watch/log files.  "
+            "Incoming Signal messages are treated as commands; results are sent back "
+            "as Signal messages to --agent-signal-reply-to.  "
+            "Requires signal-cli REST API to be reachable at --agent-signal-url."
+        ),
+    )
+    agent.add_argument(
+        "--agent-signal-url",
+        dest="agent_signal_url",
+        metavar="URL",
+        default="",
+        help=(
+            "Base URL of the signal-cli REST API.  "
+            "Defaults to the SIGNAL_API_URL environment variable, "
+            "then http://localhost:8080."
+        ),
+    )
+    agent.add_argument(
+        "--agent-signal-number",
+        dest="agent_signal_number",
+        metavar="E164",
+        default="",
+        help=(
+            "E.164 phone number of the Signal account used by signal-cli "
+            "(e.g. +15551234567).  "
+            "Defaults to the SIGNAL_PHONE_NUMBER environment variable."
+        ),
+    )
+    agent.add_argument(
+        "--agent-signal-reply-to",
+        dest="agent_signal_reply_to",
+        metavar="E164[,E164…]",
+        default="",
+        help=(
+            "Comma-separated list of E.164 phone numbers (or base64 group IDs) "
+            "to send agent output to.  Required when --agent-signal is set."
+        ),
+    )
+    agent.add_argument(
+        "--agent-signal-allowed-senders",
+        dest="agent_signal_allowed_senders",
+        metavar="E164[,E164…]",
+        default="",
+        help=(
+            "Comma-separated whitelist of E.164 phone numbers whose Signal messages "
+            "are accepted as commands.  Messages from anyone else are silently ignored.  "
+            "Defaults to accepting messages from all senders."
+        ),
+    )
+    agent.add_argument(
+        "--agent-signal-poll",
+        dest="agent_signal_poll",
+        type=float,
+        default=5.0,
+        metavar="SECONDS",
+        help=(
+            "How often (in seconds) the agent polls the Signal REST API for new "
+            "messages.  Default: 5.0"
+        ),
+    )
+    agent.add_argument(
+        "--agent-signal-ssl-no-verify",
+        action="store_true",
+        default=False,
+        dest="agent_signal_ssl_no_verify",
+        help=(
+            "Disable TLS certificate verification for the signal-cli REST API.  "
+            "Use only for trusted internal instances with self-signed certificates."
         ),
     )
     agent.add_argument(
@@ -1390,29 +1471,15 @@ def main() -> None:
     elif not _HAS_AUDIT:
         info(f"Audit log     : {dim('unavailable (governance package not installed)')}")
 
-    # ── Show active agent configuration ──────────────────────────────────
+    # ── Build agent I/O handler ───────────────────────────────────────────
     _agent_mode: bool = getattr(args, "agent", False)
-    _agent_watch_path: Optional[Path] = None
-    _agent_log_path: Optional[Path] = None
-    _agent_poll: float = 2.0
-    _agent_log_format: str = "text"
+    _io_handler: Optional[IOHandler] = None
     _agent_goal: str = ""
     _agent_max_cycles: int = 0
     _agent_observe_interval: float = 0.0
     _agent_episode_file: Optional[Path] = None
-    if _agent_mode:
-        _agent_watch_str: str = getattr(args, "agent_watch", "").strip()
-        _agent_watch_path = Path(_agent_watch_str) if _agent_watch_str else None
-        if _agent_watch_path is None:
-            err("Agent mode requires --agent-watch <PATH> (or the default path must be set).")
-            sys.exit(1)
 
-        _agent_log_str: str = getattr(args, "agent_log", "").strip()
-        _agent_log_path = (
-            Path(_agent_log_str) if _agent_log_str else output_dir / "agent_output.txt"
-        )
-        _agent_poll = max(0.1, float(getattr(args, "agent_poll", 2.0)))
-        _agent_log_format = getattr(args, "agent_log_format", "text").strip().lower()
+    if _agent_mode:
         _agent_goal = getattr(args, "agent_goal", "").strip()
         _agent_max_cycles = max(0, int(getattr(args, "agent_max_cycles", 0) or 0))
         _agent_observe_interval = max(
@@ -1423,11 +1490,96 @@ def main() -> None:
             Path(_agent_ep_str) if _agent_ep_str else output_dir / "agent_episodes.jsonl"
         )
 
+        _use_signal: bool = getattr(args, "agent_signal", False)
+
+        if _use_signal:
+            # ── Signal I/O handler ────────────────────────────────────────
+            import os
+
+            _sig_url: str = (
+                getattr(args, "agent_signal_url", "").strip()
+                or os.environ.get("SIGNAL_API_URL", "http://localhost:8080")
+            )
+            _sig_number: str = (
+                getattr(args, "agent_signal_number", "").strip()
+                or os.environ.get("SIGNAL_PHONE_NUMBER", "")
+            )
+            _sig_reply_raw: str = getattr(args, "agent_signal_reply_to", "").strip()
+            _sig_reply_to: list[str] = (
+                [r.strip() for r in _sig_reply_raw.split(",") if r.strip()]
+                if _sig_reply_raw
+                else []
+            )
+            _sig_allowed_raw: str = getattr(
+                args, "agent_signal_allowed_senders", ""
+            ).strip()
+            _sig_allowed: Optional[list[str]] = (
+                [s.strip() for s in _sig_allowed_raw.split(",") if s.strip()]
+                if _sig_allowed_raw
+                else None
+            )
+            _sig_poll: float = max(
+                1.0, float(getattr(args, "agent_signal_poll", 5.0) or 5.0)
+            )
+            _sig_ssl_verify: bool = not getattr(
+                args, "agent_signal_ssl_no_verify", False
+            )
+            _agent_log_format: str = getattr(
+                args, "agent_log_format", "text"
+            ).strip().lower()
+
+            if not _sig_number:
+                err(
+                    "Signal agent mode requires --agent-signal-number <E164> "
+                    "or SIGNAL_PHONE_NUMBER env var."
+                )
+                sys.exit(1)
+            if not _sig_reply_to:
+                err(
+                    "Signal agent mode requires --agent-signal-reply-to <E164[,…]> "
+                    "to know where to send results."
+                )
+                sys.exit(1)
+
+            _io_handler = SignalIOHandler(
+                api_base_url=_sig_url,
+                account=_sig_number,
+                reply_to=_sig_reply_to,
+                poll_interval=_sig_poll,
+                allowed_senders=_sig_allowed,
+                log_format=_agent_log_format,
+                ssl_verify=_sig_ssl_verify,
+            )
+
+        else:
+            # ── File I/O handler (default) ────────────────────────────────
+            _agent_watch_str: str = getattr(args, "agent_watch", "").strip()
+            _agent_watch_path: Path = (
+                Path(_agent_watch_str)
+                if _agent_watch_str
+                else output_dir / "agent_input.txt"
+            )
+            _agent_log_str: str = getattr(args, "agent_log", "").strip()
+            _agent_log_path: Path = (
+                Path(_agent_log_str)
+                if _agent_log_str
+                else output_dir / "agent_output.txt"
+            )
+            _agent_poll: float = max(0.1, float(getattr(args, "agent_poll", 2.0)))
+            _agent_log_format = getattr(
+                args, "agent_log_format", "text"
+            ).strip().lower()
+
+            _io_handler = FileIOHandler(
+                watch_file=_agent_watch_path,
+                log_file=_agent_log_path,
+                poll_interval=_agent_poll,
+                log_format=_agent_log_format,
+            )
+
         info(f"Agent mode    : {bold(cyan('active'))}")
-        info(f"  watch file  : {dim(str(_agent_watch_path))}")
-        info(f"  log  file   : {dim(str(_agent_log_path))}")
-        info(f"  poll        : {dim(str(_agent_poll) + ' s')}")
-        info(f"  log format  : {dim(_agent_log_format)}")
+        for _k, _v in _io_handler.info_lines():
+            info(f"  {_k:<16}: {dim(_v)}")
         if _agent_goal:
             info(f"  mission     : {dim(_agent_goal[:80])}")
         if _agent_max_cycles:
@@ -1437,13 +1589,10 @@ def main() -> None:
         info(f"  episodes    : {dim(str(_agent_episode_file))}")
 
     # ── Run ──────────────────────────────────────────────────────────────
-    if _agent_mode and _agent_watch_path is not None and _agent_log_path is not None:
+    if _agent_mode and _io_handler is not None:
         run_agent(
             session=session,
-            watch_file=_agent_watch_path,
-            log_file=_agent_log_path,
-            poll_interval=_agent_poll,
-            log_format=_agent_log_format,
+            io_handler=_io_handler,
             episode_file=_agent_episode_file,
             output_dir=output_dir,
             mission_goal=_agent_goal,

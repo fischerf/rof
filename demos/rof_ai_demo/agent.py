@@ -59,6 +59,8 @@ import time
 from pathlib import Path
 from typing import Optional, TextIO
 
+from io_handler import IOHandler  # type: ignore
+
 # ---------------------------------------------------------------------------
 # Console helpers – imported from sibling module; guarded so agent.py can be
 # imported even before the full demo package is on sys.path.
@@ -181,45 +183,7 @@ class _Capture(io.RawIOBase):
         return result
 
 
-# ===========================================================================
-# Command-file helpers
-# ===========================================================================
-
-
-def _read_command(watch_path: Path) -> Optional[str]:
-    """
-    Return the stripped content of *watch_path*, or ``None`` if the file is
-    empty or cannot be read (e.g. locked by another process mid-write on
-    Windows).
-    """
-    try:
-        text = watch_path.read_text(encoding="utf-8", errors="replace").strip()
-        return text if text else None
-    except (OSError, PermissionError):
-        return None
-
-
-def _clear_watch_file(watch_path: Path) -> None:
-    """
-    Truncate *watch_path* to zero bytes so the external actor knows the
-    command has been consumed.  Errors are reported but not fatal.
-    """
-    try:
-        watch_path.write_text("", encoding="utf-8")
-    except (OSError, PermissionError) as exc:
-        warn(f"Agent: could not clear watch file: {exc}")
-
-
-def _write_log(log_file: Path, text: str) -> None:
-    """
-    Overwrite *log_file* with *text* in one atomic ``write_text`` call.
-    Always replaces the full file so the remote viewer sees a clean,
-    complete snapshot of the latest run.  Errors are reported but not fatal.
-    """
-    try:
-        log_file.write_text(text, encoding="utf-8", errors="replace")
-    except (OSError, PermissionError) as exc:
-        warn(f"Agent: could not write log file {log_file}: {exc}")
+# (File-based I/O helpers moved to FileIOHandler in io_handler.py)
 
 
 # ===========================================================================
@@ -229,11 +193,8 @@ def _write_log(log_file: Path, text: str) -> None:
 
 def run_agent(
     session,  # ROFSession – typed as Any to avoid circular import
-    watch_file: Path,
-    log_file: Path,
-    poll_interval: float = 2.0,
-    log_format: str = "text",  # "text" or "markdown"
-    # ── New parameters for the full agent loop ──────────────────────────
+    io_handler: IOHandler,
+    # ── Agent loop parameters ────────────────────────────────────────────
     episode_file: Optional[Path] = None,
     output_dir: Optional[Path] = None,
     mission_goal: str = "",
@@ -247,24 +208,15 @@ def run_agent(
     ----------
     session         : ROFSession
         A fully initialised ROFSession (same object used by ``_repl``).
-    watch_file      : Path
-        The file polled for incoming commands.  When non-empty and containing
-        a previously-unseen command the agent executes it and clears the file.
-    log_file        : Path
-        After each completed run the result is rendered by
-        ``output_layout.render_result()`` and written here in one atomic
-        write, replacing any previous content.
-    poll_interval   : float
-        How often (seconds) to check the watch file.  Default: 2.0 s.
-    log_format      : str
-        ``"text"`` (default) – plain text.
-        ``"markdown"``       – GitHub-Flavoured Markdown.
+    io_handler      : IOHandler
+        Pluggable I/O backend.  Use FileIOHandler for the original
+        watch-file / log-file behaviour, or SignalIOHandler to receive
+        commands via Signal and reply via Signal messages.
     episode_file    : Path | None
         JSONL file for episode memory records.  Defaults to
         ``<output_dir>/agent_episodes.jsonl``.
     output_dir      : Path | None
-        Directory for heartbeat + agent_state.json.  Inferred from
-        ``log_file.parent`` when not supplied.
+        Directory for heartbeat + agent_state.json.
     mission_goal    : str
         High-level natural-language mission.  When non-empty the agent
         checks :meth:`EpisodeMemory.mission_satisfied` on every proactive
@@ -275,30 +227,15 @@ def run_agent(
     observe_interval : float
         Seconds between proactive observation ticks (artefact health,
         mission check, heartbeat).  0 disables proactive observation so
-        the agent only reacts to watch-file writes.
+        the agent only reacts to incoming commands.
     """
-    # ── Normalise / validate parameters ──────────────────────────────────
-    log_format = log_format.strip().lower()
-    if log_format not in ("text", "markdown"):
-        warn(f"Agent: unknown log_format {log_format!r}; falling back to 'text'.")
-        log_format = "text"
-
-    _out_dir: Path = output_dir if output_dir is not None else log_file.parent
+    _out_dir: Path = output_dir if output_dir is not None else Path("./rof_output")
     _episode_file: Path = (
         episode_file if episode_file is not None else _out_dir / "agent_episodes.jsonl"
     )
 
-    # ── Ensure parent directories exist ──────────────────────────────────
-    watch_file.parent.mkdir(parents=True, exist_ok=True)
-    log_file.parent.mkdir(parents=True, exist_ok=True)
+    # Ensure the output directory exists (handlers manage their own dirs).
     _out_dir.mkdir(parents=True, exist_ok=True)
-
-    if not watch_file.exists():
-        try:
-            watch_file.write_text("", encoding="utf-8")
-        except OSError as exc:
-            err(f"Agent: cannot create watch file {watch_file}: {exc}")
-            return
 
     # ── Episode memory ────────────────────────────────────────────────────
     try:
@@ -348,10 +285,7 @@ def run_agent(
     try:
         _agent_loop(
             session=session,
-            watch_file=watch_file,
-            log_file=log_file,
-            poll_interval=poll_interval,
-            log_format=log_format,
+            io_handler=io_handler,
             cap_stdout=_cap_stdout,
             cap_stderr=_cap_stderr,
             episode_memory=episode_memory,
@@ -376,10 +310,7 @@ def run_agent(
 
 def _agent_loop(
     session,
-    watch_file: Path,
-    log_file: Path,
-    poll_interval: float,
-    log_format: str,
+    io_handler: IOHandler,
     cap_stdout: _Capture,
     cap_stderr: _Capture,
     # ── Agent additions ───────────────────────────────────────────────────
@@ -398,16 +329,15 @@ def _agent_loop(
 
     Phases per iteration
     --------------------
-    OBSERVE  → read watch file; proactive tick when observe_interval fires
+    OBSERVE  → io_handler.poll(); proactive tick when observe_interval fires
     DECIDE   → implicit in session.run() (Planner: NL → RelateLang AST)
     ACT      → session.run() executes the plan and returns RunResult
     LEARN    → session.evaluate_outcome() scores + records the episode
     """
-    render_mode = "agent_md" if log_format == "markdown" else "agent"
-    format_label = "markdown (.md)" if log_format == "markdown" else "plain text"
+    render_mode = "agent_md" if io_handler.log_format == "markdown" else "agent"
+    format_label = "markdown (.md)" if io_handler.log_format == "markdown" else "plain text"
 
     _cycle_label = f"  max={max_cycles}" if max_cycles > 0 else "  max=∞"
-    _goal_label = f"  mission={mission_goal[:50]!r}" if mission_goal else "  mission=(none)"
     _obs_label = (
         f"  observe_interval={observe_interval}s"
         if observe_interval > 0
@@ -417,21 +347,21 @@ def _agent_loop(
     banner(
         "Agent Mode  –  observe → decide → act → learn",
         (
-            f"watch : {watch_file}  │  "
-            f"log   : {log_file}  │  "
-            f"poll  : {poll_interval}s  │  "
+            f"handler : {type(io_handler).__name__}  │  "
+            f"poll  : {io_handler.poll_interval}s  │  "
             f"format: {format_label}  │  "
             "Ctrl-C to stop"
         ),
     )
 
-    info(f"Agent watch file   : {bold(cyan(str(watch_file)))}")
-    info(f"Agent log  file    : {bold(cyan(str(log_file)))}")
+    info(f"Agent I/O mode     : {bold(cyan(type(io_handler).__name__))}")
+    for _key, _val in io_handler.info_lines():
+        info(f"  {_key:<16}: {bold(cyan(_val))}")
     info(
         f"Episode memory     : {bold(cyan(str(out_dir / 'agent_episodes.jsonl'))) if has_memory else dim('disabled')}"
     )
     info(f"Log format         : {bold(format_label)}")
-    info(f"Poll interval      : {bold(str(poll_interval))} s")
+    info(f"Poll interval      : {bold(str(io_handler.poll_interval))} s")
     info(f"Cycle limit        : {bold(_cycle_label.strip())}")
     info(
         f"Mission goal       : {bold(cyan(mission_goal[:60])) if mission_goal else dim('(none – run until Ctrl-C or max-cycles)')}"
@@ -439,10 +369,7 @@ def _agent_loop(
     info(
         f"Observe interval   : {bold(str(observe_interval) + ' s') if observe_interval > 0 else dim('disabled (reactive only)')}"
     )
-    info(
-        f"Status             : {green('active')} — "
-        "write a command into the watch file to execute it"
-    )
+    info(f"Status             : {green('active')} — {dim(io_handler.wait_prompt())}")
     print()
 
     # Discard banner/info output from the capture buffer
@@ -451,7 +378,6 @@ def _agent_loop(
 
     # ── Loop state ────────────────────────────────────────────────────────
     seen_commands: set[str] = set()  # deduplication within this session
-    last_mtime: float = 0.0  # watch-file mtime on last poll
     completed_cycles: int = 0  # successful act phases this session
     done: bool = False  # mission-complete flag
 
@@ -477,7 +403,7 @@ def _agent_loop(
         # MAIN LOOP  –  while not done
         # =================================================================
         while not done:
-            time.sleep(poll_interval)
+            time.sleep(io_handler.poll_interval)
 
             # =============================================================
             # PHASE 1 – OBSERVE
@@ -489,7 +415,7 @@ def _agent_loop(
                 # Run a full proactive observation tick
                 if has_observe and observe_fn is not None and episode_memory is not None:
                     obs = observe_fn(
-                        watch_file=watch_file,
+                        watch_file=io_handler.watch_path,
                         output_dir=out_dir,
                         episode_memory=episode_memory,
                         mission_goal=mission_goal,
@@ -522,56 +448,35 @@ def _agent_loop(
                     # observe.py unavailable – still update the tick timer
                     last_observe_tick = now
 
-            # =============================================================
-            # Watch-file mtime check
-            # =============================================================
-            try:
-                current_mtime = watch_file.stat().st_mtime
-            except OSError:
-                # File was deleted – re-create and keep waiting
-                try:
-                    watch_file.write_text("", encoding="utf-8")
-                except OSError:
-                    pass
-                last_mtime = 0.0
-                continue
-
-            if current_mtime == last_mtime:
-                continue  # nothing changed
-
-            last_mtime = current_mtime
-
-            # =============================================================
-            # Read the command
-            # =============================================================
-            command = _read_command(watch_file)
+            # =========================================================
+            # PHASE 1b – Poll the I/O handler for the next command
+            # =========================================================
+            command = io_handler.poll()
             if not command:
                 continue
 
-            # =============================================================
-            # Deduplication
-            # =============================================================
+            # =========================================================
+            # Session-level deduplication
+            # =========================================================
             if command in seen_commands:
-                _clear_watch_file(watch_file)
-                last_mtime = 0.0
                 warn(
                     f"Agent: command already executed this session, skipping: "
-                    f"{dim(command[:80] + ('…' if len(command) > 80 else ''))}"
+                    f"{dim(command[:80] + ('...' if len(command) > 80 else ''))}"
                 )
                 cap_stdout.take()
                 cap_stderr.take()
                 continue
 
-            # =============================================================
+            # =========================================================
             # Accept the command
-            # =============================================================
+            # =========================================================
             seen_commands.add(command)
             last_command = command
 
-            section("Agent – OBSERVE  |  incoming command")
+            section("Agent - OBSERVE  |  incoming command")
             print(
                 f"  {bold(cyan('CMD'))}  "
-                f"{yellow(command[:120] + ('…' if len(command) > 120 else command[120:]))}"
+                f"{yellow(command[:120] + ('...' if len(command) > 120 else command[120:]))}"
             )
             if max_cycles > 0:
                 print(
@@ -579,12 +484,7 @@ def _agent_loop(
                 )
             print()
 
-            # Clear the watch file BEFORE execution so the external actor
-            # can write the next command while this one is running.
-            _clear_watch_file(watch_file)
-            last_mtime = 0.0
-
-            # Discard everything printed so far from the capture buffer
+            # Discard banner output from the capture buffer
             cap_stdout.take()
             cap_stderr.take()
 
@@ -671,12 +571,12 @@ def _agent_loop(
                 cap_stderr.take()
 
             # =============================================================
-            # Write the log file  (structured RunResult → clean text/md)
+            # Deliver the result via the I/O handler
             # =============================================================
             if result is not None:
                 from output_layout import render_result  # type: ignore
 
-                log_text = render_result(
+                output_text = render_result(
                     result.snapshot,
                     mode=render_mode,
                     command=command,
@@ -684,7 +584,11 @@ def _agent_loop(
                     plan_ms=plan_ms,
                     exec_ms=exec_ms,
                 )
-                _write_log(log_file, log_text)
+                io_handler.send_output(
+                    output_text,
+                    command=command,
+                    success=run_success,
+                )
 
             # =============================================================
             # Cycle-limit check
@@ -721,7 +625,7 @@ def _agent_loop(
             )
             if mission_goal:
                 info(f"  Mission  : {dim(mission_goal[:80])}")
-            info(f"  Write to {dim(str(watch_file))} to continue.")
+            info(f"  {dim(io_handler.wait_prompt())}")
             print()
 
             cap_stdout.take()

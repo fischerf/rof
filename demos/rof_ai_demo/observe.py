@@ -213,7 +213,7 @@ def write_heartbeat(
 
 def observe(
     *,
-    watch_file: Path,
+    watch_file: Optional[Path],
     output_dir: Path,
     episode_memory,  # EpisodeMemory – typed as Any to avoid circular import
     mission_goal: str = "",
@@ -231,8 +231,10 @@ def observe(
 
     Parameters
     ----------
-    watch_file     : Path
+    watch_file     : Path | None
         The file polled for incoming commands.  Non-empty → has_command=True.
+        Pass None when using a non-file I/O handler (e.g. SignalIOHandler);
+        the short-circuit check is skipped and the full tick always runs.
     output_dir     : Path
         Where heartbeat and other agent state files are written.
     episode_memory : EpisodeMemory
@@ -264,24 +266,26 @@ def observe(
     result = ObservationResult(tick_ts=time.time())
 
     # ── 1. Watch-file check ───────────────────────────────────────────────
-    try:
-        content = watch_file.read_text(encoding="utf-8").strip()
-        if content:
-            result.has_command = True
-            result.notes.append(f"Watch file has pending command ({len(content)} chars).")
-            # Short-circuit: the act phase will handle it; skip the rest.
-            # We still write the heartbeat below so monitors stay current.
-            _write_heartbeat_from_memory(
-                output_dir=output_dir,
-                episode_memory=episode_memory,
-                mission_goal=mission_goal,
-                done=False,
-            )
-            result.heartbeat_written = True
-            return result
-    except OSError:
-        # File missing or unreadable – treat as empty watch file.
-        result.notes.append("Watch file unreadable; treating as empty.")
+    # Skipped when watch_file is None (non-file I/O handler such as Signal).
+    if watch_file is not None:
+        try:
+            content = watch_file.read_text(encoding="utf-8").strip()
+            if content:
+                result.has_command = True
+                result.notes.append(f"Watch file has pending command ({len(content)} chars).")
+                # Short-circuit: the act phase will handle it; skip the rest.
+                # We still write the heartbeat below so monitors stay current.
+                _write_heartbeat_from_memory(
+                    output_dir=output_dir,
+                    episode_memory=episode_memory,
+                    mission_goal=mission_goal,
+                    done=False,
+                )
+                result.heartbeat_written = True
+                return result
+        except OSError:
+            # File missing or unreadable – treat as empty watch file.
+            result.notes.append("Watch file unreadable; treating as empty.")
 
     # ── 2. Artefact health ────────────────────────────────────────────────
     artefacts = last_artefacts or []
