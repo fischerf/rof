@@ -782,10 +782,20 @@ class MCPClientTool(ToolProvider):
             remapped = dict(args)
 
             # Build keyword sets for each missing parameter (name + description).
+            # Include synonyms for common text-content parameter names so that
+            # planner-generated attributes like "content" match tool params like
+            # "message" even when there is zero keyword overlap.
+            _text_synonyms: dict[str, set[str]] = {
+                "message": {"content", "text", "body", "prose"},
+                "content": {"message", "text", "body", "prose"},
+                "text":    {"message", "content", "body", "prose"},
+                "body":    {"message", "content", "text", "prose"},
+            }
             param_word_map: dict[str, set[str]] = {}
             for param_name in missing_params:
                 desc = (props[param_name].get("description", "") or "").lower()
                 words = set(re.findall(r"\w{3,}", param_name.replace("_", " ") + " " + desc))
+                words |= _text_synonyms.get(param_name, set())
                 param_word_map[param_name] = words
 
             # Greedy best-match: for each missing param, find the unmatched

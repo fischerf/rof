@@ -1364,7 +1364,29 @@ class ROFSession:
             if field in task_attrs:
                 continue  # already present — do not overwrite
             ptype = param_types.get(field, "integer")
-            default_val: Any = 1 if ptype == "integer" else "value"
+            if ptype == "integer":
+                default_val: Any = 1
+            else:
+                # For string params, search entity attributes for the best
+                # matching content rather than injecting a useless "value"
+                # placeholder.  Pick the longest content/text/body/prose/
+                # message attribute across all entities — this catches the
+                # common case where an analysis step writes Report.content
+                # but the messaging tool expects "message".
+                _content_keys = {"content", "text", "body", "prose", "message"}
+                best_val: Any = None
+                best_len = 0
+                for ent_data in entities.values():
+                    attrs = ent_data.get("attributes", {})
+                    for attr_key, attr_val in attrs.items():
+                        if (
+                            isinstance(attr_val, str)
+                            and attr_key.lower() in _content_keys
+                            and len(attr_val) > best_len
+                        ):
+                            best_val = attr_val
+                            best_len = len(attr_val)
+                default_val = best_val if best_val is not None else "value"
             task_attrs[field] = default_val
             warn(
                 f"  ↳ Auto-injecting missing param '{field}' = {default_val!r} "
