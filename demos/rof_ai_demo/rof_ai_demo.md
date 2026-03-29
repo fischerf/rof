@@ -1,121 +1,64 @@
-### ROF AI Demo — observe → decide → act → learn agent
+# ROF AI Demo
+
+## What is it?
+
+ROF AI Demo is a **goal-driven automation agent** built on the
+[ROF framework](../../README.md).  You describe what you want in plain English;
+the agent converts your words into a structured, auditable
+[RelateLang](../../docs/relatelang_spec.md) workflow, executes it with a
+configurable tool set, scores the outcome, and learns from the result so future
+runs route faster and more reliably.
+
+Unlike a chat assistant that answers in prose, the demo treats every prompt as a
+**business-logic task**: it plans a workflow, runs tools (web search, code
+generation, file I/O, database queries, RAG knowledge retrieval, MCP servers, …),
+writes artefacts to disk, and records a quality-scored episode — all without you
+writing a single line of code.
+
+### What you can do with it
+
+| Mode | Use case |
+|------|----------|
+| **Interactive REPL** | Explore, prototype, and iterate on prompts interactively in a terminal |
+| **`--one-shot`** | Non-interactive single-prompt execution — pipe results into scripts or CI |
+| **Agent mode (file I/O)** | Leave the agent running unattended; drop commands into a watch file (e.g. a OneDrive-synced `.txt`) and get results written back |
+| **Agent mode (Signal)** | Send commands to the agent from any phone or desktop via Signal messenger; receive chunked results back |
+| **Mission-goal agent** | Give the agent a high-level goal (`--agent-goal`); it runs cycles autonomously until the goal is satisfied with quality ≥ 0.70 |
+
+The agent remembers every run as a scored episode, learns which tools succeed for
+which goal patterns (via `rof_routing`), exposes a full governance audit trail,
+and can connect to any MCP-compatible tool server.
 
 ---
 
-> **What's new:** the demo now implements a full four-phase agent loop.
-> The `agent.py` file-watcher has been upgraded from a passive command
-> dispatcher to a goal-driven loop with a `done` predicate, proactive
-> environment observation, structured episode memory, and a learn phase
-> that scores every run and persists quality records across sessions.
-> Two new modules — `memory.py` and `observe.py` — and a built-in
-> `knowledge/agent.md` skills manifest complete the picture.
-> See the **Agent loop**, **Episode memory**, and **Proactive observation**
-> sections for details.
+## vs. OpenClaw & similar tools
 
-## Module structure
+[**OpenClaw**](https://github.com/openclaw/openclaw) is a **personal messaging
+gateway** — it routes WhatsApp, Telegram, Signal, Discord, and 15+ other
+channels into a single AI inbox, with voice, mobile apps, and browser control.
+ROF AI Demo is built for a different job:
 
-The demo is split into focused modules that live side-by-side in
-`demos/rof_ai_demo/`.  `rof_ai_demo.py` is the thin entry-point; every
-other concern lives in its own file.
+> **ROF** = *structured automation* — auditable workflows, tool pipelines, artefacts, learning
+> **OpenClaw** = *personal assistant reach* — every channel you already use, always-on
 
-| Module | Responsibility |
-|--------|---------------|
-| `imports.py` | Bootstrap: `_try_import`, all `rof_framework` imports, `_HAS_TOOLS` / `_HAS_ROUTING` / `_HAS_MCP` / `_HAS_AUDIT` flags |
-| `telemetry.py` | `_SessionStats`, `_STATS` singleton, `_StatsTracker`, `_CommsLogger`, `_attach_debug_hooks` |
-| `console.py` | ANSI colour helpers, `_box` / `_print_box`, `banner` / `section` / `step` / `warn` / `err` / `info`, headline bar |
-| `planner.py` | `_PLANNER_SYSTEM_BASE`, `_build_planner_system`, `_make_knowledge_hint`, `Planner` |
-| `session.py` | `ROFSession` — tool wiring, MCP registration, run loop, retry/coercion logic, RAG, routing memory, `current_snapshot`, `evaluate_outcome()`, artifacts |
-| `output_layout.py` | Tool-aware result renderer — `render_result()`, 11 named layouts, `_SKIP_ATTRS`, `_TRUNCATE_ATTRS` |
-| `memory.py` | `EpisodeRecord`, `EpisodeMemory`, `score_outcome()` — learn-phase episode store backed by JSONL |
-| `observe.py` | `ObservationResult`, `observe()`, `write_heartbeat()`, `save_agent_state()`, `load_agent_state()` — proactive observation layer |
-| `agent.py` | Full observe → decide → act → learn loop — `run_agent()`, `_Capture` proxy, deduplication, log writer |
-| `wizard.py` | `_setup_wizard`, `_print_config_box`, provider defaults, GitHub Copilot + generic provider paths |
-| `rof_ai_demo.py` | REPL, `_print_help`, `_parse_args` (all CLI flags), `_build_mcp_configs`, `main()` |
-| `knowledge/agent.md` | Built-in skills manifest — identity, tool catalogue, goal patterns, guardrails, episode signal definitions |
+| | ROF AI Demo | OpenClaw |
+|---|:---|:---|
+| 🎯 **Goal** | Testable business-logic workflows | Conversational assistant on 15+ channels |
+| 📋 **Logic** | RelateLang `.rl` — lintable, diff-able, offline-testable | Free-form LLM conversation |
+| 🔍 **Audit** | Full JSONL trail: every tool call & LLM decision | Not a focus |
+| 📈 **Learning** | Episode memory + EMA routing confidence across runs | No feedback loop |
+| 🔌 **MCP** | First-class — any MCP server becomes a named tool | Via skills extension, not native |
+| 📡 **Channels** | Terminal, file watch, Signal | WhatsApp, Telegram, Discord, voice, SMS, … |
+| 🚀 **Deploy** | Single Python process, no daemon | Gateway daemon + companion apps |
+| 🧪 **Testing** | `rof test` — zero API calls, scripted mock LLMs | No equivalent |
 
----
+**Use ROF** when you need verifiable artefacts, auditable rules, MCP
+integrations, or workflows a non-engineer can review.
+**Use OpenClaw** when you need a personal assistant on your phone with voice,
+browser control, and all your messaging apps.
 
-## Pipeline overview
-
-```
-  Natural Language prompt
-          │
-  Stage 1 — PLANNING  (Planner LLM, temp=0.1)
-          │  NL → .rl workflow → RLParser → WorkflowAST
-          │  auto-retry on ParseError
-          ▼
-  Stage 2 — EXECUTION  (Orchestrator + tools)
-          │  keyword routing → AICodeGenTool  (generate + save)
-          │                  → CodeRunnerTool (run non-interactive scripts)
-          │                  → LLMPlayerTool  (drive interactive programs via LLM)
-          │                  → LuaRunTool     (run Lua script — human drives it)
-          │                  → WebSearchTool / RAGTool / APICallTool
-          │                  → DatabaseTool / FileReaderTool / FileSaveTool
-          │                  → ValidatorTool / HumanInLoopTool
-          │                  → MCPClientTool  (any connected MCP server)
-          │                  → LLM fallback   (no-tool plain answer)
-          ▼
-  RunResult { success, steps, snapshot, run_id }
-          │
-  Stage 2b — FAILURE RECOVERY  (_execute_with_retry)
-          │  for each FAILED step (in order):
-          │    1. dependency guard — skip if a prior required step failed
-          │    2. param fix — inject missing params OR coerce wrong-typed values
-          │    3. retry up to --step-retries times (single-goal re-run)
-          │    4. LLM fallback — strip tool keywords, inject error as context
-          ▼
-  Final RunResult { success, last-step-per-goal dedup }
-```
-
----
-
-## Pipeline overview — output rendering
-
-After execution `session.run()` returns `(result, plan_ms, exec_ms)`.  The
-result section is rendered by `output_layout.render_result()` which
-automatically selects the right layout based on the snapshot content:
-
-| Layout | Triggered when snapshot contains… |
-|--------|-----------------------------------|
-| `web_search` | `WebSearchResults.query` |
-| `rag` | `RAGResults.query` |
-| `codegen` | `saved_to` + `filename` |
-| `code_run` | `stdout` or `returncode` |
-| `file_save` | `file_path` + `bytes_written` |
-| `file_read` | `path` + `format` + `char_count` |
-| `database` | `columns` + `rowcount` |
-| `api_call` | `APICallResult.status_code` |
-| `validator` | `is_valid` + `issue_count` |
-| `mcp` | `MCPResult.server` |
-| `generic` | *(fallback — any other shape)* |
-
-Three rendering modes are supported:
-
-| Mode | Used by | Output |
-|------|---------|--------|
-| `"cli"` | interactive REPL, `--one-shot` | ANSI-coloured, truncated at 120 chars per value |
-| `"agent"` | agent log file (text format) | Plain text, no ANSI, no pipeline scaffolding, truncated at 300 chars |
-| `"agent_md"` | agent log file (markdown format) | GitHub-Flavoured Markdown with headings, tables, and fenced code blocks |
-
-Two global attribute filter sets apply across all layouts and all tools:
-
-| Set | Keys | Effect |
-|-----|------|--------|
-| `_SKIP_ATTRS` | `rl_context`, `raw` | Completely hidden — internal pipeline plumbing |
-| `_TRUNCATE_ATTRS` | `content`, `body`, `rows`, `stdout`, `stderr`, `text`, `snippet`, `result` | Shown but capped at the mode's truncation limit |
-
----
-
-## Pipeline overview — with knowledge
-
-When `rof_tools` is installed every session has a live `RAGTool` registered
-alongside all other tools.  The built-in `knowledge/agent.md` skills manifest
-is automatically loaded into RAGTool at startup — no `--knowledge-dir` flag is
-required.  Add `--knowledge-dir` to layer your own documents on top.
-
-When a tool fails the demo does not stop — it enters a configurable recovery
-loop (retries → dependency guard → LLM fallback) before reporting the final
-outcome.  See the **Failure handling** section for details.
+> **They pair well:** OpenClaw can deliver commands to a ROF agent over Signal —
+> the `--agent-signal` backend was built for exactly this.
 
 ---
 
@@ -147,10 +90,13 @@ python rof_ai_demo.py --provider github_copilot \
 
 ### Agent mode
 
-Agent mode runs the full **observe → decide → act → learn** loop.  The agent
-watches a plain-text file for commands written by an external actor (e.g. a
-OneDrive-synced file edited from Teams or Notepad), executes each new command
-automatically, scores the outcome, and records it as an episode.
+Agent mode runs the full **observe → decide → act → learn** loop.  Two I/O
+backends are available: **file-based** (default) and **Signal messenger**.
+
+#### File-based I/O (default)
+
+The agent watches a plain-text file for commands written by an external actor
+(e.g. a OneDrive-synced file edited from Teams or Notepad).
 
 ```sh
 # Minimal — reactive only, run until Ctrl-C
@@ -196,9 +142,134 @@ The log file always contains only the **latest completed run** — it is fully
 overwritten on each execution so the remote viewer sees a clean, consistent
 result rather than an ever-growing trace.
 
+#### Signal messenger I/O
+
+Pass `--agent-signal` to drive the agent via Signal messages.  The agent polls
+a local `signal-cli-rest-api` instance for incoming messages and sends results
+back to the configured recipients, splitting long output into numbered chunks
+automatically.
+
+```sh
+# Minimal — receive commands from anyone, reply to one number
+python rof_ai_demo.py --provider github_copilot \
+    --agent \
+    --agent-signal \
+    --agent-signal-number   +15550001111 \
+    --agent-signal-reply-to +15550002222
+
+# Only accept commands from a specific number (whitelist)
+python rof_ai_demo.py --provider github_copilot \
+    --agent \
+    --agent-signal \
+    --agent-signal-number          +15550001111 \
+    --agent-signal-reply-to        +15550002222 \
+    --agent-signal-allowed-senders +15550002222
+
+# Custom API URL + mission goal
+python rof_ai_demo.py --provider ollama \
+    --agent \
+    --agent-signal \
+    --agent-signal-url     http://signal.internal:8080 \
+    --agent-signal-number  +15550001111 \
+    --agent-signal-reply-to +15550002222 \
+    --agent-goal "Daily summary of open GitLab issues"
+
+# Skip TLS verification (self-signed corporate cert)
+python rof_ai_demo.py --provider github_copilot \
+    --agent \
+    --agent-signal \
+    --agent-signal-number       +15550001111 \
+    --agent-signal-reply-to     +15550002222 \
+    --agent-signal-ssl-no-verify
+```
+
 ---
 
-## Agent loop
+## How it works — execution pipeline
+
+```
+  Natural Language prompt
+          │
+  Stage 1 — PLANNING  (Planner LLM, temp=0.1)
+          │  NL → .rl workflow → RLParser → WorkflowAST
+          │  auto-retry on ParseError
+          ▼
+  Stage 2 — EXECUTION  (Orchestrator + tools)
+          │  keyword routing → AICodeGenTool  (generate + save)
+          │                  → CodeRunnerTool (run non-interactive scripts)
+          │                  → LLMPlayerTool  (drive interactive programs via LLM)
+          │                  → LuaRunTool     (run Lua script — human drives it)
+          │                  → WebSearchTool / RAGTool / APICallTool
+          │                  → DatabaseTool / FileReaderTool / FileSaveTool
+          │                  → ValidatorTool / HumanInLoopTool
+          │                  → MCPClientTool  (any connected MCP server)
+          │                  → LLM fallback   (no-tool plain answer)
+          ▼
+  RunResult { success, steps, snapshot, run_id }
+          │
+  Stage 2b — FAILURE RECOVERY  (_execute_with_retry)
+          │  for each FAILED step (in order):
+          │    1. dependency guard — skip if a prior required step failed
+          │    2. param fix — inject missing params OR coerce wrong-typed values
+          │    3. retry up to --step-retries times (single-goal re-run)
+          │    4. LLM fallback — strip tool keywords, inject error as context
+          ▼
+  Final RunResult { success, last-step-per-goal dedup }
+```
+
+---
+
+### Output rendering
+
+After execution `session.run()` returns `(result, plan_ms, exec_ms)`.  The
+result section is rendered by `output_layout.render_result()` which
+automatically selects the right layout based on the snapshot content:
+
+| Layout | Triggered when snapshot contains… |
+|--------|-----------------------------------|
+| `web_search` | `WebSearchResults.query` |
+| `rag` | `RAGResults.query` |
+| `codegen` | `saved_to` + `filename` |
+| `code_run` | `stdout` or `returncode` |
+| `file_save` | `file_path` + `bytes_written` |
+| `file_read` | `path` + `format` + `char_count` |
+| `database` | `columns` + `rowcount` |
+| `api_call` | `APICallResult.status_code` |
+| `validator` | `is_valid` + `issue_count` |
+| `mcp` | `MCPResult.server` |
+| `generic` | *(fallback — any other shape)* |
+
+Three rendering modes are supported:
+
+| Mode | Used by | Output |
+|------|---------|--------|
+| `"cli"` | interactive REPL, `--one-shot` | ANSI-coloured, truncated at 120 chars per value |
+| `"agent"` | agent log file (text format) | Plain text, no ANSI, no pipeline scaffolding, truncated at 300 chars |
+| `"agent_md"` | agent log file (markdown format) | GitHub-Flavoured Markdown with headings, tables, and fenced code blocks |
+
+Two global attribute filter sets apply across all layouts and all tools:
+
+| Set | Keys | Effect |
+|-----|------|--------|
+| `_SKIP_ATTRS` | `rl_context`, `raw` | Completely hidden — internal pipeline plumbing |
+| `_TRUNCATE_ATTRS` | `content`, `body`, `rows`, `stdout`, `stderr`, `text`, `snippet`, `result` | Shown but capped at the mode's truncation limit |
+
+---
+
+### With knowledge (RAG)
+
+When `rof_tools` is installed every session has a live `RAGTool` registered
+alongside all other tools.  The built-in `knowledge/agent.md` skills manifest
+is automatically loaded into RAGTool at startup — no `--knowledge-dir` flag is
+required.  Add `--knowledge-dir` to layer your own documents on top.
+
+When a tool fails the demo does not stop — it enters a configurable recovery
+loop (retries → dependency guard → LLM fallback) before reporting the final
+outcome.  See the **Failure handling** section for details.
+
+---
+
+## Agent loop — observe → decide → act → learn
 
 The agent runs a continuous four-phase cycle until a termination condition
 is met.
@@ -208,7 +279,8 @@ is met.
   │                    while not done                                   │
   │                                                                     │
   │  ① OBSERVE ──────────────────────────────────────────────────────  │
-  │    • Poll watch file (every --agent-poll seconds)                  │
+  │    • IOHandler.poll() — FileIOHandler: check watch file            │
+  │                       — SignalIOHandler: drain signal-cli queue     │
   │    • If observe_interval fires: run full proactive tick             │
   │        – check artefact health                                      │
   │        – evaluate mission goal against episode memory               │
@@ -257,6 +329,120 @@ same text to the watch file twice before the agent has a chance to clear it,
 the second occurrence is silently discarded with a warning.  This prevents
 the same prompt from being executed twice even if the watch file is not
 cleared quickly enough between writes.
+
+---
+
+## Agent I/O backends
+
+Agent I/O is abstracted behind the `IOHandler` interface in `io_handler.py`.
+The agent loop calls `handler.poll()` on every tick and `handler.send_output()`
+after every completed run.  Two concrete backends ship with the demo:
+
+| Backend | Class | Selected by |
+|---------|-------|-------------|
+| File-based | `FileIOHandler` | default (no `--agent-signal`) |
+| Signal messenger | `SignalIOHandler` | `--agent-signal` |
+
+### FileIOHandler
+
+Input and output use plain files on disk.
+
+```
+poll()         reads the watch file when its mtime changes; clears it immediately
+send_output()  fully overwrites the log file with the rendered result
+```
+
+| Property | Value |
+|----------|-------|
+| Watch file | `--agent-watch` (default: `<output-dir>/agent_input.txt`) |
+| Log file | `--agent-log` (default: `<output-dir>/agent_output.txt`) |
+| Poll interval | `--agent-poll` (default: `2.0 s`) |
+| Log format | `--agent-log-format text\|markdown` (default: `text`) |
+
+Both parent directories are created automatically.  If the watch file does not
+exist it is created empty.  If the watch file is deleted between polls it is
+recreated so the agent does not crash.
+
+### SignalIOHandler
+
+Input and output use the [signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api)
+HTTP interface.  No MCP server is required — the handler calls the REST API
+directly with synchronous `httpx`.
+
+```
+poll()         GET /v1/receive/{account}  — drains the server-side queue (non-blocking)
+send_output()  POST /v2/send              — sends result to all reply_to recipients
+```
+
+#### signal-cli-rest-api Docker setup
+
+```sh
+docker run -d -p 8080:8080 -e MODE=normal \
+    -v $HOME/.local/share/signal-api:/home/.local/share/signal-cli \
+    bbernhard/signal-cli-rest-api:latest
+```
+
+The Signal account used as `--agent-signal-number` must already be registered
+in the signal-cli data volume before starting the container.
+
+#### Signal REST endpoints
+
+| Method | Path | Used for |
+|--------|------|----------|
+| `GET` | `/v1/receive/{account}` | Poll incoming messages |
+| `POST` | `/v2/send` | Send result to recipients |
+
+#### Message format
+
+Every response is prefixed with a compact status header:
+
+```
+✓ Search the web for AI news and save a report
+──────────────────────────────────────────────
+<rendered output>
+```
+
+or, on failure:
+
+```
+✗ Search the web for …  [FAILED]
+────────────────────────────────
+<rendered output>
+```
+
+When the combined text exceeds `max_chars_per_message` (default 3 800 chars —
+fits in one Signal push notification), the output is split into numbered chunks
+sent sequentially with a 0.4 s delay between them to avoid rate-limiting:
+
+```
+[1/3]
+… first chunk …
+[2/3]
+… second chunk …
+[3/3]
+… third chunk …
+```
+
+#### Message deduplication
+
+The handler tracks the timestamp of every processed message in a bounded cache
+(up to 1 000 entries, oldest evicted first).  Duplicate timestamps — which can
+occur when the REST API returns the same envelope on consecutive polls — are
+silently discarded.
+
+#### Allowed senders whitelist
+
+When `--agent-signal-allowed-senders` is set, messages from numbers not in the
+list are logged and ignored.  This prevents other Signal users from issuing
+commands to an unattended agent.
+
+#### Environment variables (SignalIOHandler)
+
+| Variable | Used when |
+|----------|-----------|
+| `SIGNAL_API_URL` | `--agent-signal-url` not provided (default: `http://localhost:8080`) |
+| `SIGNAL_PHONE_NUMBER` | `--agent-signal-number` not provided |
+| `SIGNAL_SSL_VERIFY` | Set to `0` or `false` to disable TLS verification |
 
 ---
 
@@ -349,9 +535,10 @@ observation tick on that interval even when the watch file is empty.
 
 ### What happens on each tick
 
-1. **Watch-file check** — if the file is non-empty, an external command is
-   waiting.  The tick short-circuits and returns immediately so the act phase
-   can consume the command on the next loop iteration.
+1. **Pending-command check** — for `FileIOHandler` the watch file is stat-checked;
+   if non-empty a command is waiting and the tick short-circuits immediately so
+   the act phase can consume it on the next loop iteration.  `SignalIOHandler`
+   returns `None` for `watch_path` so this optimisation is skipped.
 
 2. **Artefact health** — every file path recorded in the most recent episode's
    `artefact_paths` is stat-checked.  Missing files are reported as warnings.
@@ -901,17 +1088,36 @@ python rof_ai_demo.py --provider github_copilot
 
 ### Agent mode options
 
+#### Loop control
+
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--agent` | off | Activate agent mode. Watches `--agent-watch` for commands and runs the full observe → decide → act → learn loop. |
-| `--agent-watch PATH` | — | File polled for incoming commands. Created automatically if it does not exist. Cleared immediately after a command is consumed. |
+| `--agent` | off | Activate agent mode. Runs the full observe → decide → act → learn loop using the selected I/O backend. |
+| `--agent-goal GOAL` | — | High-level natural-language mission goal. The agent checks `EpisodeMemory.mission_satisfied()` on every proactive observe tick and stops when the mission is accomplished with quality ≥ 0.70. |
+| `--agent-max-cycles N` | `0` (unlimited) | Stop the agent after N completed act phases. 0 means run until Ctrl-C or `--agent-goal` is satisfied. |
+| `--agent-observe-interval SECONDS` | `0.0` (disabled) | How often to run a proactive observation tick (artefact health, mission check, heartbeat). 0 disables proactive observation. |
+| `--agent-episode-file PATH` | `<output-dir>/agent_episodes.jsonl` | Path to the JSONL file where episode records are appended after every run. |
+
+#### File-based I/O (default — `FileIOHandler`)
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--agent-watch PATH` | `<output-dir>/agent_input.txt` | File polled for incoming commands. Created automatically if it does not exist. Cleared immediately after a command is consumed. |
 | `--agent-log PATH` | `<output-dir>/agent_output.txt` | File where the rendered result of each run is written. Fully overwritten after every completed run. |
 | `--agent-poll SECONDS` | `2.0` | How often the watch file is checked for new commands. |
 | `--agent-log-format text\|markdown` | `text` | Output format for the agent log file. `text` — plain text. `markdown` — GitHub-Flavoured Markdown. |
-| `--agent-goal GOAL` | — | High-level natural-language mission goal. When set, the agent checks `EpisodeMemory.mission_satisfied()` on every proactive observe tick and stops the loop when the mission is accomplished with quality ≥ 0.70. |
-| `--agent-max-cycles N` | `0` (unlimited) | Stop the agent after N completed act phases. 0 means run until Ctrl-C or `--agent-goal` is satisfied. |
-| `--agent-observe-interval SECONDS` | `0.0` (disabled) | How often to run a proactive observation tick (artefact health, mission check, heartbeat). 0 disables proactive observation so the agent only reacts to watch-file writes. |
-| `--agent-episode-file PATH` | `<output-dir>/agent_episodes.jsonl` | Path to the JSONL file where episode records are appended after every run. |
+
+#### Signal messenger I/O (`SignalIOHandler`)
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--agent-signal` | off | Use Signal messenger as the agent I/O backend instead of watch/log files. Requires `--agent-signal-number` and `--agent-signal-reply-to`. |
+| `--agent-signal-url URL` | `http://localhost:8080` (or `$SIGNAL_API_URL`) | Base URL of the signal-cli REST API. |
+| `--agent-signal-number E164` | `$SIGNAL_PHONE_NUMBER` | E.164 phone number of the Signal account registered in signal-cli (e.g. `+15551234567`). Required with `--agent-signal`. |
+| `--agent-signal-reply-to E164[,E164…]` | — | Comma-separated E.164 phone numbers or base64 group IDs to send output to. Required with `--agent-signal`. |
+| `--agent-signal-allowed-senders E164[,E164…]` | *(all accepted)* | Whitelist of phone numbers allowed to issue commands. Messages from other numbers are silently ignored. |
+| `--agent-signal-poll SECONDS` | `5.0` | How often the agent polls the Signal REST API for new messages. |
+| `--agent-signal-ssl-no-verify` | off | Disable TLS certificate verification for the signal-cli REST API. Use only for trusted internal hosts with self-signed certs. |
 
 ### Core options
 
@@ -1003,10 +1209,10 @@ written to `<output-dir>` (or custom paths where flags allow):
 
 | File | Description |
 |------|-------------|
-| `agent_output.txt` (or `--agent-log PATH`) | Clean plain-text (or Markdown) result of the most recent run. Fully overwritten on each run. |
-| `agent_episodes.jsonl` (or `--agent-episode-file PATH`) | Append-only JSONL episode log. One record per completed act phase. Persists across sessions. |
-| `agent_heartbeat.json` | Latest heartbeat — cycle count, last quality, last command, mission status. Overwritten atomically on every proactive observe tick. |
-| `agent_state.json` | Current agent state — mission goal, cycle count, done flag. Written after every learn phase. Loaded on restart to resume cycle count. |
+| `agent_output.txt` (or `--agent-log PATH`) | **FileIOHandler only.** Clean plain-text (or Markdown) result of the most recent run. Fully overwritten on each run. Not written in Signal mode — output is sent as Signal messages. |
+| `agent_episodes.jsonl` (or `--agent-episode-file PATH`) | Append-only JSONL episode log. One record per completed act phase. Persists across sessions. Written in all I/O modes. |
+| `agent_heartbeat.json` | Latest heartbeat — cycle count, last quality, last command, mission status. Overwritten atomically on every proactive observe tick. Written in all I/O modes. |
+| `agent_state.json` | Current agent state — mission goal, cycle count, done flag. Written after every learn phase. Loaded on restart to resume cycle count. Written in all I/O modes. |
 
 The standard per-run artifacts (`rof_plan_*.rl`, `rof_run_*.json`, etc.) are
 still written to `<output-dir>` as usual.
@@ -1398,6 +1604,29 @@ ensure run lua script.
 > **Do not pair `LLMPlayerTool` and `CodeRunnerTool` for the same script.**
 > `LLMPlayerTool` executes the script itself through a piped subprocess —
 > `CodeRunnerTool` would run it a second time.  Choose one per generated file.
+
+---
+
+## Module structure
+
+The demo is split into focused modules in `demos/rof_ai_demo/`.
+`rof_ai_demo.py` is the thin entry-point; every concern lives in its own file.
+
+| Module | Responsibility |
+|--------|---------------|
+| `imports.py` | Bootstrap: `_try_import`, all `rof_framework` imports, `_HAS_TOOLS` / `_HAS_ROUTING` / `_HAS_MCP` / `_HAS_AUDIT` flags |
+| `telemetry.py` | `_SessionStats`, `_STATS` singleton, `_StatsTracker`, `_CommsLogger`, `_attach_debug_hooks` |
+| `console.py` | ANSI colour helpers, `_box` / `_print_box`, `banner` / `section` / `step` / `warn` / `err` / `info`, headline bar |
+| `planner.py` | `_PLANNER_SYSTEM_BASE`, `_build_planner_system`, `_make_knowledge_hint`, `Planner` |
+| `session.py` | `ROFSession` — tool wiring, MCP registration, run loop, retry/coercion logic, RAG, routing memory, `current_snapshot`, `evaluate_outcome()`, artifacts |
+| `output_layout.py` | Tool-aware result renderer — `render_result()`, 11 named layouts, `_SKIP_ATTRS`, `_TRUNCATE_ATTRS` |
+| `memory.py` | `EpisodeRecord`, `EpisodeMemory`, `score_outcome()` — learn-phase episode store backed by JSONL |
+| `observe.py` | `ObservationResult`, `observe()`, `write_heartbeat()`, `save_agent_state()`, `load_agent_state()` — proactive observation layer |
+| `io_handler.py` | Pluggable I/O abstraction — `IOHandler` ABC, `FileIOHandler` (watch-file / log-file), `SignalIOHandler` (signal-cli REST API polling + chunked send) |
+| `agent.py` | Full observe → decide → act → learn loop — `run_agent()`, `_Capture` proxy, deduplication, log writer |
+| `wizard.py` | `_setup_wizard`, `_print_config_box`, provider defaults, GitHub Copilot + generic provider paths |
+| `rof_ai_demo.py` | REPL, `_print_help`, `_parse_args` (all CLI flags), `_build_mcp_configs`, `main()` |
+| `knowledge/agent.md` | Built-in skills manifest — identity, tool catalogue, goal patterns, guardrails, episode signal definitions |
 
 ---
 
