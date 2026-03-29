@@ -70,9 +70,6 @@ browser control, and all your messaging apps.
 # Ollama (local)
 python rof_ai_demo.py --provider ollama --model qwen2.5:7b
 
-# GitHub Copilot (browser login on first run, cached forever after)
-python rof_ai_demo.py --provider github_copilot --model gpt-4o
-
 # Anthropic
 python rof_ai_demo.py --provider anthropic --model claude-opus-4-5 --api-key sk-ant-...
 
@@ -84,7 +81,7 @@ python rof_ai_demo.py --provider ollama --model qwen2.5:7b \
     --one-shot "Create a small text adventure in Python and play it"
 
 # With an MCP filesystem server (stdio)
-python rof_ai_demo.py --provider github_copilot \
+python rof_ai_demo.py --provider anthropic \
     --mcp-stdio filesystem npx -y @modelcontextprotocol/server-filesystem /tmp
 ```
 
@@ -100,34 +97,34 @@ The agent watches a plain-text file for commands written by an external actor
 
 ```sh
 # Minimal — reactive only, run until Ctrl-C
-python rof_ai_demo.py --provider github_copilot \
+python rof_ai_demo.py --provider anthropic \
     --agent \
     --agent-watch  "C:\Users\<you>\OneDrive\rof_input.txt" \
     --agent-log    "C:\Users\<you>\OneDrive\rof_output.txt"
 
 # With a mission goal — agent stops when goal is satisfied (quality ≥ 0.70)
-python rof_ai_demo.py --provider github_copilot \
+python rof_ai_demo.py --provider anthropic \
     --agent \
     --agent-watch  "C:\Users\<you>\OneDrive\rof_input.txt" \
     --agent-log    "C:\Users\<you>\OneDrive\rof_output.txt" \
     --agent-goal   "Produce a report summarising the top 5 AI news stories"
 
 # With proactive observation every 60 seconds
-python rof_ai_demo.py --provider github_copilot \
+python rof_ai_demo.py --provider anthropic \
     --agent \
     --agent-watch            "C:\Users\<you>\OneDrive\rof_input.txt" \
     --agent-log              "C:\Users\<you>\OneDrive\rof_output.txt" \
     --agent-observe-interval 60
 
 # Hard cycle limit — stop after 10 completed runs
-python rof_ai_demo.py --provider github_copilot \
+python rof_ai_demo.py --provider anthropic \
     --agent \
     --agent-watch      "C:\Users\<you>\OneDrive\rof_input.txt" \
     --agent-log        "C:\Users\<you>\OneDrive\rof_output.txt" \
     --agent-max-cycles 10
 
 # Markdown log (readable in VS Code / GitHub preview)
-python rof_ai_demo.py --provider github_copilot \
+python rof_ai_demo.py --provider anthropic \
     --agent \
     --agent-watch      "C:\Users\<you>\OneDrive\rof_input.txt" \
     --agent-log        "C:\Users\<you>\OneDrive\rof_output.md" \
@@ -151,14 +148,14 @@ automatically.
 
 ```sh
 # Minimal — receive commands from anyone, reply to one number
-python rof_ai_demo.py --provider github_copilot \
+python rof_ai_demo.py --provider anthropic \
     --agent \
     --agent-signal \
     --agent-signal-number   +15550001111 \
     --agent-signal-reply-to +15550002222
 
 # Only accept commands from a specific number (whitelist)
-python rof_ai_demo.py --provider github_copilot \
+python rof_ai_demo.py --provider anthropic \
     --agent \
     --agent-signal \
     --agent-signal-number          +15550001111 \
@@ -175,7 +172,7 @@ python rof_ai_demo.py --provider ollama \
     --agent-goal "Daily summary of open GitLab issues"
 
 # Skip TLS verification (self-signed corporate cert)
-python rof_ai_demo.py --provider github_copilot \
+python rof_ai_demo.py --provider anthropic \
     --agent \
     --agent-signal \
     --agent-signal-number       +15550001111 \
@@ -860,7 +857,7 @@ so the LLM knows how to route goals to the MCP server.
 
 ```sh
 # Filesystem MCP server via npx
-python rof_ai_demo.py --provider github_copilot \
+python rof_ai_demo.py --provider anthropic \
     --mcp-stdio filesystem \
         npx -y @modelcontextprotocol/server-filesystem /tmp
 
@@ -870,7 +867,7 @@ python rof_ai_demo.py --provider ollama \
         python D:/Github/rof/tools/gitlab_mcp/server.py
 
 # Multiple servers at once
-python rof_ai_demo.py --provider github_copilot \
+python rof_ai_demo.py --provider anthropic \
     --mcp-stdio filesystem npx -y @modelcontextprotocol/server-filesystem /tmp \
     --mcp-stdio gitlab-issues python D:/Github/rof/tools/gitlab_mcp/server.py
 ```
@@ -879,12 +876,12 @@ python rof_ai_demo.py --provider github_copilot \
 
 ```sh
 # Sentry MCP (bearer token)
-python rof_ai_demo.py --provider github_copilot \
+python rof_ai_demo.py --provider anthropic \
     --mcp-http sentry https://mcp.sentry.io/mcp \
     --mcp-token sntrys_...
 
 # Internal server with corporate CA (skip TLS verification)
-python rof_ai_demo.py --provider github_copilot \
+python rof_ai_demo.py --provider anthropic \
     --mcp-http internal https://mcp.corp.internal/api \
     --mcp-ssl-no-verify
 ```
@@ -893,7 +890,7 @@ python rof_ai_demo.py --provider github_copilot \
 
 ```sh
 # Open all MCP sessions at startup — surface misconfigurations before first prompt
-python rof_ai_demo.py --provider github_copilot \
+python rof_ai_demo.py --provider anthropic \
     --mcp-stdio filesystem npx -y @modelcontextprotocol/server-filesystem /tmp \
     --mcp-eager
 ```
@@ -902,7 +899,7 @@ python rof_ai_demo.py --provider github_copilot \
 
 ```sh
 # Override auto-discovered keywords for all MCP servers
-python rof_ai_demo.py --provider github_copilot \
+python rof_ai_demo.py --provider anthropic \
     --mcp-stdio filesystem npx -y @modelcontextprotocol/server-filesystem /tmp \
     --mcp-keywords "read file" "list directory" "write file"
 ```
@@ -1055,7 +1052,7 @@ How do you handle failures?
 Start the interactive REPL by running the demo without `--one-shot`:
 
 ```sh
-python rof_ai_demo.py --provider github_copilot
+python rof_ai_demo.py --provider anthropic
 ```
 
 | Command | Description |
@@ -1123,7 +1120,7 @@ python rof_ai_demo.py --provider github_copilot
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--provider NAME` | — | LLM provider: `anthropic`, `openai`, `ollama`, `github_copilot`, or any generic provider from `rof_providers.PROVIDER_REGISTRY`. Omit to see a full interactive menu. |
+| `--provider NAME` | — | LLM provider: `anthropic`, `openai`, `ollama`, or any generic provider from `rof_providers.PROVIDER_REGISTRY`. Omit to see a full interactive menu. |
 | `--model NAME` | — | Model name, e.g. `claude-opus-4-5`, `gpt-4o`, `qwen2.5:7b` |
 | `--api-key KEY` | env var | API key for Anthropic / OpenAI |
 | `--base-url URL` | — | Base URL for Ollama / vLLM |
@@ -1170,20 +1167,6 @@ python rof_ai_demo.py --provider github_copilot
 | `--mcp-eager` | off | Eagerly open all MCP sessions and run `tools/list` at startup. |
 | `--mcp-keywords KW [KW ...]` | auto-discovered | Static trigger keywords forwarded to all MCP servers. |
 | `--mcp-ssl-no-verify` | off | Disable SSL certificate verification for all MCP servers. Use only for trusted internal hosts. |
-
-### GitHub Copilot options
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--github-token TOKEN` | env / cache | Supply `ghu_…` or `ghp_…` token directly; skips device-flow |
-| `--no-browser` | off | Print device-activation URL instead of opening the browser |
-| `--invalidate-cache` | off | Delete cached OAuth token and force a fresh browser login |
-| `--copilot-cache PATH` | `~/.config/rof/copilot_oauth.json` | Custom path for the OAuth token cache file |
-| `--ghe-base-url URL` | — | GitHub Enterprise Server root URL |
-| `--copilot-api-url URL` | — | Copilot Chat API base URL override (GHE) |
-| `--token-endpoint URL` | — | Session-token exchange endpoint override (GHE) |
-| `--editor-version VER` | `vscode/1.90.0` | `Editor-Version` header sent to Copilot |
-| `--integration-id ID` | `vscode-chat` | `Copilot-Integration-Id` header |
 
 ### Generic providers (`rof_providers` package)
 
@@ -1240,32 +1223,6 @@ Every run writes the following files into `--output-dir` (default `./rof_output`
 
 ---
 
-## GitHub Copilot auth flow
-
-No API key is required. On the very first run the demo opens GitHub's
-device-activation page in your browser. You enter a short code once,
-approve, and a token is cached at `~/.config/rof/copilot_oauth.json`.
-Every subsequent run loads the cache silently — no browser, no code.
-
-```sh
-# First run — browser opens automatically
-python rof_ai_demo.py --provider github_copilot
-
-# Headless / CI — print URL and code, no browser
-python rof_ai_demo.py --provider github_copilot --no-browser
-
-# Force fresh login — clears cache first
-python rof_ai_demo.py --provider github_copilot --invalidate-cache
-
-# Skip device-flow — supply token directly
-python rof_ai_demo.py --provider github_copilot --github-token ghp_xxxxxxxxxxxx
-
-# Custom cache location
-python rof_ai_demo.py --provider github_copilot --copilot-cache /path/to/token.json
-```
-
----
-
 ## Audit log (`rof_framework.governance.audit`)
 
 The audit subsystem records every `EventBus` event emitted during a session to
@@ -1311,23 +1268,23 @@ Each record in the JSONL file has this shape (schema_version=1):
 
 ```sh
 # Default: JSONL files under ./rof_output/audit_logs/, one file per run
-python rof_ai_demo.py --provider github_copilot
+python rof_ai_demo.py --provider anthropic
 
 # Write to stdout instead (container / CI friendly)
-python rof_ai_demo.py --provider github_copilot --audit-sink stdout
+python rof_ai_demo.py --provider anthropic --audit-sink stdout
 
 # Suppress noisy low-value events
-python rof_ai_demo.py --provider github_copilot \
+python rof_ai_demo.py --provider anthropic \
     --audit-exclude state.attribute_set state.predicate_added
 
 # Record only high-signal lifecycle events
-python rof_ai_demo.py --provider github_copilot \
+python rof_ai_demo.py --provider anthropic \
     --audit-include run.started run.completed run.failed \
                     step.started step.completed step.failed \
                     tool.executed routing.decided
 
 # Disable auditing entirely
-python rof_ai_demo.py --provider github_copilot --audit-sink null
+python rof_ai_demo.py --provider anthropic --audit-sink null
 ```
 
 ### Startup output
@@ -1418,7 +1375,7 @@ set SSL_CERT_FILE=
 set REQUESTS_CA_BUNDLE=C:\path\to\corporate_ca.pem
 set SSL_CERT_FILE=C:\path\to\corporate_ca.pem
 
-python rof_ai_demo.py --provider github_copilot \
+python rof_ai_demo.py --provider anthropic \
     --one-shot "Search the web for the latest AI news"
 ```
 
@@ -1624,7 +1581,7 @@ The demo is split into focused modules in `demos/rof_ai_demo/`.
 | `observe.py` | `ObservationResult`, `observe()`, `write_heartbeat()`, `save_agent_state()`, `load_agent_state()` — proactive observation layer |
 | `io_handler.py` | Pluggable I/O abstraction — `IOHandler` ABC, `FileIOHandler` (watch-file / log-file), `SignalIOHandler` (signal-cli REST API polling + chunked send) |
 | `agent.py` | Full observe → decide → act → learn loop — `run_agent()`, `_Capture` proxy, deduplication, log writer |
-| `wizard.py` | `_setup_wizard`, `_print_config_box`, provider defaults, GitHub Copilot + generic provider paths |
+| `wizard.py` | `_setup_wizard`, `_print_config_box`, provider defaults, generic provider paths |
 | `rof_ai_demo.py` | REPL, `_print_help`, `_parse_args` (all CLI flags), `_build_mcp_configs`, `main()` |
 | `knowledge/agent.md` | Built-in skills manifest — identity, tool catalogue, goal patterns, guardrails, episode signal definitions |
 
@@ -1635,8 +1592,8 @@ The demo is split into focused modules in `demos/rof_ai_demo/`.
 ```sh
 # Core (required)
 pip install anthropic          # Anthropic Claude provider
-pip install openai             # OpenAI / Azure / GitHub Copilot provider
-pip install httpx              # GitHub Copilot token exchange + Ollama raw HTTP
+pip install openai             # OpenAI / Azure provider
+pip install httpx              # Ollama raw HTTP + signal-cli REST
 
 # Optional tools
 pip install ddgs httpx         # enables WebSearchTool and APICallTool

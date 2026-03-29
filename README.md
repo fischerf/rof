@@ -247,8 +247,8 @@ ROF is **not** a replacement for:
   │  OpenAIProvider     │       │                                   │   │
   │  GeminiProvider     │       │  WebSearchTool   ddgs/serpapi     │   │
   │  OllamaProvider     │       │  RAGTool         chroma/memory    │   │
-  │  GitHubCopilot      │       │  CodeRunnerTool  py/js/lua/sh     │   │
-  │  Provider           │       │  APICallTool     httpx REST       │   │
+  │                     │       │  CodeRunnerTool  py/js/lua/sh     │   │
+  │                     │       │  APICallTool     httpx REST       │   │
   │                     │       │  DatabaseTool    sqlite/SA        │   │
   │  RetryManager       │       │  FileReaderTool  pdf/csv/docx/…   │   │
   │  PromptRenderer     │       │  FileSaveTool    save to disk     │   │
@@ -359,7 +359,6 @@ ROF is **not** a replacement for:
       providers/anthropic_provider.py  AnthropicProvider
       providers/gemini_provider.py     GeminiProvider
       providers/ollama_provider.py     OllamaProvider
-      providers/github_copilot_provider.py  GitHubCopilotProvider
       providers/base.py                ProviderError, RateLimitError, ContextLimitError,
                                          AuthError, ROF_GRAPH_UPDATE_SCHEMA
       renderer/prompt_renderer.py      PromptRenderer, RendererConfig
@@ -755,32 +754,6 @@ ROF is **not** a replacement for:
   ├── OllamaProvider      (llama3, mistral, gemma3, any local model)
   │     OpenAI-compat mode for vLLM: use_openai_compat=True
   │
-  └── GitHubCopilotProvider
-        Talks to the GitHub Copilot Chat Completions API (OpenAI-compat).
-        No official public API — reverse-engineered from the VS Code extension.
-
-        Authentication paths:
-          Path A (recommended) — Device-flow OAuth:
-            llm = GitHubCopilotProvider.authenticate(model="gpt-4o")
-            # Opens browser once; token cached at ~/.config/rof/copilot_oauth.json
-
-          Path B — Subsequent runs (cached token):
-            llm = GitHubCopilotProvider.from_cache(model="gpt-4o")
-
-          Path C — Direct token:
-            llm = GitHubCopilotProvider(github_token="ghu_...", model="gpt-4o")
-
-        GitHub Enterprise Server:
-            llm = GitHubCopilotProvider.authenticate(
-                ghe_base_url="https://ghe.corp.com",
-                token_endpoint="https://ghe.corp.com/copilot_internal/v2/token",
-                api_base_url="https://copilot-proxy.ghe.corp.com",
-            )
-
-        The correct tier-specific API base URL (individual vs. business account)
-        is discovered automatically from the session-token exchange response.
-        Dependencies: pip install openai httpx
-
   RetryManager
   │   Wraps any provider transparently.
   │   CONSTANT | LINEAR | EXPONENTIAL | JITTERED backoff strategies.
@@ -886,8 +859,7 @@ ROF is **not** a replacement for:
   │
   create_provider()
       Convenience factory. Wraps the named provider in a RetryManager.
-      Supports: "openai" | "azure" | "anthropic" | "gemini" | "ollama" |
-                "vllm" | "github_copilot"
+      Supports: "openai" | "azure" | "anthropic" | "gemini" | "ollama" | "vllm"
       llm = create_provider("anthropic", api_key="sk-ant-...",
                             model="claude-opus-4-5")
 
@@ -2054,21 +2026,6 @@ try:
     run_my_app(registry)
 finally:
     factory.close_all()   # clean shutdown of MCP subprocess sessions
-```
-
-**GitHub Copilot provider:**
-
-```python
-from rof_framework.llm.providers.github_copilot_provider import GitHubCopilotProvider
-
-# First time: opens browser for device-flow OAuth, caches token
-llm = GitHubCopilotProvider.authenticate(model="gpt-4o")
-
-# Subsequent runs: load token silently from cache
-llm = GitHubCopilotProvider.from_cache(model="gpt-4o")
-
-# Direct token (skip device flow)
-llm = GitHubCopilotProvider(github_token="ghu_...", model="gpt-4o")
 ```
 
 **Loan Approval pipeline** (`gather → analyse → decide`):

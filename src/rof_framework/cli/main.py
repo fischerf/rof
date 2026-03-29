@@ -505,7 +505,7 @@ def cmd_version(args: argparse.Namespace) -> int:
 
     _section("LLM provider SDKs")
     for label, pkg in [
-        ("openai       (OpenAI / Azure / Copilot)", "openai"),
+        ("openai       (OpenAI / Azure)", "openai"),
         ("anthropic    (Claude)", "anthropic"),
         ("google-generativeai (Gemini)", "google.generativeai"),
         ("httpx        (Ollama / vLLM)", "httpx"),

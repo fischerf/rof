@@ -282,7 +282,7 @@ The test infrastructure supports two categories of provider:
 
 | Category | Examples | Handled by |
 |---|---|---|
-| **Built-in** | `openai`, `anthropic`, `gemini`, `ollama`, `github_copilot` | `rof_framework.llm.create_provider` |
+| **Built-in** | `openai`, `anthropic`, `gemini`, `ollama` | `rof_framework.llm.create_provider` |
 | **Generic** | any key in `rof_providers.PROVIDER_REGISTRY` | `rof_providers` package (optional install) |
 
 Both categories use the same three environment variables — no provider-specific variable names appear in the test suite itself.

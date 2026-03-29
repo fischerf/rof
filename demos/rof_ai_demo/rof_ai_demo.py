@@ -35,23 +35,23 @@ MCP tool integration (optional)
 Pass one or more --mcp-stdio / --mcp-http flags to connect MCP servers:
 
   # Local filesystem MCP server (stdio, via npx):
-  python rof_ai_demo.py --provider github_copilot \
+  python rof_ai_demo.py --provider anthropic \
                         --mcp-stdio filesystem \
                             npx -y @modelcontextprotocol/server-filesystem /tmp
 
   # Remote HTTP MCP server with bearer auth:
-  python rof_ai_demo.py --provider github_copilot \
+  python rof_ai_demo.py --provider anthropic \
                         --mcp-http sentry \
                             https://mcp.sentry.io/mcp \
                             --mcp-token sntrys_...
 
   # Multiple servers:
-  python rof_ai_demo.py --provider github_copilot \
+  python rof_ai_demo.py --provider anthropic \
                         --mcp-stdio filesystem npx -y @modelcontextprotocol/server-filesystem /tmp \
                         --mcp-http sentry https://mcp.sentry.io/mcp --mcp-token sntrys_...
 
   # Eager connection (discover tool list at startup, surface errors early):
-  python rof_ai_demo.py --provider github_copilot \
+  python rof_ai_demo.py --provider anthropic \
                         --mcp-stdio filesystem npx -y ... \
                         --mcp-eager
 
@@ -68,8 +68,8 @@ to disable and revert to static routing.
 Requirements
 ------------
     pip install anthropic          # Anthropic Claude
-    pip install openai             # OpenAI / Azure / GitHub Copilot
-    pip install httpx              # GitHub Copilot token exchange + Ollama raw
+    pip install openai             # OpenAI / Azure
+    pip install httpx              # Ollama raw HTTP
     pip install ddgs httpx         # optional – enables web + API tools
     pip install lupa               # optional – Lua in-process
     pip install mcp>=1.0           # optional – MCP client tools
@@ -77,9 +77,6 @@ Requirements
 
 Usage
 -----
-    # GitHub Copilot — first run: browser login (token cached for future runs)
-    python rof_ai_demo.py --provider github_copilot --model gpt-4o
-
     # Anthropic / OpenAI
     python rof_ai_demo.py --provider anthropic --model claude-opus-4-5 --api-key sk-ant-...
     python rof_ai_demo.py --provider openai    --model gpt-4o           --api-key sk-...
@@ -88,10 +85,10 @@ Usage
     python rof_ai_demo.py --one-shot "Create a Lua CLI questionnaire"
 
     # Disable learned routing (use static routing only)
-    python rof_ai_demo.py --provider github_copilot --no-routing
+    python rof_ai_demo.py --provider anthropic --no-routing
 
     # Connect an MCP filesystem server
-    python rof_ai_demo.py --provider github_copilot \
+    python rof_ai_demo.py --provider anthropic \
                           --mcp-stdio filesystem \
                               npx -y @modelcontextprotocol/server-filesystem /tmp
 
@@ -647,9 +644,6 @@ def _parse_args() -> argparse.Namespace:
               anthropic      – Anthropic Claude  (--api-key  or  ANTHROPIC_API_KEY)
               openai         – OpenAI GPT        (--api-key  or  OPENAI_API_KEY)
               ollama         – Local Ollama/vLLM (--base-url, no key required)
-              github_copilot – GitHub Copilot    (no key needed! browser login on first run,
-                                                  token cached at ~/.config/rof/copilot_oauth.json
-                                                  for all future runs automatically)
 
             Generic providers (rof_providers package):
               Install rof-providers to enable additional providers discovered
@@ -695,14 +689,6 @@ def _parse_args() -> argparse.Namespace:
                 Example (GitLab behind a corporate CA):
                   --mcp-stdio gitlab-issues npx -y @gitlab/mcp-server --mcp-ssl-no-verify
 
-            GitHub Copilot tips:
-            First run   : python rof_ai_demo.py --provider github_copilot
-                            -> opens GitHub device-activation page in your browser
-                            -> enter the shown code once, then it is cached forever
-            Later runs  : same command — cache is loaded silently, no browser
-            Re-login    : add --invalidate-cache to force a fresh browser login
-            No browser  : add --no-browser to print the URL instead of opening it
-            Direct token: --github-token ghp_...  to bypass device-flow entirely
         """),
     )
 
@@ -712,8 +698,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--provider",
         help=(
-            "LLM provider: anthropic | openai | ollama | github_copilot | <generic>.  "
-            "Aliases: copilot, github-copilot.  "
+            "LLM provider: anthropic | openai | ollama | <generic>.  "
             "Omit to see a full interactive menu."
         ),
     )
@@ -721,9 +706,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--api-key",
         dest="api_key",
-        help=(
-            "LLM API key.  For Copilot: accepted as a GitHub token when --github-token is not set."
-        ),
+        help="LLM API key (ANTHROPIC_API_KEY, OPENAI_API_KEY, …).",
     )
     p.add_argument("--base-url", dest="base_url", help="Ollama/vLLM base URL")
     p.add_argument("--output-dir", dest="output_dir", help="Directory for generated files")
@@ -930,79 +913,6 @@ def _parse_args() -> argparse.Namespace:
             "Use only when connecting to trusted internal hosts whose certificates "
             "are signed by a corporate/internal CA not in the system trust store."
         ),
-    )
-
-    # ------------------------------------------------------------------ #
-    # GitHub Copilot options                                              #
-    # ------------------------------------------------------------------ #
-    copilot = p.add_argument_group(
-        "GitHub Copilot options",
-        "Used when --provider is github_copilot (or copilot / github-copilot).",
-    )
-    copilot.add_argument(
-        "--github-token",
-        dest="github_token",
-        metavar="TOKEN",
-        help=(
-            "Supply a GitHub OAuth token (ghu_…) or classic PAT (ghp_…) directly.  "
-            "Bypasses device-flow entirely."
-        ),
-    )
-    copilot.add_argument(
-        "--no-browser",
-        dest="no_browser",
-        action="store_true",
-        default=False,
-        help="Print the activation URL + code instead of opening the browser.",
-    )
-    copilot.add_argument(
-        "--invalidate-cache",
-        dest="invalidate_cache",
-        action="store_true",
-        default=False,
-        help="Delete the cached OAuth token before starting, forcing a fresh device-flow login.",
-    )
-    copilot.add_argument(
-        "--copilot-cache",
-        dest="copilot_cache",
-        metavar="PATH",
-        default="",
-        help="Custom path for the OAuth token cache file (default: ~/.config/rof/copilot_oauth.json).",
-    )
-    copilot.add_argument(
-        "--ghe-base-url",
-        dest="ghe_base_url",
-        metavar="URL",
-        default="",
-        help="GitHub Enterprise Server root URL (e.g. https://ghe.corp.com).",
-    )
-    copilot.add_argument(
-        "--editor-version",
-        dest="editor_version",
-        metavar="VER",
-        default="",
-        help="Editor-Version header sent to Copilot (default: vscode/1.90.0).",
-    )
-    copilot.add_argument(
-        "--integration-id",
-        dest="integration_id",
-        metavar="ID",
-        default="",
-        help="Copilot-Integration-Id header (default: vscode-chat).",
-    )
-    copilot.add_argument(
-        "--token-endpoint",
-        dest="token_endpoint",
-        metavar="URL",
-        default="",
-        help="Session-token exchange endpoint override for GitHub Enterprise Server.",
-    )
-    copilot.add_argument(
-        "--copilot-api-url",
-        dest="copilot_api_url",
-        metavar="URL",
-        default="",
-        help="Copilot Chat API base URL override for GitHub Enterprise Server.",
     )
 
     # ------------------------------------------------------------------ #

@@ -23,7 +23,7 @@ The REPL is the default entry point — no flags required.  Three of the four
 new abilities are directly usable from it.
 
 ```sh
-python demos/rof_ai_demo/rof_ai_demo.py --provider github_copilot
+python demos/rof_ai_demo/rof_ai_demo.py --provider anthropic
 ```
 
 ### REPL Recipe A — Ask the agent what it can do
@@ -114,7 +114,7 @@ rof> Search the web for the latest Python news
 echo Search the web for the latest Python news > rof_input.txt
 
 python demos/rof_ai_demo/rof_ai_demo.py \
-    --provider github_copilot \
+    --provider anthropic \
     --agent \
     --agent-watch      rof_input.txt \
     --agent-log        rof_output.txt \
@@ -185,9 +185,9 @@ runs.
 ## Quickstart — five minutes to a running agent
 
 ```sh
-# 1. Pick a provider (GitHub Copilot used throughout this guide)
+# 1. Pick a provider
 python demos/rof_ai_demo/rof_ai_demo.py \
-    --provider github_copilot \
+    --provider anthropic \
     --agent \
     --agent-watch  "C:\Users\<you>\OneDrive\rof_input.txt" \
     --agent-log    "C:\Users\<you>\OneDrive\rof_output.txt"
@@ -227,7 +227,7 @@ To layer your own domain documents on top:
 
 ```sh
 python demos/rof_ai_demo/rof_ai_demo.py \
-    --provider github_copilot \
+    --provider anthropic \
     --knowledge-dir ./my_project_docs \
     --agent \
     --agent-watch rof_input.txt \
@@ -244,7 +244,7 @@ recent run scores ≥ 0.70.
 
 ```sh
 python demos/rof_ai_demo/rof_ai_demo.py \
-    --provider github_copilot \
+    --provider anthropic \
     --agent \
     --agent-watch            rof_input.txt \
     --agent-log              rof_output.txt \
@@ -274,7 +274,7 @@ Stop the agent after exactly N completed runs, regardless of outcome:
 
 ```sh
 python demos/rof_ai_demo/rof_ai_demo.py \
-    --provider github_copilot \
+    --provider anthropic \
     --agent \
     --agent-watch      rof_input.txt \
     --agent-log        rof_output.txt \
@@ -297,7 +297,7 @@ commands, not just when a new command arrives:
 
 ```sh
 python demos/rof_ai_demo/rof_ai_demo.py \
-    --provider github_copilot \
+    --provider anthropic \
     --agent \
     --agent-watch            rof_input.txt \
     --agent-log              rof_output.txt \
@@ -387,7 +387,7 @@ additional warning during the next observation tick.
 
 ```sh
 python demos/rof_ai_demo/rof_ai_demo.py \
-    --provider github_copilot \
+    --provider anthropic \
     --agent \
     --agent-watch      rof_input.txt \
     --agent-log        rof_output/latest_result.md \
@@ -412,7 +412,7 @@ fully intact.
 ```sh
 # First run — agent executes 3 cycles then is killed
 python demos/rof_ai_demo/rof_ai_demo.py \
-    --provider github_copilot \
+    --provider anthropic \
     --agent \
     --agent-watch rof_input.txt \
     --agent-log   rof_output.txt
@@ -420,7 +420,7 @@ python demos/rof_ai_demo/rof_ai_demo.py \
 
 # Second run — resumes, episode memory shows 3 prior episodes
 python demos/rof_ai_demo/rof_ai_demo.py \
-    --provider github_copilot \
+    --provider anthropic \
     --agent \
     --agent-watch rof_input.txt \
     --agent-log   rof_output.txt
@@ -440,7 +440,7 @@ across multiple agent instances or commit it to version control:
 
 ```sh
 python demos/rof_ai_demo/rof_ai_demo.py \
-    --provider github_copilot \
+    --provider anthropic \
     --agent \
     --agent-watch        rof_input.txt \
     --agent-log          rof_output.txt \
@@ -455,7 +455,7 @@ This is the full production-style invocation combining every new ability:
 
 ```sh
 python demos/rof_ai_demo/rof_ai_demo.py \
-    --provider           github_copilot \
+    --provider           anthropic \
     --model              gpt-4o \
     --output-dir         ./rof_output \
     --rag-backend        chromadb \

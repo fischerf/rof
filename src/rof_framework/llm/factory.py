@@ -10,7 +10,6 @@ from typing import Optional
 from rof_framework.core.interfaces.llm_provider import LLMProvider, LLMRequest, LLMResponse
 from rof_framework.llm.providers.anthropic_provider import AnthropicProvider
 from rof_framework.llm.providers.gemini_provider import GeminiProvider
-from rof_framework.llm.providers.github_copilot_provider import GitHubCopilotProvider
 from rof_framework.llm.providers.ollama_provider import OllamaProvider
 from rof_framework.llm.providers.openai_provider import OpenAIProvider
 from rof_framework.llm.response.response_parser import ResponseParser
@@ -82,17 +81,10 @@ def create_provider(
             api_key=api_key or "not-needed",
             **kwargs,
         )
-    elif name in ("github_copilot", "copilot", "github-copilot"):
-        base = GitHubCopilotProvider(
-            github_token=api_key or kwargs.pop("github_token", ""),
-            model=model or "gpt-4o",
-            **kwargs,
-        )
     else:
         raise ValueError(
             f"Unknown provider '{provider_name}'. "
-            "Choose from: openai, azure, anthropic, gemini, ollama, vllm, "
-            "github_copilot."
+            "Choose from: openai, azure, anthropic, gemini, ollama, vllm."
         )
 
     # Default retry config with jittered backoff
