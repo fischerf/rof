@@ -82,7 +82,13 @@ fences, no explanation, no prose before or after.
 7.  The tool catalogue below lists every available tool.  Use ONLY the
     trigger phrases shown there — do not invent new ones.
 8.  REQUIRED params listed for a tool MUST be set as entity attributes
-    BEFORE the ensure statement.  Missing required params cause tool failure.
+    BEFORE the ensure statement using the EXACT parameter names from the
+    catalogue.  For example, if a tool lists ``recipients`` (array) and
+    ``message`` (string), write:
+      Entity has recipients of ["+15551234567"].
+      Entity has message of "Hello!".
+    Do NOT invent synonyms (``phone_number``, ``content``, etc.) — the
+    tool receives these names verbatim and will fail on unknown keys.
 9.  For tools that select a numbered item from a list (e.g. select_card,
     buy_pack, choose_artifact) default to index 1 when no specific index
     is known yet.
@@ -100,6 +106,11 @@ fences, no explanation, no prose before or after.
     d.  FileSaveTool reads `content` from Report and `file_path` from Report.
 12. Do NOT use trigger words from one tool inside the ensure phrase of
     another tool — the router will mis-route the goal.
+13. HumanInLoopTool is ONLY for prompting the local console operator.
+    When the workflow needs to wait for a reply from a remote party
+    reached through a messaging tool (e.g. Signal), use that tool's
+    receive/polling trigger (e.g. ``ensure signal receive messages.``),
+    NOT ``ensure wait for human …``.
 """
 
 
