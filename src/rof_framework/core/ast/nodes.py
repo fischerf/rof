@@ -58,7 +58,7 @@ class Attribute(RLNode):
 
     entity: str = ""
     name: str = ""
-    value: Any = None  # str | int | float
+    value: Any = None  # str | int | float | list | dict
 
 
 @dataclass

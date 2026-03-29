@@ -824,8 +824,14 @@ class MCPClientTool(ToolProvider):
         # Wrap scalar values in a list when the schema expects "array".
         for key in list(remapped.keys()):
             if key in props and props[key].get("type") == "array":
-                if not isinstance(remapped[key], list):
-                    remapped[key] = [remapped[key]]
+                val = remapped[key]
+                if isinstance(val, str) and val.strip().startswith("["):
+                    try:
+                        remapped[key] = json.loads(val)
+                    except (ValueError, json.JSONDecodeError):
+                        remapped[key] = [val]
+                elif not isinstance(val, list):
+                    remapped[key] = [val]
 
         return remapped
 

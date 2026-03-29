@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from abc import ABC, abstractmethod
@@ -187,7 +188,11 @@ class AttributeParser(StatementParser):
             try:
                 value = float(raw)
             except ValueError:
-                pass
+                if raw.startswith(("[", "{")):
+                    try:
+                        value = json.loads(raw)
+                    except (ValueError, json.JSONDecodeError):
+                        pass
         return Attribute(source_line=lineno, entity=m.group(1), name=m.group(2), value=value)
 
 

@@ -125,6 +125,24 @@ class TestAttributeParser:
         names = [a.name for a in ast.attributes]
         assert set(names) == {"age", "score", "city"}
 
+    def test_list_attribute_single(self):
+        ast = parse('Message has recipients of ["+49123456789"].')
+        a = ast.attributes[0]
+        assert a.value == ["+49123456789"]
+        assert isinstance(a.value, list)
+
+    def test_list_attribute_multiple(self):
+        ast = parse('Message has recipients of ["+49123456789", "+49987654321"].')
+        a = ast.attributes[0]
+        assert a.value == ["+49123456789", "+49987654321"]
+        assert isinstance(a.value, list)
+
+    def test_list_attribute_integers(self):
+        ast = parse("Report has ids of [1, 2, 3].")
+        a = ast.attributes[0]
+        assert a.value == [1, 2, 3]
+        assert isinstance(a.value, list)
+
 
 # ─── Predicate ────────────────────────────────────────────────────────────────
 
