@@ -292,26 +292,30 @@ class SignalIOHandler(IOHandler):
         poll_interval: float = 5.0,
         api_timeout: float = 30.0,
         allowed_senders: Optional[list[str]] = None,
+        allowed_group: Optional[str] = None,
         log_format: str = "text",
         ssl_verify: bool | str = True,
         max_chars_per_message: int = _SIGNAL_MAX_MSG_CHARS,
     ) -> None:
         if not account:
             raise ValueError("SignalIOHandler: 'account' (E.164 phone number) is required.")
-        if not reply_to:
-            raise ValueError("SignalIOHandler: 'reply_to' must contain at least one recipient.")
 
         self._api_base = api_base_url.rstrip("/")
         self._account = account
-        self._reply_to = list(reply_to)
+        self._reply_to = list(reply_to)   # static fallback / backward-compat override
         self._poll_interval = poll_interval
         self._api_timeout = api_timeout
         self._allowed_senders: Optional[set[str]] = (
             set(allowed_senders) if allowed_senders else None
         )
+        self._allowed_group: Optional[str] = allowed_group or None
         self._log_format = log_format
         self._ssl_verify = ssl_verify
         self._max_chars = max_chars_per_message
+
+        # Dynamic reply target: set by poll() to the sender's DM or the group
+        # that issued the most-recent accepted command.
+        self._pending_reply_to: str = ""
 
         # Dedup: track message timestamps to avoid processing the same message
         # twice.  We keep a bounded ordered deque for FIFO eviction alongside
@@ -352,18 +356,59 @@ class SignalIOHandler(IOHandler):
             parsed = _parse_envelope(envelope)
             if parsed is None:
                 continue
-            sender, body, ts_ms = parsed
+            sender, body, ts_ms, group_id, destination = parsed
 
             if ts_ms in self._seen_ts:
                 continue
             self._track_ts(ts_ms)
 
-            if self._allowed_senders and sender not in self._allowed_senders:
+            # ── Access-control + dynamic reply routing ────────────────────────
+            #
+            # Four cases (allowed_senders / allowed_group):
+            #
+            #  neither set  → reject everything (no trust boundary configured)
+            #  senders only → accept note-to-self from listed senders;
+            #                 reply to sender's DM inbox
+            #  group only   → accept group messages from the allowed group;
+            #                 reply to the group
+            #  both set     → accept note-to-self from listed senders OR
+            #                 group messages from the allowed group;
+            #                 reply to whichever channel the command arrived on
+            #
+            # "Note-to-self" means a syncMessage.sentMessage whose destination
+            # equals self._account.  Outgoing messages to third parties also
+            # appear as syncMessages (with a different destination) and are
+            # always rejected.
+
+            is_note_to_self = (destination == self._account)
+            is_from_allowed_group = (
+                self._allowed_group is not None
+                and group_id == self._allowed_group
+                and not is_note_to_self
+            )
+            is_from_allowed_sender = (
+                self._allowed_senders is not None
+                and is_note_to_self
+                and sender in self._allowed_senders
+            )
+
+            if self._allowed_senders is None and self._allowed_group is None:
                 _info(
-                    f"SignalIOHandler: ignoring message from "
-                    f"{sender!r} — not in allowed_senders whitelist."
+                    "SignalIOHandler: ignoring message — no filter configured "
+                    "(set --agent-signal-allowed-senders or --agent-signal-allowed-group)."
                 )
                 continue
+
+            if not (is_from_allowed_sender or is_from_allowed_group):
+                _info(
+                    f"SignalIOHandler: ignoring message from {sender!r} "
+                    f"(group={group_id!r}, destination={destination!r}) "
+                    f"— does not match any configured filter."
+                )
+                continue
+
+            # Record where to send the reply for this command.
+            self._pending_reply_to = self._allowed_group if is_from_allowed_group else sender
 
             _info(
                 f"Signal command received from {sender}: "
@@ -400,6 +445,15 @@ class SignalIOHandler(IOHandler):
         chunks = _split_text(full_text, self._max_chars)
         total = len(chunks)
 
+        # Prefer the channel the command arrived on; fall back to the static
+        # --agent-signal-reply-to list (backward-compat / explicit override).
+        reply_targets = (
+            [self._pending_reply_to] if self._pending_reply_to else self._reply_to
+        )
+        if not reply_targets:
+            _warn("SignalIOHandler: no reply target — output not sent.")
+            return
+
         for idx, chunk in enumerate(chunks, start=1):
             payload_text = f"[{idx}/{total}]\n{chunk}" if total > 1 else chunk
             self._post(
@@ -407,25 +461,34 @@ class SignalIOHandler(IOHandler):
                 {
                     "message":    payload_text,
                     "number":     self._account,
-                    "recipients": self._reply_to,
+                    "recipients": reply_targets,
                 },
             )
             if idx < total:
                 time.sleep(_SIGNAL_CHUNK_DELAY_S)
 
         _info(
-            f"Signal output sent → {self._reply_to}  "
+            f"Signal output sent → {reply_targets}  "
             f"({total} chunk(s), {len(full_text)} chars, success={success})"
         )
 
     def info_lines(self) -> list[tuple[str, str]]:
+        if self._allowed_senders and self._allowed_group:
+            access = "note-to-self from allowed senders OR allowed group messages"
+            reply  = "sender DM / group (dynamic)"
+        elif self._allowed_group:
+            access = f"group messages from {self._allowed_group}"
+            reply  = f"group {self._allowed_group}"
+        elif self._allowed_senders:
+            access = "note-to-self from: " + ", ".join(sorted(self._allowed_senders))
+            reply  = "sender DM (dynamic)"
+        else:
+            access = "NONE — all messages ignored (no filter configured)"
+            reply  = "—"
         return [
             ("Signal account",  self._account),
-            ("reply to",        ", ".join(self._reply_to)),
-            ("allowed senders", (
-                ", ".join(sorted(self._allowed_senders))
-                if self._allowed_senders else "anyone"
-            )),
+            ("access",          access),
+            ("reply to",        reply),
             ("Signal API URL",  self._api_base),
             ("log format",      self._log_format),
         ]
@@ -499,10 +562,11 @@ class SignalIOHandler(IOHandler):
 # Module-level helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _parse_envelope(envelope: dict) -> Optional[tuple[str, str, int]]:
+def _parse_envelope(envelope: dict) -> Optional[tuple[str, str, int, Optional[str], str]]:
     """
-    Extract (sender, body, timestamp_ms) from a signal-cli REST API envelope.
-    Returns None for non-text envelopes (delivery receipts, typing events, …).
+    Extract (sender, body, timestamp_ms, group_id, destination) from a signal-cli
+    REST API envelope.  Returns None for non-text envelopes (delivery receipts,
+    typing events, …).
 
     Handles both the flat format (older signal-cli-rest-api) and the nested
     format used by newer versions where message data lives under an
@@ -511,6 +575,12 @@ def _parse_envelope(envelope: dict) -> Optional[tuple[str, str, int]]:
 
     Mirrors the logic in signal_client._parse_envelope but works synchronously
     and returns a plain tuple instead of a SignalMessage dataclass.
+
+    ``group_id`` is None for direct messages and note-to-self messages.
+    ``destination`` is the explicit recipient for outgoing ``syncMessage.sentMessage``
+    envelopes (the phone number the account sent *to*).  It is an empty string for
+    incoming ``dataMessage`` envelopes where the recipient is implicit.  Use
+    ``destination == self._account`` to detect a true note-to-self message.
     """
     # Unwrap nested "envelope" key used by newer signal-cli-rest-api versions
     inner: dict = envelope.get("envelope", envelope)
@@ -532,7 +602,14 @@ def _parse_envelope(envelope: dict) -> Optional[tuple[str, str, int]]:
         return None
 
     ts_ms: int = int(data.get("timestamp", inner.get("timestamp", 0)) or 0)
-    return source, body, ts_ms
+
+    group_info = data.get("groupInfo") or data.get("groupV2")
+    group_id: Optional[str] = group_info.get("groupId") if group_info else None
+
+    # Present only in syncMessage.sentMessage (outgoing); empty for dataMessage.
+    destination: str = data.get("destination", data.get("destinationNumber", ""))
+
+    return source, body, ts_ms, group_id, destination
 
 
 def _split_text(text: str, max_chars: int) -> list[str]:

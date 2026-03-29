@@ -1102,7 +1102,11 @@ def _parse_args() -> argparse.Namespace:
         default="",
         help=(
             "Comma-separated list of E.164 phone numbers (or base64 group IDs) "
-            "to send agent output to.  Required when --agent-signal is set."
+            "used as a static reply-to override.  Optional: when "
+            "--agent-signal-allowed-senders or --agent-signal-allowed-group is set, "
+            "replies are routed automatically back to the command source "
+            "(sender DM or group).  Provide this flag only when you need to "
+            "redirect all replies to a fixed recipient regardless of source."
         ),
     )
     agent.add_argument(
@@ -1113,7 +1117,19 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "Comma-separated whitelist of E.164 phone numbers whose Signal messages "
             "are accepted as commands.  Messages from anyone else are silently ignored.  "
-            "Defaults to accepting messages from all senders."
+            "Defaults to accepting messages from all senders.  "
+            "Ignored when --agent-signal-allowed-group is set."
+        ),
+    )
+    agent.add_argument(
+        "--agent-signal-allowed-group",
+        dest="agent_signal_allowed_group",
+        metavar="GROUP_ID",
+        default="",
+        help=(
+            "Base64 Signal group ID.  When set, the agent accepts commands only from "
+            "messages sent to itself (note-to-self) or from this group.  "
+            "Takes precedence over --agent-signal-allowed-senders."
         ),
     )
     agent.add_argument(
@@ -1428,6 +1444,9 @@ def main() -> None:
                 if _sig_allowed_raw
                 else None
             )
+            _sig_allowed_group: Optional[str] = (
+                getattr(args, "agent_signal_allowed_group", "").strip() or None
+            )
             _sig_poll: float = max(
                 1.0, float(getattr(args, "agent_signal_poll", 5.0) or 5.0)
             )
@@ -1444,12 +1463,6 @@ def main() -> None:
                     "or SIGNAL_PHONE_NUMBER env var."
                 )
                 sys.exit(1)
-            if not _sig_reply_to:
-                err(
-                    "Signal agent mode requires --agent-signal-reply-to <E164[,…]> "
-                    "to know where to send results."
-                )
-                sys.exit(1)
 
             _io_handler = SignalIOHandler(
                 api_base_url=_sig_url,
@@ -1457,6 +1470,7 @@ def main() -> None:
                 reply_to=_sig_reply_to,
                 poll_interval=_sig_poll,
                 allowed_senders=_sig_allowed,
+                allowed_group=_sig_allowed_group,
                 log_format=_agent_log_format,
                 ssl_verify=_sig_ssl_verify,
             )

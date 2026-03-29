@@ -147,36 +147,46 @@ back to the configured recipients, splitting long output into numbered chunks
 automatically.
 
 ```sh
-# Minimal — receive commands from anyone, reply to one number
-python rof_ai_demo.py --provider anthropic \
-    --agent \
-    --agent-signal \
-    --agent-signal-number   +15550001111 \
-    --agent-signal-reply-to +15550002222
-
-# Only accept commands from a specific number (whitelist)
+# Personal assistant: only your own note-to-self triggers the agent
+# (reply comes back to your DM inbox automatically)
 python rof_ai_demo.py --provider anthropic \
     --agent \
     --agent-signal \
     --agent-signal-number          +15550001111 \
-    --agent-signal-reply-to        +15550002222 \
-    --agent-signal-allowed-senders +15550002222
+    --agent-signal-allowed-senders +15550001111
+
+# Team bot: any member of the group can issue commands
+# (reply is sent back to the group automatically)
+python rof_ai_demo.py --provider anthropic \
+    --agent \
+    --agent-signal \
+    --agent-signal-number        +15550001111 \
+    --agent-signal-allowed-group "abc123base64groupid=="
+
+# Combined: personal note-to-self commands + team group commands
+# (reply goes back to whichever channel the command came from)
+python rof_ai_demo.py --provider anthropic \
+    --agent \
+    --agent-signal \
+    --agent-signal-number          +15550001111 \
+    --agent-signal-allowed-senders +15550001111 \
+    --agent-signal-allowed-group   "abc123base64groupid=="
 
 # Custom API URL + mission goal
 python rof_ai_demo.py --provider ollama \
     --agent \
     --agent-signal \
-    --agent-signal-url     http://signal.internal:8080 \
-    --agent-signal-number  +15550001111 \
-    --agent-signal-reply-to +15550002222 \
+    --agent-signal-url             http://signal.internal:8080 \
+    --agent-signal-number          +15550001111 \
+    --agent-signal-allowed-senders +15550001111 \
     --agent-goal "Daily summary of open GitLab issues"
 
 # Skip TLS verification (self-signed corporate cert)
 python rof_ai_demo.py --provider anthropic \
     --agent \
     --agent-signal \
-    --agent-signal-number       +15550001111 \
-    --agent-signal-reply-to     +15550002222 \
+    --agent-signal-number          +15550001111 \
+    --agent-signal-allowed-senders +15550001111 \
     --agent-signal-ssl-no-verify
 ```
 
@@ -427,11 +437,78 @@ The handler tracks the timestamp of every processed message in a bounded cache
 occur when the REST API returns the same envelope on consecutive polls — are
 silently discarded.
 
-#### Allowed senders whitelist
+#### Note-to-self detection
 
-When `--agent-signal-allowed-senders` is set, messages from numbers not in the
-list are logged and ignored.  This prevents other Signal users from issuing
-commands to an unattended agent.
+Both filter modes rely on detecting whether a message is a **note-to-self
+command** — a `syncMessage.sentMessage` envelope where the outgoing destination
+equals the agent's own account number.  This is the only reliable self-command
+channel: it fires when the operator writes a message *to themselves* in Signal.
+
+Outgoing messages sent to third parties also appear as `syncMessage.sentMessage`
+envelopes in the receive queue (with a different `destination`).  The handler
+rejects these regardless of filter mode so that every message you send to
+friends, colleagues, or groups is silently ignored.
+
+#### Message filtering
+
+Two mutually exclusive filter modes are available. `--agent-signal-allowed-group`
+takes precedence when both flags are supplied.
+
+**Allowed-group mode** (`--agent-signal-allowed-group GROUP_ID`)
+
+Accepts a message only if **one** of these conditions is true:
+
+1. The message is a note-to-self (`destination == agent account`).
+2. The message arrived from the specified Signal group.
+
+All other messages — including outgoing DMs to third parties and messages from
+other groups — are logged and discarded. This is the recommended mode for
+production deployments: only members of a dedicated Signal group can issue
+commands, and the operator can always override by sending a note-to-self.
+
+The group ID is the base64-encoded `groupId` field returned by
+`signal_list_groups` (signal_mcp tool) or by `signal-cli`:
+
+```sh
+# Retrieve your group list via the signal_mcp server:
+# ensure list Signal groups via the signal MCP server.
+
+# Or inspect directly via signal-cli:
+signal-cli -a +15550001111 listGroups
+```
+
+**Allowed-senders whitelist** (`--agent-signal-allowed-senders E164[,E164…]`)
+
+When `--agent-signal-allowed-group` is **not** set, this comma-separated
+whitelist restricts accepted senders by phone number.  A message is accepted
+only when **both** conditions are met:
+
+1. The sender's number is in the whitelist.
+2. The message is a note-to-self (`destination == agent account`).
+
+This ensures that regular outgoing messages from your phone (to friends,
+family, or other groups) are never picked up as commands, even if your own
+number is in the whitelist.  Only messages you deliberately send to yourself
+are treated as commands.
+
+#### Configuration matrix
+
+`--agent-signal-reply-to` is **not needed** when filter flags are set — the reply
+destination is determined automatically from where the command arrived.
+
+| `--agent-signal-allowed-senders` | `--agent-signal-allowed-group` | Who can issue commands | How to issue a command | Where reply is sent |
+|---|---|---|---|---|
+| *(not set)* | *(not set)* | **nobody** — all messages ignored | — | — |
+| `+SENDER[,…]` | *(not set)* | Listed senders only | Write a **note-to-self** on your phone | Sender's own DM inbox |
+| *(not set)* | `GROUP_ID` | Any member of the group | Write a **message in the group** | The group |
+| `+SENDER[,…]` | `GROUP_ID` | Listed senders (via DM) **or** any group member | Note-to-self **or** group message | Sender's DM inbox (if note-to-self) / group (if group message) |
+
+**Rules:**
+
+- **Note-to-self** is the only valid DM channel.  A `syncMessage.sentMessage` envelope where the outgoing `destination` equals `--agent-signal-number`.  Any message you write to a third party is silently ignored regardless of filter settings.
+- **Group commands** are accepted only when `--agent-signal-allowed-group` is set and the message arrives from exactly that group.
+- **Reply routing is automatic**: the reply always goes back to the channel the command came from — sender's DM or the group.  You do not need `--agent-signal-reply-to`.
+- `--agent-signal-reply-to` is a static override retained for backward compatibility or edge cases where you want all replies redirected to a fixed recipient.
 
 #### Environment variables (SignalIOHandler)
 
@@ -1111,8 +1188,9 @@ python rof_ai_demo.py --provider anthropic
 | `--agent-signal` | off | Use Signal messenger as the agent I/O backend instead of watch/log files. Requires `--agent-signal-number` and `--agent-signal-reply-to`. |
 | `--agent-signal-url URL` | `http://localhost:8080` (or `$SIGNAL_API_URL`) | Base URL of the signal-cli REST API. |
 | `--agent-signal-number E164` | `$SIGNAL_PHONE_NUMBER` | E.164 phone number of the Signal account registered in signal-cli (e.g. `+15551234567`). Required with `--agent-signal`. |
-| `--agent-signal-reply-to E164[,E164…]` | — | Comma-separated E.164 phone numbers or base64 group IDs to send output to. Required with `--agent-signal`. |
-| `--agent-signal-allowed-senders E164[,E164…]` | *(all accepted)* | Whitelist of phone numbers allowed to issue commands. Messages from other numbers are silently ignored. |
+| `--agent-signal-reply-to E164[,E164…]` | *(dynamic)* | Static reply-to override — all replies go to this recipient regardless of command source. Optional: when filter flags are set, replies are routed automatically back to the command source (sender DM or group). |
+| `--agent-signal-allowed-senders E164[,E164…]` | *(not set — all ignored)* | Accept note-to-self commands from these phone numbers; reply goes to each sender's own DM inbox. |
+| `--agent-signal-allowed-group GROUP_ID` | *(not set — all ignored)* | Accept commands from this Signal group; reply goes back to the group. When combined with `--agent-signal-allowed-senders`, both channels are active and replies route to whichever channel the command arrived on. |
 | `--agent-signal-poll SECONDS` | `5.0` | How often the agent polls the Signal REST API for new messages. |
 | `--agent-signal-ssl-no-verify` | off | Disable TLS certificate verification for the signal-cli REST API. Use only for trusted internal hosts with self-signed certs. |
 
