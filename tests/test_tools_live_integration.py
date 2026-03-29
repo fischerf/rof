@@ -9,7 +9,6 @@ variables to run them:
 
     ROF_TEST_PROVIDER   – provider name understood by ``create_provider``:
                           "openai" | "anthropic" | "gemini" | "ollama"
-                          | "github_copilot"
                           | <any key in rof_providers.PROVIDER_REGISTRY>
                             (generic providers — loaded automatically when
                             the rof_providers package is installed)
@@ -153,8 +152,8 @@ def _make_generic_provider(provider_name: str, api_key: str | None, model: str |
 def live_llm():
     """Build a real LLMProvider from env-var configuration (session-scoped).
 
-    Supports both built-in providers (openai, anthropic, gemini, ollama,
-    github_copilot) and any generic provider registered in
+    Supports both built-in providers (openai, anthropic, gemini, ollama)
+    and any generic provider registered in
     ``rof_providers.PROVIDER_REGISTRY``.  No provider names are hardcoded here.
 
     Resolution order
@@ -165,7 +164,7 @@ def live_llm():
     provider_name, api_key, model = _require_env()
     provider_name = provider_name.lower()
 
-    _BUILTIN_NAMES = {"openai", "anthropic", "gemini", "google", "ollama", "github_copilot"}
+    _BUILTIN_NAMES = {"openai", "anthropic", "gemini", "google", "ollama"}
     if provider_name in _BUILTIN_NAMES:
         kwargs: dict = {}
         if model:

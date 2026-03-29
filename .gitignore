@@ -14,3 +14,6 @@ tools/gitlab_mcp/knowledge/
 knowledge_store/
 start_ai_demo.bat
 rof_output/
+demos/rof_ai_demo/knowledge/
+tools/mcp_server/
+tests/test_fujitsu_provider.py

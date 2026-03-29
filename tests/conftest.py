@@ -37,7 +37,7 @@ Environment variables
 ROF_TEST_PROVIDER
     Name of the provider to use for live tests.  Accepted values:
 
-      Built-ins : openai | anthropic | gemini | ollama | github_copilot
+      Built-ins : openai | anthropic | gemini | ollama
       Generic   : any key in ``rof_providers.PROVIDER_REGISTRY``
                   (e.g. the name used as ``--provider`` in the CLI)
 
@@ -199,7 +199,7 @@ def _require_live_env() -> tuple[str, str, str | None]:
     if not provider:
         pytest.skip(
             "Live integration tests require ROF_TEST_PROVIDER to be set.\n"
-            "Built-ins : openai | anthropic | gemini | ollama | github_copilot\n"
+            "Built-ins : openai | anthropic | gemini | ollama\n"
             "Generic   : any key in rof_providers.PROVIDER_REGISTRY\n"
             "Example   : ROF_TEST_PROVIDER=openai ROF_TEST_API_KEY=sk-... pytest -m live_integration"
         )
@@ -220,7 +220,7 @@ def live_llm():
     Resolution order
     ----------------
     1. Built-in providers handled by ``rof_framework.llm.create_provider``
-       (openai, anthropic, gemini, ollama, github_copilot).
+       (openai, anthropic, gemini, ollama).
     2. Generic providers discovered from ``rof_providers.PROVIDER_REGISTRY``
        — no provider names are hardcoded here; the registry is read lazily.
 
@@ -232,7 +232,7 @@ def live_llm():
     provider_name, api_key, model = _require_live_env()
 
     # ── Try built-in providers first ────────────────────────────────────────
-    _BUILTIN_NAMES = {"openai", "anthropic", "gemini", "google", "ollama", "github_copilot"}
+    _BUILTIN_NAMES = {"openai", "anthropic", "gemini", "google", "ollama"}
     if provider_name in _BUILTIN_NAMES:
         if not ROF_LLM_AVAILABLE:
             pytest.skip("rof_framework.llm not available")

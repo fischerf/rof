@@ -1,0 +1,32 @@
+# truck_pipeline.yaml
+# ROF pipeline for the truck delivery routing problem.
+# Three stages: gather → analyse → decide.
+# Each stage receives the full accumulated snapshot from all prior stages.
+
+name: truck_routing
+description: >
+  Optimal delivery route planning for a single truck with capacity constraints.
+  Demonstrates ROF handling a problem where a single-route solution is
+  infeasible and multi-run splits must be evaluated.
+
+stages:
+
+  - name: gather
+    rl_file: truck_01_gather.rl
+    description: Define network entities and run the capacity feasibility check.
+
+  - name: analyse
+    rl_file: truck_02_analyse.rl
+    description: Enumerate valid route splits and calculate distances.
+    depends_on: [gather]
+
+  - name: decide
+    rl_file: truck_03_decide.rl
+    description: Select the optimal split and produce the delivery plan.
+    depends_on: [analyse]
+
+config:
+  on_failure:             halt    # stop immediately if the game subprocess errors
+  retry_count:            0       # no retry – each run is a fresh playthrough
+  inject_prior_context:   true    # thread Game.saved_to from Stage 1 → Stage 2
+  max_snapshot_entities:  20

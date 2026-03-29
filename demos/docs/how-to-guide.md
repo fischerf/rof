@@ -23,8 +23,7 @@
    - [Anthropic (Claude)](#54-anthropic-claude)
    - [Google Gemini](#55-google-gemini)
    - [Ollama (Local Models)](#56-ollama-local-models)
-   - [GitHub Copilot](#57-github-copilot)
-   - [Retry & Fallback](#58-retry--fallback)
+   - [Retry & Fallback](#57-retry--fallback)
 6. [Module 3 — rof_tools](#6-module-3--rof_tools)
    - [ToolRegistry](#61-toolregistry)
    - [ToolRouter](#62-toolrouter)
@@ -54,7 +53,7 @@ ROF (**RelateLang Orchestration Framework**) lets you describe AI workflows as p
 | Module | Role |
 |---|---|
 | `rof_core` | Parser, AST, Orchestrator, EventBus, StateManager |
-| `rof_llm` | LLM provider adapters (OpenAI, Anthropic, Gemini, Ollama, Copilot) |
+| `rof_llm` | LLM provider adapters (OpenAI, Anthropic, Gemini, Ollama) |
 | `rof_tools` | Built-in tools (search, RAG, database, code runner, …) |
 | `rof_pipeline` | Multi-stage pipeline runner with progressive-enrichment |
 | `rof_routing` | Learned routing confidence that improves with every run |
@@ -321,7 +320,6 @@ ast = parser.parse('fetch weather data from api.weather.com.')
 | Anthropic | `AnthropicProvider` | `pip install anthropic` |
 | Google Gemini | `GeminiProvider` | `pip install google-generativeai` |
 | Ollama / vLLM | `OllamaProvider` | `pip install httpx` |
-| GitHub Copilot | `GitHubCopilotProvider` | `pip install openai httpx` |
 
 ### 5.2 Quick-start with `create_provider()`
 
@@ -343,6 +341,8 @@ print(response.content)
 ```
 
 Supported `provider_name` values: `"openai"`, `"azure"`, `"anthropic"`, `"gemini"`, `"ollama"`, `"vllm"`.
+
+### 5.7 Retry & Fallback
 
 ### 5.3 OpenAI / Azure OpenAI
 
@@ -395,31 +395,6 @@ llm = OllamaProvider(
 )
 ```
 
-### 5.7 GitHub Copilot
-
-```python
-from rof_framework.rof_llm import GitHubCopilotProvider
-
-# First-time: device-flow browser login (token cached for future runs)
-llm = GitHubCopilotProvider.authenticate(model="gpt-4o")
-
-# Subsequent runs: load cached token silently
-llm = GitHubCopilotProvider.from_cache(model="gpt-4o")
-
-# Or supply a token directly
-llm = GitHubCopilotProvider(github_token="ghu_...", model="gpt-4o")
-```
-
-For GitHub Enterprise Server:
-
-```python
-llm = GitHubCopilotProvider.authenticate(
-    ghe_base_url="https://ghe.corp.com",
-    model="gpt-4o",
-)
-```
-
-### 5.8 Retry & Fallback
 
 ```python
 from rof_framework.rof_llm import RetryConfig, RetryManager, create_provider

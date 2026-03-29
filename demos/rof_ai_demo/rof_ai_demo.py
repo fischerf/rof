@@ -35,23 +35,23 @@ MCP tool integration (optional)
 Pass one or more --mcp-stdio / --mcp-http flags to connect MCP servers:
 
   # Local filesystem MCP server (stdio, via npx):
-  python rof_ai_demo.py --provider github_copilot \
+  python rof_ai_demo.py --provider anthropic \
                         --mcp-stdio filesystem \
                             npx -y @modelcontextprotocol/server-filesystem /tmp
 
   # Remote HTTP MCP server with bearer auth:
-  python rof_ai_demo.py --provider github_copilot \
+  python rof_ai_demo.py --provider anthropic \
                         --mcp-http sentry \
                             https://mcp.sentry.io/mcp \
                             --mcp-token sntrys_...
 
   # Multiple servers:
-  python rof_ai_demo.py --provider github_copilot \
+  python rof_ai_demo.py --provider anthropic \
                         --mcp-stdio filesystem npx -y @modelcontextprotocol/server-filesystem /tmp \
                         --mcp-http sentry https://mcp.sentry.io/mcp --mcp-token sntrys_...
 
   # Eager connection (discover tool list at startup, surface errors early):
-  python rof_ai_demo.py --provider github_copilot \
+  python rof_ai_demo.py --provider anthropic \
                         --mcp-stdio filesystem npx -y ... \
                         --mcp-eager
 
@@ -68,8 +68,8 @@ to disable and revert to static routing.
 Requirements
 ------------
     pip install anthropic          # Anthropic Claude
-    pip install openai             # OpenAI / Azure / GitHub Copilot
-    pip install httpx              # GitHub Copilot token exchange + Ollama raw
+    pip install openai             # OpenAI / Azure
+    pip install httpx              # Ollama raw HTTP
     pip install ddgs httpx         # optional – enables web + API tools
     pip install lupa               # optional – Lua in-process
     pip install mcp>=1.0           # optional – MCP client tools
@@ -77,9 +77,6 @@ Requirements
 
 Usage
 -----
-    # GitHub Copilot — first run: browser login (token cached for future runs)
-    python rof_ai_demo.py --provider github_copilot --model gpt-4o
-
     # Anthropic / OpenAI
     python rof_ai_demo.py --provider anthropic --model claude-opus-4-5 --api-key sk-ant-...
     python rof_ai_demo.py --provider openai    --model gpt-4o           --api-key sk-...
@@ -88,10 +85,10 @@ Usage
     python rof_ai_demo.py --one-shot "Create a Lua CLI questionnaire"
 
     # Disable learned routing (use static routing only)
-    python rof_ai_demo.py --provider github_copilot --no-routing
+    python rof_ai_demo.py --provider anthropic --no-routing
 
     # Connect an MCP filesystem server
-    python rof_ai_demo.py --provider github_copilot \
+    python rof_ai_demo.py --provider anthropic \
                           --mcp-stdio filesystem \
                               npx -y @modelcontextprotocol/server-filesystem /tmp
 
@@ -134,6 +131,7 @@ from console import (  # noqa: E402
     section,
     warn,
     yellow,
+    red,
 )
 from imports import _HAS_AUDIT, _HAS_MCP  # noqa: E402
 
@@ -144,6 +142,7 @@ try:
 except ImportError:
     MCPServerConfig = None  # type: ignore[assignment,misc]
 from agent import run_agent  # noqa: E402
+from io_handler import FileIOHandler, IOHandler, SignalIOHandler  # noqa: E402
 from session import ROFSession  # noqa: E402
 from telemetry import _COMMS_DIR_NAME, _STATS  # noqa: E402
 from wizard import _setup_wizard  # noqa: E402
@@ -161,6 +160,7 @@ _EXAMPLE_PROMPTS = [
     "Generate a JavaScript function to validate email addresses",
     "Write a Lua script that implements a simple calculator",
     "List the files in /tmp using the filesystem MCP server",  # MCP example
+    "What can you do? Retrieve your agent skills from the knowledge base",  # RAG / agent.md
 ]
 
 _HELP_COMMANDS = (
@@ -169,6 +169,7 @@ _HELP_COMMANDS = (
     ("routing", "Print learned routing memory summary"),
     ("save routing", "Flush routing memory to disk immediately"),
     ("knowledge", "Print RAGTool backend and document count"),
+    ("episodes", "Print episode memory summary (quality scores, cycle count)"),
     ("mcp", "List connected MCP servers and their trigger keywords"),
     ("tools", "List all registered tools and their trigger keywords"),
     ("audit", "Show audit log status (sink type, output path, drop count)"),
@@ -195,7 +196,7 @@ def _print_help() -> None:
 # ===========================================================================
 
 
-def _repl(session: ROFSession) -> None:
+def _repl(session: ROFSession, output_dir: output_dir) -> None:
     banner(
         "Interactive REPL",
         "type 'help' for commands  \u2502  'quit' to exit  \u2502  or enter any prompt",
@@ -310,6 +311,45 @@ def _repl(session: ROFSession) -> None:
                 if excl:
                     print(f"  Exclude     : {dim(', '.join(excl))}")
                 print()
+            continue
+
+        if low == "episodes":
+            section("Episode memory (learn phase)")
+            try:
+                from memory import EpisodeMemory  # type: ignore
+
+                _episode_file = output_dir / "agent_episodes.jsonl"
+
+                episode_memory = EpisodeMemory(path=_episode_file)
+                s = episode_memory.summary()
+                print(f"  {dim('Total episodes  :')}  {bold(str(s['total']))}")
+                print(f"  {dim('Succeeded       :')}  {green(str(s['succeeded']))}")
+                print(f"  {dim('Failed          :')}  {red(str(s['failed']))}")
+                _avg_q_str = f"{s['avg_quality']:.3f}"
+                print(f"  {dim('Avg quality     :')}  {bold(_avg_q_str)}")
+                print(f"  {dim('Last cycle      :')}  {bold(str(s['last_cycle']))}")
+                print(f"  {dim('Episode file    :')}  {dim(s['path'])}")
+                recent = episode_memory.recent(5)
+                if recent:
+                    print()
+                    print(f"  {bold('Recent episodes')}  {dim('(newest last)')}")
+                    for ep in recent:
+                        _q = ep.quality_score
+                        _qc = green if _q >= 0.70 else (yellow if _q >= 0.40 else red)
+                        _cycle_str = f"#{ep.cycle:>3}"
+                        _q_str = f"q={_q:.3f}"
+                        _cmd_str = ep.command[:60] + ("…" if len(ep.command) > 60 else "")
+                        print(
+                            f"    {dim(_cycle_str)}  "
+                            f"{_qc(_q_str)}"
+                            f"  {green('ok') if ep.success else red('fail')}"
+                            f"  {dim(_cmd_str)}"
+                        )
+            except ImportError:
+                print(f"  {dim('Episode memory not available (memory.py not found).')}")
+            except Exception as _ep_exc:
+                print(f"  {dim(f'Episode memory error: {_ep_exc}')}")
+            print()
             continue
 
         if low == "tools":
@@ -604,9 +644,6 @@ def _parse_args() -> argparse.Namespace:
               anthropic      – Anthropic Claude  (--api-key  or  ANTHROPIC_API_KEY)
               openai         – OpenAI GPT        (--api-key  or  OPENAI_API_KEY)
               ollama         – Local Ollama/vLLM (--base-url, no key required)
-              github_copilot – GitHub Copilot    (no key needed! browser login on first run,
-                                                  token cached at ~/.config/rof/copilot_oauth.json
-                                                  for all future runs automatically)
 
             Generic providers (rof_providers package):
               Install rof-providers to enable additional providers discovered
@@ -652,14 +689,6 @@ def _parse_args() -> argparse.Namespace:
                 Example (GitLab behind a corporate CA):
                   --mcp-stdio gitlab-issues npx -y @gitlab/mcp-server --mcp-ssl-no-verify
 
-            GitHub Copilot tips:
-            First run   : python rof_ai_demo.py --provider github_copilot
-                            -> opens GitHub device-activation page in your browser
-                            -> enter the shown code once, then it is cached forever
-            Later runs  : same command — cache is loaded silently, no browser
-            Re-login    : add --invalidate-cache to force a fresh browser login
-            No browser  : add --no-browser to print the URL instead of opening it
-            Direct token: --github-token ghp_...  to bypass device-flow entirely
         """),
     )
 
@@ -669,8 +698,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--provider",
         help=(
-            "LLM provider: anthropic | openai | ollama | github_copilot | <generic>.  "
-            "Aliases: copilot, github-copilot.  "
+            "LLM provider: anthropic | openai | ollama | <generic>.  "
             "Omit to see a full interactive menu."
         ),
     )
@@ -678,9 +706,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--api-key",
         dest="api_key",
-        help=(
-            "LLM API key.  For Copilot: accepted as a GitHub token when --github-token is not set."
-        ),
+        help="LLM API key (ANTHROPIC_API_KEY, OPENAI_API_KEY, …).",
     )
     p.add_argument("--base-url", dest="base_url", help="Ollama/vLLM base URL")
     p.add_argument("--output-dir", dest="output_dir", help="Directory for generated files")
@@ -890,79 +916,6 @@ def _parse_args() -> argparse.Namespace:
     )
 
     # ------------------------------------------------------------------ #
-    # GitHub Copilot options                                              #
-    # ------------------------------------------------------------------ #
-    copilot = p.add_argument_group(
-        "GitHub Copilot options",
-        "Used when --provider is github_copilot (or copilot / github-copilot).",
-    )
-    copilot.add_argument(
-        "--github-token",
-        dest="github_token",
-        metavar="TOKEN",
-        help=(
-            "Supply a GitHub OAuth token (ghu_…) or classic PAT (ghp_…) directly.  "
-            "Bypasses device-flow entirely."
-        ),
-    )
-    copilot.add_argument(
-        "--no-browser",
-        dest="no_browser",
-        action="store_true",
-        default=False,
-        help="Print the activation URL + code instead of opening the browser.",
-    )
-    copilot.add_argument(
-        "--invalidate-cache",
-        dest="invalidate_cache",
-        action="store_true",
-        default=False,
-        help="Delete the cached OAuth token before starting, forcing a fresh device-flow login.",
-    )
-    copilot.add_argument(
-        "--copilot-cache",
-        dest="copilot_cache",
-        metavar="PATH",
-        default="",
-        help="Custom path for the OAuth token cache file (default: ~/.config/rof/copilot_oauth.json).",
-    )
-    copilot.add_argument(
-        "--ghe-base-url",
-        dest="ghe_base_url",
-        metavar="URL",
-        default="",
-        help="GitHub Enterprise Server root URL (e.g. https://ghe.corp.com).",
-    )
-    copilot.add_argument(
-        "--editor-version",
-        dest="editor_version",
-        metavar="VER",
-        default="",
-        help="Editor-Version header sent to Copilot (default: vscode/1.90.0).",
-    )
-    copilot.add_argument(
-        "--integration-id",
-        dest="integration_id",
-        metavar="ID",
-        default="",
-        help="Copilot-Integration-Id header (default: vscode-chat).",
-    )
-    copilot.add_argument(
-        "--token-endpoint",
-        dest="token_endpoint",
-        metavar="URL",
-        default="",
-        help="Session-token exchange endpoint override for GitHub Enterprise Server.",
-    )
-    copilot.add_argument(
-        "--copilot-api-url",
-        dest="copilot_api_url",
-        metavar="URL",
-        default="",
-        help="Copilot Chat API base URL override for GitHub Enterprise Server.",
-    )
-
-    # ------------------------------------------------------------------ #
     # Audit / governance options                                          #
     # ------------------------------------------------------------------ #
     audit = p.add_argument_group(
@@ -1038,13 +991,15 @@ def _parse_args() -> argparse.Namespace:
     # Agent mode options                                                  #
     # ------------------------------------------------------------------ #
     agent = p.add_argument_group(
-        "Agent mode (file-watching)",
+        "Agent mode (observe → decide → act → learn)",
         (
-            "In agent mode the demo watches a plain-text file for commands written by "
-            "an external actor (e.g. a OneDrive-synced file edited from Teams / Notepad).  "
-            "Each new, previously-unseen command is fed directly into the ROF pipeline.  "
-            "After the command is consumed the watch file is cleared automatically.  "
-            "All console output is tee'd to a log file so a remote viewer can read results."
+            "In agent mode the demo runs a continuous four-phase loop.  "
+            "OBSERVE: polls a watch file (default) or Signal messages for incoming commands, "
+            "and (optionally) runs proactive environment ticks on --agent-observe-interval.  "
+            "DECIDE + ACT: each new command is planned (NL → RelateLang) and executed.  "
+            "LEARN: every run is scored and recorded as an episode in --agent-episode-file.  "
+            "The loop exits when Ctrl-C is pressed, --agent-max-cycles is reached, or "
+            "--agent-goal is satisfied with sufficient quality."
         ),
     )
     agent.add_argument(
@@ -1056,6 +1011,8 @@ def _parse_args() -> argparse.Namespace:
             "of opening the interactive REPL."
         ),
     )
+
+    # ── File-based I/O (default) ──────────────────────────────────────────
     agent.add_argument(
         "--agent-watch",
         dest="agent_watch",
@@ -1100,6 +1057,138 @@ def _parse_args() -> argparse.Namespace:
             "fenced code blocks.  The log is always written to exactly the path "
             "given by --agent-log, regardless of format.  "
             "Choices: text | markdown"
+        ),
+    )
+
+    # ── Signal-based I/O ─────────────────────────────────────────────────
+    agent.add_argument(
+        "--agent-signal",
+        action="store_true",
+        default=False,
+        dest="agent_signal",
+        help=(
+            "Use Signal messaging as the agent I/O channel instead of watch/log files.  "
+            "Incoming Signal messages are treated as commands; results are sent back "
+            "as Signal messages to --agent-signal-reply-to.  "
+            "Requires signal-cli REST API to be reachable at --agent-signal-url."
+        ),
+    )
+    agent.add_argument(
+        "--agent-signal-url",
+        dest="agent_signal_url",
+        metavar="URL",
+        default="",
+        help=(
+            "Base URL of the signal-cli REST API.  "
+            "Defaults to the SIGNAL_API_URL environment variable, "
+            "then http://localhost:8080."
+        ),
+    )
+    agent.add_argument(
+        "--agent-signal-number",
+        dest="agent_signal_number",
+        metavar="E164",
+        default="",
+        help=(
+            "E.164 phone number of the Signal account used by signal-cli "
+            "(e.g. +15551234567).  "
+            "Defaults to the SIGNAL_PHONE_NUMBER environment variable."
+        ),
+    )
+    agent.add_argument(
+        "--agent-signal-reply-to",
+        dest="agent_signal_reply_to",
+        metavar="E164[,E164…]",
+        default="",
+        help=(
+            "Comma-separated list of E.164 phone numbers (or base64 group IDs) "
+            "to send agent output to.  Required when --agent-signal is set."
+        ),
+    )
+    agent.add_argument(
+        "--agent-signal-allowed-senders",
+        dest="agent_signal_allowed_senders",
+        metavar="E164[,E164…]",
+        default="",
+        help=(
+            "Comma-separated whitelist of E.164 phone numbers whose Signal messages "
+            "are accepted as commands.  Messages from anyone else are silently ignored.  "
+            "Defaults to accepting messages from all senders."
+        ),
+    )
+    agent.add_argument(
+        "--agent-signal-poll",
+        dest="agent_signal_poll",
+        type=float,
+        default=5.0,
+        metavar="SECONDS",
+        help=(
+            "How often (in seconds) the agent polls the Signal REST API for new "
+            "messages.  Default: 5.0"
+        ),
+    )
+    agent.add_argument(
+        "--agent-signal-ssl-no-verify",
+        action="store_true",
+        default=False,
+        dest="agent_signal_ssl_no_verify",
+        help=(
+            "Disable TLS certificate verification for the signal-cli REST API.  "
+            "Use only for trusted internal instances with self-signed certificates."
+        ),
+    )
+    agent.add_argument(
+        "--agent-goal",
+        dest="agent_goal",
+        metavar="GOAL",
+        default="",
+        help=(
+            "High-level natural-language mission goal for the agent.  "
+            "When set, the agent evaluates this goal against the episode memory "
+            "on every proactive observation tick.  Once a recent episode satisfies "
+            "the goal with a quality score ≥ 0.70 the agent declares the mission "
+            "complete, writes a final agent_state.json, and exits cleanly.  "
+            'Example: --agent-goal "Produce a report summarising the top 5 AI news stories"'
+        ),
+    )
+    agent.add_argument(
+        "--agent-max-cycles",
+        dest="agent_max_cycles",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Stop the agent loop after N completed act phases (i.e. N successful "
+            "session.run() calls).  0 (default) means run indefinitely until "
+            "Ctrl-C or --agent-goal is satisfied."
+        ),
+    )
+    agent.add_argument(
+        "--agent-observe-interval",
+        dest="agent_observe_interval",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help=(
+            "How often (in seconds) to run a proactive observation tick even when "
+            "the watch file is empty.  Each tick checks artefact health, evaluates "
+            "the mission goal, detects consecutive failures, and writes a heartbeat "
+            "file to <output-dir>/agent_heartbeat.json.  "
+            "0 (default) disables proactive observation so the agent only reacts "
+            "to watch-file writes."
+        ),
+    )
+    agent.add_argument(
+        "--agent-episode-file",
+        dest="agent_episode_file",
+        metavar="PATH",
+        default="",
+        help=(
+            "Path to the JSONL file where episode records are appended after every "
+            "run.  Each line is a JSON object with: cycle, run_id, command, success, "
+            "quality_score, recommendation, tools_used, snapshot_delta, artefact_paths, "
+            "plan_ms, exec_ms, error.  "
+            "Defaults to <output-dir>/agent_episodes.jsonl."
         ),
     )
 
@@ -1196,6 +1285,26 @@ def main() -> None:
     knowledge_dir_str: str = getattr(args, "knowledge_dir", "").strip()
     knowledge_dir: Optional[Path] = Path(knowledge_dir_str) if knowledge_dir_str else None
 
+    # Auto-seed the built-in knowledge/ directory (contains agent.md) when
+    # the caller has not supplied an explicit --knowledge-dir.  This ensures
+    # the agent's skills manifest is always available to RAGTool without
+    # requiring the user to pass an extra flag.
+    _builtin_knowledge = _DEMO_DIR / "knowledge"
+    if knowledge_dir is None and _builtin_knowledge.is_dir():
+        # Only activate when the directory is non-empty so we don't register
+        # a knowledge hint that points at an empty folder.
+        _has_docs = any(
+            f.suffix.lower() in {".txt", ".md", ".rst", ".html", ".json", ".csv"}
+            for f in _builtin_knowledge.rglob("*")
+            if f.is_file()
+        )
+        if _has_docs:
+            knowledge_dir = _builtin_knowledge
+            info(
+                f"Knowledge dir : {bold(cyan(str(knowledge_dir)))}  "
+                f"{dim('(built-in agent.md — override with --knowledge-dir)')}"
+            )
+
     # ── MCP server configs ───────────────────────────────────────────────
     mcp_server_configs: list = _build_mcp_configs(args)
     mcp_eager_connect: bool = getattr(args, "mcp_eager", False)
@@ -1272,40 +1381,133 @@ def main() -> None:
     elif not _HAS_AUDIT:
         info(f"Audit log     : {dim('unavailable (governance package not installed)')}")
 
-    # ── Show active agent configuration ──────────────────────────────────
+    # ── Build agent I/O handler ───────────────────────────────────────────
     _agent_mode: bool = getattr(args, "agent", False)
-    _agent_watch_path: Optional[Path] = None
-    _agent_log_path: Optional[Path] = None
-    _agent_poll: float = 2.0
-    _agent_log_format: str = "text"
-    if _agent_mode:
-        _agent_watch_str: str = getattr(args, "agent_watch", "").strip()
-        _agent_watch_path = Path(_agent_watch_str) if _agent_watch_str else None
-        if _agent_watch_path is None:
-            err("Agent mode requires --agent-watch <PATH> (or the default path must be set).")
-            sys.exit(1)
+    _io_handler: Optional[IOHandler] = None
+    _agent_goal: str = ""
+    _agent_max_cycles: int = 0
+    _agent_observe_interval: float = 0.0
+    _agent_episode_file: Optional[Path] = None
 
-        _agent_log_str: str = getattr(args, "agent_log", "").strip()
-        _agent_log_path = (
-            Path(_agent_log_str) if _agent_log_str else output_dir / "agent_output.txt"
+    if _agent_mode:
+        _agent_goal = getattr(args, "agent_goal", "").strip()
+        _agent_max_cycles = max(0, int(getattr(args, "agent_max_cycles", 0) or 0))
+        _agent_observe_interval = max(
+            0.0, float(getattr(args, "agent_observe_interval", 0.0) or 0.0)
         )
-        _agent_poll = max(0.1, float(getattr(args, "agent_poll", 2.0)))
-        _agent_log_format = getattr(args, "agent_log_format", "text").strip().lower()
+        _agent_ep_str: str = getattr(args, "agent_episode_file", "").strip()
+        _agent_episode_file = (
+            Path(_agent_ep_str) if _agent_ep_str else output_dir / "agent_episodes.jsonl"
+        )
+
+        _use_signal: bool = getattr(args, "agent_signal", False)
+
+        if _use_signal:
+            # ── Signal I/O handler ────────────────────────────────────────
+            import os
+
+            _sig_url: str = (
+                getattr(args, "agent_signal_url", "").strip()
+                or os.environ.get("SIGNAL_API_URL", "http://localhost:8080")
+            )
+            _sig_number: str = (
+                getattr(args, "agent_signal_number", "").strip()
+                or os.environ.get("SIGNAL_PHONE_NUMBER", "")
+            )
+            _sig_reply_raw: str = getattr(args, "agent_signal_reply_to", "").strip()
+            _sig_reply_to: list[str] = (
+                [r.strip() for r in _sig_reply_raw.split(",") if r.strip()]
+                if _sig_reply_raw
+                else []
+            )
+            _sig_allowed_raw: str = getattr(
+                args, "agent_signal_allowed_senders", ""
+            ).strip()
+            _sig_allowed: Optional[list[str]] = (
+                [s.strip() for s in _sig_allowed_raw.split(",") if s.strip()]
+                if _sig_allowed_raw
+                else None
+            )
+            _sig_poll: float = max(
+                1.0, float(getattr(args, "agent_signal_poll", 5.0) or 5.0)
+            )
+            _sig_ssl_verify: bool = not getattr(
+                args, "agent_signal_ssl_no_verify", False
+            )
+            _agent_log_format: str = getattr(
+                args, "agent_log_format", "text"
+            ).strip().lower()
+
+            if not _sig_number:
+                err(
+                    "Signal agent mode requires --agent-signal-number <E164> "
+                    "or SIGNAL_PHONE_NUMBER env var."
+                )
+                sys.exit(1)
+            if not _sig_reply_to:
+                err(
+                    "Signal agent mode requires --agent-signal-reply-to <E164[,…]> "
+                    "to know where to send results."
+                )
+                sys.exit(1)
+
+            _io_handler = SignalIOHandler(
+                api_base_url=_sig_url,
+                account=_sig_number,
+                reply_to=_sig_reply_to,
+                poll_interval=_sig_poll,
+                allowed_senders=_sig_allowed,
+                log_format=_agent_log_format,
+                ssl_verify=_sig_ssl_verify,
+            )
+
+        else:
+            # ── File I/O handler (default) ────────────────────────────────
+            _agent_watch_str: str = getattr(args, "agent_watch", "").strip()
+            _agent_watch_path: Path = (
+                Path(_agent_watch_str)
+                if _agent_watch_str
+                else output_dir / "agent_input.txt"
+            )
+            _agent_log_str: str = getattr(args, "agent_log", "").strip()
+            _agent_log_path: Path = (
+                Path(_agent_log_str)
+                if _agent_log_str
+                else output_dir / "agent_output.txt"
+            )
+            _agent_poll: float = max(0.1, float(getattr(args, "agent_poll", 2.0)))
+            _agent_log_format = getattr(
+                args, "agent_log_format", "text"
+            ).strip().lower()
+
+            _io_handler = FileIOHandler(
+                watch_file=_agent_watch_path,
+                log_file=_agent_log_path,
+                poll_interval=_agent_poll,
+                log_format=_agent_log_format,
+            )
 
         info(f"Agent mode    : {bold(cyan('active'))}")
-        info(f"  watch file  : {dim(str(_agent_watch_path))}")
-        info(f"  log  file   : {dim(str(_agent_log_path))}")
-        info(f"  poll        : {dim(str(_agent_poll) + ' s')}")
-        info(f"  log format  : {dim(_agent_log_format)}")
+        for _k, _v in _io_handler.info_lines():
+            info(f"  {_k:<16}: {dim(_v)}")
+        if _agent_goal:
+            info(f"  mission     : {dim(_agent_goal[:80])}")
+        if _agent_max_cycles:
+            info(f"  max cycles  : {dim(str(_agent_max_cycles))}")
+        if _agent_observe_interval > 0:
+            info(f"  observe     : {dim(str(_agent_observe_interval) + ' s')}")
+        info(f"  episodes    : {dim(str(_agent_episode_file))}")
 
     # ── Run ──────────────────────────────────────────────────────────────
-    if _agent_mode and _agent_watch_path is not None and _agent_log_path is not None:
+    if _agent_mode and _io_handler is not None:
         run_agent(
             session=session,
-            watch_file=_agent_watch_path,
-            log_file=_agent_log_path,
-            poll_interval=_agent_poll,
-            log_format=_agent_log_format,
+            io_handler=_io_handler,
+            episode_file=_agent_episode_file,
+            output_dir=output_dir,
+            mission_goal=_agent_goal,
+            max_cycles=_agent_max_cycles,
+            observe_interval=_agent_observe_interval,
         )
     elif args.one_shot:
         try:
@@ -1320,7 +1522,7 @@ def main() -> None:
             session.close_mcp()
             session.close_audit()
     else:
-        _repl(session)
+        _repl(session=session, output_dir=output_dir)
 
 
 if __name__ == "__main__":

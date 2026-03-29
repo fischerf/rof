@@ -117,7 +117,8 @@ from output_layout import render_result
 from planner import (
     Planner,
     _make_knowledge_hint,
-    _make_mcp_hint,
+    build_mcp_tool_schemas,
+    build_tool_catalogue,
 )
 from telemetry import _STATS, _attach_debug_hooks
 
@@ -271,6 +272,10 @@ class ROFSession:
         immediately during __init__.  Surfaces misconfigurations early.
     """
 
+    # Holds the snapshot from the most recently completed run.
+    # Initialised here so the property is always defined even before run().
+    _last_snapshot: dict = {}
+
     def __init__(
         self,
         llm: Any,
@@ -417,8 +422,39 @@ class ROFSession:
             else ""
         )
 
-        # ── MCP hint ──────────────────────────────────────────────────────
-        _mcp_hint = _make_mcp_hint(self._mcp_tool_meta) if self._mcp_tool_meta else ""
+        # ── Tool schemas for planner catalogue (Layer 2) ──────────────────
+        # Collect ToolSchema from every registered builtin tool instance.
+        # Tools that have been patched via tools/tools/__init__.py return a
+        # rich schema; others fall back to the ABC default (name + triggers).
+        _builtin_schemas: list = []
+        for _t in self._tools:
+            try:
+                _builtin_schemas.append(_t.tool_schema())
+            except Exception:
+                pass  # defensive — never crash session init for a bad schema
+
+        # MCP schemas: one list per server, keyed by server name.
+        # build_mcp_tool_schemas() converts raw MCP Tool objects → ToolSchema.
+        _mcp_schemas: dict = {}
+        for _meta in self._mcp_tool_meta:
+            _srv_name: str = _meta[0]
+            _discovered: list = _meta[3] if len(_meta) > 3 else []
+            if _discovered:
+                _mcp_schemas[_srv_name] = build_mcp_tool_schemas(_discovered)
+            else:
+                # Eager connect not used — fall back to keyword-only schema
+                # so the planner still sees the server's trigger phrases.
+                from rof_framework.core.interfaces.tool_provider import ToolSchema as _TS
+
+                _kws: list = list(_meta[2])
+                if _kws:
+                    _mcp_schemas[_srv_name] = [
+                        _TS(
+                            name=_srv_name,
+                            description=_meta[1] or f"MCP server '{_srv_name}'",
+                            triggers=_kws[:8],
+                        )
+                    ]
 
         # ── Step retry / fallback settings ───────────────────────────────
         self._step_retries: int = max(0, step_retries)
@@ -427,8 +463,9 @@ class ROFSession:
         # ── Planner ───────────────────────────────────────────────────────
         self._planner = Planner(
             llm=self._llm,
+            tool_schemas=_builtin_schemas,
+            mcp_schemas=_mcp_schemas,
             knowledge_hint=_knowledge_hint,
-            mcp_hint=_mcp_hint,
         )
 
         # ── URL-enrichment settings ───────────────────────────────────────
@@ -609,12 +646,121 @@ class ROFSession:
         self.close_audit()
 
     # ======================================================================
+    # Current snapshot (used by the agent loop for pre/post delta scoring)
+    # ======================================================================
+
+    @property
+    def current_snapshot(self) -> dict:
+        """
+        Return a shallow copy of the last RunResult snapshot, or an empty
+        dict when no run has been executed yet in this session.
+
+        Used by the agent loop to capture a ``pre_snapshot`` immediately
+        before calling :meth:`run`, so the episode memory can measure how
+        many new entity attributes were written during the run.
+        """
+        return dict(self._last_snapshot) if self._last_snapshot else {}
+
+    # ======================================================================
+    # Outcome evaluation – feeds the learn phase
+    # ======================================================================
+
+    def evaluate_outcome(
+        self,
+        command: str,
+        result: Any,
+        pre_snapshot: dict,
+        plan_ms: int,
+        exec_ms: int,
+        episode_memory: Any,  # EpisodeMemory – typed as Any to avoid circular import
+    ) -> Any:
+        """
+        Score the outcome of the most recent run and record it as an episode.
+
+        This is the **learn** phase entry point.  It:
+
+        1. Extracts step-level metrics from *result*.
+        2. Computes a composite quality score via
+           :func:`memory.score_outcome`.
+        3. Appends an :class:`~memory.EpisodeRecord` to *episode_memory*.
+        4. Logs a one-line summary (quality score + recommendation).
+        5. Returns the :class:`~memory.EpisodeRecord` for the caller to
+           inspect or persist.
+
+        Parameters
+        ----------
+        command        : str           – the raw user prompt / goal
+        result         : RunResult     – return value of :meth:`run`
+        pre_snapshot   : dict          – snapshot captured BEFORE :meth:`run`
+                                         (use :attr:`current_snapshot` for this)
+        plan_ms        : int           – planning stage duration in ms
+        exec_ms        : int           – execution stage duration in ms
+        episode_memory : EpisodeMemory – the live episode store to append to
+
+        Returns
+        -------
+        EpisodeRecord
+        """
+        # Collect the last error string from failed steps
+        error_msg = ""
+        if not result.success:
+            for s in reversed(result.steps or []):
+                msg = getattr(s, "error", "") or ""
+                if msg:
+                    error_msg = msg
+                    break
+            if not error_msg and result.error:
+                error_msg = str(result.error)
+
+        episode = episode_memory.record(
+            run_id=result.run_id,
+            command=command,
+            success=result.success,
+            steps=result.steps or [],
+            pre_snapshot=pre_snapshot,
+            post_snapshot=result.snapshot or {},
+            plan_ms=plan_ms,
+            exec_ms=exec_ms,
+            error=error_msg,
+        )
+
+        # One-line learn summary
+        from memory import QUALITY_THRESHOLD_HIGH, QUALITY_THRESHOLD_LOW  # type: ignore
+
+        q = episode.quality_score
+        if q >= QUALITY_THRESHOLD_HIGH:
+            q_colour = green
+        elif q >= QUALITY_THRESHOLD_LOW:
+            q_colour = yellow
+        else:
+            q_colour = red
+
+        step(
+            "LEARN",
+            f"cycle={bold(str(episode.cycle))}  "
+            f"quality={q_colour(f'{q:.3f}')}  "
+            f"rec={dim(episode.recommendation)}  "
+            f"delta={episode.snapshot_delta}attr  "
+            f"artefacts={len(episode.artefact_paths)}",
+        )
+
+        if episode.recommendation == "review":
+            warn(
+                f"Learn: low quality score ({q:.3f}) for "
+                f"{dim(command[:60])}  — consider reviewing the episode log."
+            )
+
+        return episode
+
+    # ======================================================================
     # Main run entry-point
     # ======================================================================
 
     def run(self, user_prompt: str) -> RunResult:
         """Execute *user_prompt* end-to-end and return the RunResult."""
         _STATS.total_runs += 1
+        # Reset last snapshot so current_snapshot reflects this run only
+        self._last_snapshot = {}
 
         # ── Stage 1: Plan ──────────────────────────────────────────────────
         section("Stage 1  |  Planning  (NL → RelateLang)")
@@ -743,6 +889,8 @@ class ROFSession:
             print(f"  {dim(f'{label:<10}')}  {value}")
 
         self._save_run_artifacts(result.run_id, rl_src, result)
+        # Persist snapshot for current_snapshot property (used by learn phase)
+        self._last_snapshot = dict(result.snapshot) if result.snapshot else {}
 
         # ── Result (entity state + routing decisions) ──────────────────────
         print(
@@ -982,6 +1130,25 @@ class ROFSession:
             for attempt in range(1, self._step_retries + 1):
                 warn(f"Retry {attempt}/{self._step_retries}: '{goal_expr[:70]}'")
 
+                # ── Missing-parameter injection ───────────────────────────
+                # When the error is a Pydantic "Field required" validation
+                # failure, the retry snapshot is enriched with a default
+                # value (1 for integers, "value" for strings) for every
+                # missing required parameter extracted from the error message.
+                # This handles the common case where the planner forgets to
+                # set card_number / pack_number / artifact_number on the Task
+                # entity — the MCPClientTool then fails with
+                #   "1 validation error … <field>  Field required"
+                # and this block ensures the retry has the missing attribute.
+                retry_snapshot = accumulated_snapshot
+                _needs_param_fix = (
+                    "Field required" in error_msg or "Input should be a valid" in error_msg
+                )
+                if _needs_param_fix:
+                    retry_snapshot = self._inject_missing_mcp_params(
+                        accumulated_snapshot, error_msg
+                    )
+
                 # Always build a seeded AST so the retry receives the full
                 # accumulated entity context (including 'saved_to' written by a
                 # previously-succeeded AICodeGenTool, URL content for analysis
@@ -989,9 +1156,7 @@ class ROFSession:
                 # context and is the primary cause of LLMPlayerTool not finding
                 # the generated script on retry.
                 try:
-                    single_ast = self._build_seeded_ast(
-                        goal_expr, accumulated_snapshot, _url_contents
-                    )
+                    single_ast = self._build_seeded_ast(goal_expr, retry_snapshot, _url_contents)
                 except Exception as exc:
                     warn(f"  ↳ Seeded AST build failed ({exc}), falling back to plain retry")
                     try:
@@ -1051,7 +1216,16 @@ class ROFSession:
                 else:
                     err(f"Could not build LLM fallback AST for '{goal_expr[:60]}'")
 
-        final_success = all(s.status == _GoalStatus.ACHIEVED for s in all_steps if s is not None)
+        # A goal that originally FAILED but was later recovered by a retry or
+        # LLM fallback must not count against final_success.  We keep the
+        # original steps in all_steps for audit/history purposes, but when
+        # computing success we only look at the *last* recorded step for each
+        # goal expression — that is the most-recent (and authoritative) outcome.
+        last_step_per_goal: dict[str, Any] = {}
+        for s in all_steps:
+            if s is not None:
+                last_step_per_goal[s.goal_expr] = s
+        final_success = all(s.status == _GoalStatus.ACHIEVED for s in last_step_per_goal.values())
         return _RunResult(
             run_id=result.run_id,
             success=final_success,
@@ -1060,8 +1234,188 @@ class ROFSession:
             error=result.error,
         )
 
-    @staticmethod
-    def _deep_merge_snapshots(base: dict, overlay: dict) -> dict:
+    def _inject_missing_mcp_params(self, snapshot: dict, error_msg: str) -> dict:
+        """
+        Parse Pydantic validation error messages and fix the snapshot so that
+        the retry succeeds without needing the LLM fallback.
+
+        Two classes of error are handled:
+
+        1. **Field required** — a required parameter is completely absent from
+           the entity snapshot.  A sensible default is injected (``1`` for
+           integers, ``"value"`` for strings).
+
+           Example error::
+
+               1 validation error for buy_packArguments
+               pack_number
+                 Field required [type=missing, …]
+
+        2. **Type mismatch** — the parameter *is* present in the snapshot but
+           has the wrong Python type (e.g. the planner stored ``seed = 12345``
+           as an ``int`` but the MCP tool declares ``seed: str | None``).
+           The existing value is coerced to the type required by the schema.
+
+           Example error::
+
+               1 validation error for start_gameArguments
+               seed
+                 Input should be a valid string [type=string_type,
+                 input_value=12345, input_type=int]
+
+        Returns a deep-copied snapshot with all fixups applied so the
+        original *accumulated_snapshot* is never mutated.
+        """
+        import copy
+        import re as _re
+
+        # ------------------------------------------------------------------
+        # Build a type map from connected MCP tools' inputSchema so we can
+        # inject the right type (int vs str) and coerce mismatched values.
+        # ------------------------------------------------------------------
+        param_types: dict[str, str] = {}
+        for tool_meta in self._mcp_tool_meta:
+            for tool_def in tool_meta[3]:  # discovered_tools list
+                schema: dict = getattr(tool_def, "inputSchema", None) or {}
+                for fname, fschema in schema.get("properties", {}).items():
+                    if fname not in param_types:
+                        # anyOf / oneOf handling: pick the first non-null type
+                        if "anyOf" in fschema:
+                            for sub in fschema["anyOf"]:
+                                if sub.get("type") not in (None, "null"):
+                                    param_types[fname] = sub["type"]
+                                    break
+                            else:
+                                param_types[fname] = "string"
+                        else:
+                            param_types[fname] = fschema.get("type", "integer")
+
+        # ------------------------------------------------------------------
+        # Case 1: "Field required" — parameter is entirely missing.
+        # ------------------------------------------------------------------
+        # Pydantic v2 formats errors as:
+        #   <field_name>\n  Field required [type=missing, …]
+        missing_fields: list[str] = _re.findall(
+            r"^(\w+)\s*\n\s*Field required",
+            error_msg,
+            _re.MULTILINE,
+        )
+        if not missing_fields:
+            missing_fields = _re.findall(
+                r"(\w+)\s+Field required",
+                error_msg,
+            )
+
+        # ------------------------------------------------------------------
+        # Case 2: "Input should be a valid X" — parameter present but wrong
+        # type.  Extract (field_name, bad_value, required_type) triples.
+        #
+        # Pydantic v2 format:
+        #   <field_name>
+        #     Input should be a valid string [type=string_type,
+        #     input_value=12345, input_type=int]
+        # ------------------------------------------------------------------
+        # Match: field name on its own line, followed by the error detail.
+        type_mismatch_fields: list[tuple[str, str]] = _re.findall(
+            r"^(\w+)\s*\n\s*Input should be a valid (\w+)",
+            error_msg,
+            _re.MULTILINE,
+        )
+        # Also pick up the compact single-line variant some versions emit.
+        if not type_mismatch_fields:
+            type_mismatch_fields = _re.findall(
+                r"(\w+)\s+Input should be a valid (\w+)",
+                error_msg,
+            )
+
+        if not missing_fields and not type_mismatch_fields:
+            return snapshot
+
+        new_snapshot = copy.deepcopy(snapshot)
+        entities = new_snapshot.setdefault("entities", {})
+
+        # ------------------------------------------------------------------
+        # Locate the best entity to attach / patch params on.
+        # ------------------------------------------------------------------
+        task_key: str | None = None
+        for ent_name in entities:
+            if ent_name.lower() in ("task", "game", "runtask"):
+                task_key = ent_name
+                break
+        if task_key is None:
+            for ent_name in entities:
+                if not ent_name.startswith("RoutingTrace") and not ent_name.startswith("MCP"):
+                    task_key = ent_name
+                    break
+        if task_key is None:
+            task_key = "Task"
+            entities[task_key] = {
+                "description": "Injected task entity",
+                "attributes": {},
+                "predicates": [],
+            }
+
+        task_attrs: dict = entities[task_key].setdefault("attributes", {})
+
+        # ------------------------------------------------------------------
+        # Apply Case-1 fixes: inject missing params with a default value.
+        # ------------------------------------------------------------------
+        for field in missing_fields:
+            if field in task_attrs:
+                continue  # already present — do not overwrite
+            ptype = param_types.get(field, "integer")
+            default_val: Any = 1 if ptype == "integer" else "value"
+            task_attrs[field] = default_val
+            warn(
+                f"  ↳ Auto-injecting missing param '{field}' = {default_val!r} "
+                f"(type={ptype}) for retry"
+            )
+
+        # ------------------------------------------------------------------
+        # Apply Case-2 fixes: coerce wrong-typed values that are already in
+        # the snapshot.  The required type comes from the error message itself
+        # (most reliable) and is cross-checked against the schema map.
+        # ------------------------------------------------------------------
+        _coerce_map: dict[str, type] = {
+            "string": str,
+            "integer": int,
+            "number": float,
+            "boolean": bool,
+        }
+        for field, required_type_name in type_mismatch_fields:
+            # Prefer the schema's declared type; fall back to what the error
+            # message says (e.g. "valid string" → "string").
+            schema_type = param_types.get(field, required_type_name)
+            coerce_to = _coerce_map.get(schema_type, _coerce_map.get(required_type_name, str))
+
+            # Walk ALL entities — the bad value might not be in task_key.
+            coerced = False
+            for ent_data in entities.values():
+                attrs = ent_data.get("attributes", {})
+                if field in attrs and not isinstance(attrs[field], coerce_to):
+                    old_val = attrs[field]
+                    try:
+                        attrs[field] = coerce_to(old_val)
+                        warn(
+                            f"  ↳ Auto-coercing param '{field}' "
+                            f"{type(old_val).__name__}({old_val!r}) → "
+                            f"{coerce_to.__name__}({attrs[field]!r}) for retry"
+                        )
+                        coerced = True
+                    except (ValueError, TypeError) as exc:
+                        warn(f"  ↳ Could not coerce param '{field}' to {coerce_to.__name__}: {exc}")
+            if not coerced:
+                # Value wasn't found anywhere; inject a correctly-typed default.
+                default_val = coerce_to(1) if coerce_to in (int, float) else coerce_to("value")
+                task_attrs[field] = default_val
+                warn(
+                    f"  ↳ Auto-injecting coerced param '{field}' = {default_val!r} "
+                    f"(type={coerce_to.__name__}) for retry"
+                )
+
+        return new_snapshot
+
+    def _deep_merge_snapshots(self, base: dict, overlay: dict) -> dict:
         """
         Return a new snapshot dict that is *base* deep-merged with *overlay*.
 
@@ -1207,9 +1561,18 @@ class ROFSession:
                         except Exception:
                             pass
 
-                # Rebuild the planner system prompt so the new tool appears
-                # in all future REPL turns.
-                self._planner.rebuild_system(self._generated_tools_hint())
+                        # Rebuild the planner system prompt so the new tool appears
+                        # in all future REPL turns.
+                        # Add the newly registered tool's schema to the builtin list.
+                        try:
+                            _new_schema = tool.tool_schema()
+                            _existing = list(self._planner._tool_schemas)
+                            if not any(s.name == _new_schema.name for s in _existing):
+                                _existing.append(_new_schema)
+                            self._planner.update_tool_catalogue(tool_schemas=_existing)
+                        except Exception:
+                            pass
+                        self._planner.rebuild_system(self._generated_tools_hint())
 
     def _generated_tools_hint(self) -> str:
         """Return a planner system-prompt appendix listing registered generated tools."""

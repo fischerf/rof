@@ -21,7 +21,6 @@ from rof_framework.llm.providers.base import (
     RateLimitError,
 )
 from rof_framework.llm.providers.gemini_provider import GeminiProvider
-from rof_framework.llm.providers.github_copilot_provider import GitHubCopilotProvider
 from rof_framework.llm.providers.ollama_provider import OllamaProvider
 from rof_framework.llm.providers.openai_provider import AzureOpenAIProvider, OpenAIProvider
 from rof_framework.llm.renderer.prompt_renderer import PromptRenderer, RendererConfig
@@ -42,7 +41,6 @@ __all__ = [
     "AnthropicProvider",
     "GeminiProvider",
     "OllamaProvider",
-    "GitHubCopilotProvider",
     # Renderer
     "PromptRenderer",
     "RendererConfig",
