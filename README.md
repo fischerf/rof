@@ -191,7 +191,7 @@ ROF is **not** a replacement for:
             ┌───────▼────────┐      ┌─────────▼──────────────────────┐
             │   RL Parser    │      │   rof_cli  (CLI entry point)    │
             │tokenise·validate│      │  lint · inspect · run · debug  │
-            │      · AST     │      │  generate · test               │
+            │      · AST     │      │  generate · test                │
             └───────┬────────┘      │  pipeline run · pipeline debug  │
                     │               └─────────────────────────────────┘
   ┌─────────────────▼───────────────────────────────────────────────────┐
@@ -205,16 +205,16 @@ ROF is **not** a replacement for:
   │    Tier 2 – session      within-run observations (SessionMemory)    │
   │    Tier 3 – historical   cross-run EMA learning (RoutingMemory)     │
   │                                                                     │
-  │  RoutingMemoryUpdater  ← EventBus-driven feedback loop             │
-  │  RoutingHintExtractor  ← declarative hints from .rl files          │
-  │  RoutingMemoryInspector ← human-readable confidence summaries      │
-  │  RoutingTraceWriter    ← writes RoutingTrace entities to snapshot  │
+  │  RoutingMemoryUpdater  ← EventBus-driven feedback loop              │
+  │  RoutingHintExtractor  ← declarative hints from .rl files           │
+  │  RoutingMemoryInspector ← human-readable confidence summaries       │
+  │  RoutingTraceWriter    ← writes RoutingTrace entities to snapshot   │
   └──────────────────────────────┬──────────────────────────────────────┘
                                  │
   ┌──────────────────────────────▼──────────────────────────────────────┐
   │              rof-pipeline  Pipeline Runner                          │
   │                                                                     │
-  │  PipelineBuilder → [stage₁] → [stage₂] → [fan-out] → [stage₄]      │
+  │  PipelineBuilder → [stage₁] → [stage₂] → [fan-out] → [stage₄]       │
   │                                    ↑                                │
   │            accumulated snapshot injected as RL context              │
   │                                                                     │
@@ -226,7 +226,7 @@ ROF is **not** a replacement for:
   │                                                                     │
   │  1. ROUTE ────► keyword/embedding match → ToolProvider             │
   │  2. INJECT ───► ContextInjector (minimal, no overflow)             │
-  │  3. EXECUTE ──► resolve output_mode ("auto"→json|rl) →            │
+  │  3. EXECUTE ──► resolve output_mode ("auto"→json|rl) →             │
   │                 ToolProvider.execute()  OR  LLM.complete()         │
   │  4. PARSE ────► dual strategy:                                     │
   │                   json mode → JSON schema enforced → parse JSON    │
@@ -247,8 +247,8 @@ ROF is **not** a replacement for:
   │  OpenAIProvider     │       │                                   │   │
   │  GeminiProvider     │       │  WebSearchTool   ddgs/serpapi     │   │
   │  OllamaProvider     │       │  RAGTool         chroma/memory    │   │
-  │  GitHubCopilot      │       │  CodeRunnerTool  py/js/lua/sh     │   │
-  │  Provider           │       │  APICallTool     httpx REST       │   │
+  │                     │       │  CodeRunnerTool  py/js/lua/sh     │   │
+  │                     │       │  APICallTool     httpx REST       │   │
   │                     │       │  DatabaseTool    sqlite/SA        │   │
   │  RetryManager       │       │  FileReaderTool  pdf/csv/docx/…   │   │
   │  PromptRenderer     │       │  FileSaveTool    save to disk     │   │
@@ -256,7 +256,7 @@ ROF is **not** a replacement for:
   │  TrackingProvider   │       │  HumanInLoopTool stdin/cb/file    │   │
   │  UsageAccumulator   │       │  LuaRunTool      interactive Lua  │   │
   │  CostGuard          │       │  AICodeGenTool   LLM code gen     │   │
-  └─────────────────────┘       │  LLMPlayerTool   LLM-driven I/O  │   │
+  └─────────────────────┘       │  LLMPlayerTool   LLM-driven I/O   │   │
                                 │                                   │   │
                                 │  MCP Layer (optional)             │   │
                                 │  MCPClientTool  stdio/HTTP        │   │
@@ -266,13 +266,13 @@ ROF is **not** a replacement for:
                                 │  SDK: @rof_tool · LuaScriptTool   │   │
                                 │       JavaScriptTool              │   │
                                 └───────────────────────────────────┘   │
-                                                                         │
-  ┌──────────────────────────────────────────────────────────────────────▼──┐
+                                                                        │
+  ┌─────────────────────────────────────────────────────────────────────▼───┐
   │              rof-governance  Governance Layer                           │
   │                                                                         │
-  │  AuditSubscriber  ← wildcard EventBus subscriber ("*")                 │
+  │  AuditSubscriber  ← wildcard EventBus subscriber ("*")                  │
   │    filters events (include/exclude lists)                               │
-  │    builds AuditRecord  ← schema_version · audit_id · timestamp         │
+  │    builds AuditRecord  ← schema_version · audit_id · timestamp          │
   │                          event_name · actor · level · run_id            │
   │                          pipeline_id · payload (verbatim)               │
   │    enqueues to background writer thread  (non-blocking, never on the    │
@@ -282,7 +282,7 @@ ROF is **not** a replacement for:
   │    ├── NullSink        silent discard  (tests / dry-runs)               │
   │    ├── StdoutSink      JSON line per record  (container log shipping)   │
   │    └── JsonLinesSink   append-only JSONL on disk  (production default)  │
-  │          day / run / none rotation  ·  bounded queue  ·  drop counter  │
+  │          day / run / none rotation  ·  bounded queue  ·  drop counter   │
   │          natively ingestible by ELK · Splunk · Datadog · Vector         │
   │                                                                         │
   │  CLI:  rof run        --audit-log [--audit-dir DIR]                     │
@@ -332,21 +332,33 @@ ROF is **not** a replacement for:
     core/                              Core framework
       ast/nodes.py                     StatementType, RLNode, WorkflowAST + all node types
       parser/rl_parser.py              RLParser, StatementParser ABC, all *Parser classes
+                                         RLParser.parse(variables=)      (new §3.3)
+                                         RLParser.parse_file(variables=) (new §3.3)
+                                         render_template()               (new §3.3)
+                                         TemplateError                   (new §3.3)
       graph/workflow_graph.py          GoalStatus, EntityState, GoalState, WorkflowGraph
       state/state_manager.py           StateAdapter, InMemoryStateAdapter, StateManager
+                                         StateAdapter.list()      (new §1.3 — abstract)
+                                         StateAdapter.list_meta() (new §1.3 — abstract)
       events/event_bus.py              Event, EventHandler, EventBus
       context/context_injector.py      ContextProvider, ContextInjector
+                                         ContextInjector(llm_provider=)  (new §1.4)
+                                         ContextInjector.set_llm_provider()
+                                         _estimate_tokens()  (new §1.4)
       conditions/condition_evaluator.py ConditionEvaluator
       interfaces/llm_provider.py       LLMRequest, LLMResponse, UsageInfo, LLMProvider ABC
+                                         LLMRequest.scrub_metadata()  (new §5.2)
+                                         SENSITIVE_METADATA_KEYS      (new §5.2)
       interfaces/tool_provider.py      ToolRequest, ToolResponse, ToolProvider ABC
       orchestrator/orchestrator.py     OrchestratorConfig, StepResult, RunResult, Orchestrator
+                                         ROF_GRAPH_UPDATE_SCHEMA_V1  (new §2.5)
+                                         _build_json_preamble()      (new §2.5)
 
     llm/                               LLM Gateway — providers, retry, renderer, tracking
       providers/openai_provider.py     OpenAIProvider, AzureOpenAIProvider
       providers/anthropic_provider.py  AnthropicProvider
       providers/gemini_provider.py     GeminiProvider
       providers/ollama_provider.py     OllamaProvider
-      providers/github_copilot_provider.py  GitHubCopilotProvider
       providers/base.py                ProviderError, RateLimitError, ContextLimitError,
                                          AuthError, ROF_GRAPH_UPDATE_SCHEMA
       renderer/prompt_renderer.py      PromptRenderer, RendererConfig
@@ -360,6 +372,13 @@ ROF is **not** a replacement for:
       registry/tool_registry.py        ToolRegistry, ToolRegistrationError
       registry/factory.py              create_default_registry()
       router/tool_router.py            ToolRouter, RoutingStrategy, RouteResult
+      tools/tool_schemas.py            ToolSchema, ToolParam, ALL_BUILTIN_SCHEMAS
+                                         schema_ai_codegen · schema_code_runner
+                                         schema_llm_player · schema_web_search
+                                         schema_api_call   · schema_file_reader
+                                         schema_file_save  · schema_validator
+                                         schema_human_in_loop · schema_rag
+                                         schema_database   · schema_lua_run
       tools/web_search.py              WebSearchTool
       tools/rag.py                     RAGTool
       tools/code_runner.py             CodeRunnerTool
@@ -384,6 +403,8 @@ ROF is **not** a replacement for:
 
     pipeline/                          Pipeline Runner — multi-stage .rl workflow chaining
       stage.py                         PipelineStage, FanOutGroup
+                                         PipelineStage.variables  (new §3.3)
+                                         PipelineStage._resolved_variables(snapshot)
       config.py                        PipelineConfig, OnFailure, SnapshotMerge
       result.py                        StageResult, FanOutGroupResult, PipelineResult
       serializer.py                    SnapshotSerializer
@@ -448,19 +469,6 @@ ROF is **not** a replacement for:
       02_interact.rl                 Stage 2: LuaRunTool runs the script interactively
       03_evaluate.rl                 Stage 3: LLM evaluates the results
 ```
-
----
-
-> **Migration note (v0.1 → package layout)**
-> The implementation has moved from six flat monolith files into typed
-> sub-packages (`rof_framework.core`, `.llm`, `.tools`, `.pipeline`,
-> `.routing`, `.cli`, `.testing`). All existing imports of the form
-> `from rof_framework.rof_core import Orchestrator` continue to work
-> unchanged — each `rof_*.py` file is now a thin backward-compatibility
-> shim that re-exports every public name from the canonical sub-package.
-> Prefer the new paths (e.g. `from rof_framework.core import Orchestrator`)
-> for any new code; the shims are guaranteed to remain in place for the
-> full v0.x series.
 
 ---
 
@@ -618,6 +626,12 @@ ROF is **not** a replacement for:
   │   Tokenises .rl source. Delegates to registered StatementParsers.
   │   Extend: parser.register(MyStatementParser())
   │
+  │   Template variables (new §3.3):
+  │     ast = parser.parse(source, variables={"name": "Alice", "score": 750})
+  │     ast = parser.parse_file("workflow.rl", variables={"region": "EMEA"})
+  │     # {{name}} and {{dotted.path}} placeholders resolved before tokenisation.
+  │     # variables=None (default) → no substitution, fully backward-compatible.
+  │
   WorkflowAST
   │   Typed dataclass tree — Definition, Attribute, Predicate,
   │   Relation, Condition, Goal nodes (source_line preserved for errors).
@@ -632,6 +646,19 @@ ROF is **not** a replacement for:
   │   Only entities / conditions relevant to the current goal are included.
   │   Extend: injector.register_provider(RAGContextProvider())
   │
+  │   Context-window overflow guard (new §1.4):
+  │     injector = ContextInjector(llm_provider=my_llm)
+  │     # or: injector.set_llm_provider(my_llm)
+  │     # Warns (ResourceWarning + log) at >85% of context_limit.
+  │     # Trims least-relevant entities automatically at ≥100%.
+  │     # Uses tiktoken when installed, falls back to len(text)//4.
+  │     # No provider attached → guard disabled (backward-compatible default).
+  │
+  │   Entity-relevance fix (§1.6):
+  │     _find_relevant_entities() now uses iterative transitive closure via
+  │     conditions rather than the former outer-guard heuristic that could
+  │     inflate context with entirely unrelated entities.
+  │
   ConditionEvaluator
   │   Evaluates if/then conditions against the live graph.
   │   Supports: >, <, >=, <=, ==, !=, and, or, not operators.
@@ -645,13 +672,50 @@ ROF is **not** a replacement for:
   │   Saves / loads WorkflowGraph snapshots via a swappable adapter.
   │   mgr.swap_adapter(RedisStateAdapter())
   │
+  │   Run enumeration (new §1.3):
+  │     mgr.list()                  → list[str]   — all stored run IDs
+  │     mgr.list(prefix="pipe1-")  → list[str]   — filtered by prefix
+  │     mgr.list_meta()             → list[dict]  — id + saved_at + pipeline_id
+  │
+  │   Custom StateAdapter subclasses must now implement two new abstract
+  │   methods: list(prefix) and list_meta(prefix).  See the Migration Guide.
+  │
   OrchestratorConfig
-      Controls the Orchestrator execution loop.
-      output_mode: "auto" | "json" | "rl"
-        "auto"  → use "json" if provider.supports_json_output(), else "rl"
-        "json"  → enforce JSON schema output (structured, schema-validated)
-        "rl"    → ask for RelateLang text output (legacy, regex fallback)
-      system_preamble / system_preamble_json — swapped automatically by mode.
+  │   Controls the Orchestrator execution loop.
+  │   output_mode: "auto" | "json" | "rl"
+  │     "auto"  → use "json" if provider.supports_json_output(), else "rl"
+  │     "json"  → enforce JSON schema output (structured, schema-validated)
+  │     "rl"    → ask for RelateLang text output (legacy, regex fallback)
+  │   system_preamble / system_preamble_json — swapped automatically by mode.
+  │
+  │   system_preamble_json:
+  │     Now composed dynamically from ROF_GRAPH_UPDATE_SCHEMA_V1 via
+  │     __post_init__.  The schema lives in one place — update the constant
+  │     and every config instance picks it up automatically.
+  │
+  ROF_GRAPH_UPDATE_SCHEMA_V1
+  │   Versioned string constant for the graph-update JSON schema.
+  │   '{"attributes":[…],"predicates":[…],"prose":"…","reasoning":"…"}'
+  │   Use _build_json_preamble(schema=MY_SCHEMA) to compose a custom preamble.
+  │
+  render_template(source, variables)
+  │   Standalone template renderer.  Resolves {{name}} and {{a.b.c}} paths.
+  │   Raises TemplateError for missing keys.
+  │
+  TemplateError
+  │   Raised when a {{placeholder}} is missing from the variables mapping.
+  │   e.variable — the missing key name as a string.
+  │
+  SENSITIVE_METADATA_KEYS
+  │   frozenset of lowercase key names considered sensitive
+  │   ("api_key", "token", "secret", "password", "authorization", …).
+  │
+  LLMRequest.scrub_metadata()
+      Returns a copy of the request with sensitive metadata redacted.
+      Two rules: key-name match (SENSITIVE_METADATA_KEYS, case-insensitive)
+      and value-pattern match (sk-…, Bearer …, ghp_…, AIza…, etc.).
+      The Orchestrator calls this automatically before storing any request
+      in StepResult — RunResult.steps[i].llm_request.metadata is always clean.
 ```
 
 ---
@@ -690,32 +754,6 @@ ROF is **not** a replacement for:
   ├── OllamaProvider      (llama3, mistral, gemma3, any local model)
   │     OpenAI-compat mode for vLLM: use_openai_compat=True
   │
-  └── GitHubCopilotProvider
-        Talks to the GitHub Copilot Chat Completions API (OpenAI-compat).
-        No official public API — reverse-engineered from the VS Code extension.
-
-        Authentication paths:
-          Path A (recommended) — Device-flow OAuth:
-            llm = GitHubCopilotProvider.authenticate(model="gpt-4o")
-            # Opens browser once; token cached at ~/.config/rof/copilot_oauth.json
-
-          Path B — Subsequent runs (cached token):
-            llm = GitHubCopilotProvider.from_cache(model="gpt-4o")
-
-          Path C — Direct token:
-            llm = GitHubCopilotProvider(github_token="ghu_...", model="gpt-4o")
-
-        GitHub Enterprise Server:
-            llm = GitHubCopilotProvider.authenticate(
-                ghe_base_url="https://ghe.corp.com",
-                token_endpoint="https://ghe.corp.com/copilot_internal/v2/token",
-                api_base_url="https://copilot-proxy.ghe.corp.com",
-            )
-
-        The correct tier-specific API base URL (individual vs. business account)
-        is discovered automatically from the session-token exchange response.
-        Dependencies: pip install openai httpx
-
   RetryManager
   │   Wraps any provider transparently.
   │   CONSTANT | LINEAR | EXPONENTIAL | JITTERED backoff strategies.
@@ -821,8 +859,7 @@ ROF is **not** a replacement for:
   │
   create_provider()
       Convenience factory. Wraps the named provider in a RetryManager.
-      Supports: "openai" | "azure" | "anthropic" | "gemini" | "ollama" |
-                "vllm" | "github_copilot"
+      Supports: "openai" | "azure" | "anthropic" | "gemini" | "ollama" | "vllm"
       llm = create_provider("anthropic", api_key="sk-ant-...",
                             model="claude-opus-4-5")
 
@@ -837,6 +874,12 @@ ROF is **not** a replacement for:
                              <ReportEntity>.content so FileSaveTool finds it.
         reasoning   string — internal chain-of-thought scratchpad (audit only)
       Required: attributes, predicates.  prose and reasoning default to "".
+
+  ROF_GRAPH_UPDATE_SCHEMA_V1  (canonical versioned constant — rof_framework.core)
+      Identical schema, now also exported from rof_framework.core as a versioned
+      constant (§2.5).  Use this in any code that composes custom preambles so
+      schema evolution only requires changing one place.  The rof-llm copy in
+      providers/base.py is kept for internal provider use and remains unchanged.
 ```
 
 ---
@@ -844,6 +887,99 @@ ROF is **not** a replacement for:
 ### rof-tools
 
 ```
+  ToolSchema  (dataclass)
+  │   Full self-description of a tool — the ROF equivalent of an MCP Tool
+  │   object.  The planner reads this at runtime to know which ``ensure``
+  │   phrase activates the tool, what entity attributes it requires, and
+  │   what it does.  Defined in core/interfaces/tool_provider.py so it is
+  │   available to both the core framework and the tool implementations
+  │   without a circular import.
+  │
+  │   Fields:
+  │     name        – stable programmatic name (e.g. "AICodeGenTool")
+  │     description – one-paragraph plain-English description
+  │     triggers    – ordered list of trigger phrases; triggers[0] is the
+  │                   canonical phrase used in ``ensure`` statements
+  │     params      – list[ToolParam] — required params MUST be set as
+  │                   entity attributes before the ensure goal
+  │     notes       – optional list of short caveat bullets shown to the LLM
+  │
+  │   Properties:
+  │     schema.canonical_trigger  → triggers[0] or ""
+  │     schema.required_params    → [p for p in params if p.required]
+  │     schema.optional_params    → [p for p in params if not p.required]
+  │
+  │   from rof_framework.core.interfaces.tool_provider import ToolSchema, ToolParam
+  │   schema = ToolSchema(
+  │       name="MyTool",
+  │       description="Does something useful.",
+  │       triggers=["do something", "perform action"],
+  │       params=[
+  │           ToolParam("target", "string", "What to act on", required=True),
+  │           ToolParam("count",  "integer", "How many times", required=False, default=1),
+  │       ],
+  │       notes=["Do not use inside an AICodeGenTool goal phrase."],
+  │   )
+  │
+  ToolParam  (dataclass)
+  │   Describes one input parameter of a tool — mirrors MCP inputSchema.
+  │   Fields:
+  │     name        – parameter name as it appears in the entity attribute
+  │     type        – JSON Schema primitive: "string" | "integer" | "boolean"
+  │                   | "number" | "array" | "object"
+  │     description – one sentence shown to the planner LLM
+  │     required    – True → planner MUST set this as an entity attribute
+  │     default     – default value for optional params (None = no default)
+  │
+  tool_schemas.py  (tools/tools/tool_schemas.py)
+  │   Rich ToolSchema declarations for every built-in ROF tool.
+  │   Each function returns the canonical ToolSchema for one tool.
+  │   The schemas are consumed by the planner's tool-catalogue builder
+  │   so the LLM always sees a structured, accurate description of every
+  │   available tool — exactly like an MCP server exposes its inputSchema.
+  │
+  │   Functions (one per tool):
+  │     schema_ai_codegen()    schema_code_runner()   schema_llm_player()
+  │     schema_web_search()    schema_api_call()      schema_file_reader()
+  │     schema_file_save()     schema_validator()     schema_human_in_loop()
+  │     schema_rag()           schema_database()      schema_lua_run()
+  │
+  │   ALL_BUILTIN_SCHEMAS  – list[ToolSchema] of all 12 schemas in display
+  │                          order; import this to feed the planner catalogue
+  │                          builder without constructing tool instances.
+  │
+  │   Adding a new tool:
+  │     1. Write schema_<toolname>() here.
+  │     2. Add it to ALL_BUILTIN_SCHEMAS.
+  │     3. Override tool_schema() in your ToolProvider subclass to call it.
+  │
+  │   from rof_framework.tools.tools.tool_schemas import ALL_BUILTIN_SCHEMAS
+  │   from demos.rof_ai_demo.planner import build_tool_catalogue
+  │   catalogue_block = build_tool_catalogue(ALL_BUILTIN_SCHEMAS)
+  │
+  ToolProvider  (ABC — core/interfaces/tool_provider.py)
+  │   Extension point for all tool implementations.  Every concrete tool
+  │   SHOULD override tool_schema() to return a rich ToolSchema so the
+  │   planner always sees accurate parameter names and types.  The default
+  │   implementation derives a minimal schema from name + trigger_keywords.
+  │
+  │   Abstract properties / methods:
+  │     name              → str
+  │     trigger_keywords  → list[str]
+  │     execute(request)  → ToolResponse
+  │
+  │   Self-description method:
+  │     tool_schema() → ToolSchema
+  │       Default: builds ToolSchema(name, description, triggers) from the
+  │                class docstring and trigger_keywords.  No params or notes.
+  │       Override: return the matching schema_<toolname>() result for full
+  │                 planner catalogue accuracy.
+  │
+  │   Example override:
+  │     def tool_schema(self) -> ToolSchema:
+  │         from rof_framework.tools.tools.tool_schemas import schema_web_search
+  │         return schema_web_search()
+  │
   ToolRegistry
   │   Central registry. Queryable by name, keyword, or tag.
   │   registry.register(WebSearchTool(), tags=["web", "retrieval"])
@@ -919,8 +1055,15 @@ ROF is **not** a replacement for:
   │   Languages: python · lua · javascript · shell
   │   Output: language, saved_to (file path), filename
   │   Constructor: AICodeGenTool(llm, output_dir=None, max_tokens=4096)
-  │   Trigger keywords: "generate python code", "generate lua code",
-  │                     "generate code", "write code", "implement code"
+  │   Canonical trigger: "generate python code"
+  │   All triggers: see schema_ai_codegen() in tool_schemas.py
+  │   Schema notes:
+  │     - NEVER include web-search words ("retrieve", "search", "web") in
+  │       the ensure phrase — the router will mis-route to WebSearchTool.
+  │     - For non-interactive scripts follow with: ensure run python code.
+  │     - For interactive programs follow with:
+  │       ensure play game with llm player and record choices.
+  │     - NEVER pair with both CodeRunnerTool AND LLMPlayerTool.
   │
   ├── CodeRunnerTool
   │   Executes non-interactive scripts produced by AICodeGenTool (or any
@@ -1006,8 +1149,12 @@ ROF is **not** a replacement for:
   │                               timeout_per_turn=15.0, max_turns=30)
   │   Output: transcript (list of {game_output, llm_choice}),
   │           transcript_file (path), turns, script, returncode
-  │   Trigger keywords: "run interactively", "let llm drive",
-  │                     "automate program", "play interactively"
+  │   Canonical trigger: "play game with llm player and record choices"
+  │   Schema notes:
+  │     - Use ONLY after AICodeGenTool for interactive programs.
+  │     - Do NOT pair with CodeRunnerTool for the same script.
+  │     - Only use when the task explicitly mentions: interactive, game,
+  │       questionnaire, menu, play, or adventure.
   │
   ├── MCP Tool Layer  ─────────────────────────────────────────────────
   │
@@ -1110,6 +1257,46 @@ ROF is **not** a replacement for:
       JavaScriptTool       – load and execute a JS snippet/file as a tool
                              (runs via py_mini_racer or Node.js)
       FunctionTool         – wraps a callable, used internally by @rof_tool
+
+  Note: FileSaveTool and FileReaderTool are registered by create_default_registry()
+  but intentionally omitted from the factory.py import list — they are only
+  included when explicitly passed to registry.register().  FileSaveTool has no
+  constructor arguments; FileReaderTool accepts base_dir for sandboxing.
+
+  Planner catalogue integration
+  ─────────────────────────────
+  The planner system prompt is assembled in three layers:
+
+    Layer 1  _PLANNER_SYSTEM_BASE   — RelateLang syntax rules (static)
+    Layer 2  Tool catalogue         — built from ToolSchema objects at session
+                                      start; one section per server for MCP tools
+    Layer 3  Knowledge hint         — injected when --knowledge-dir is active
+
+  Layer 2 is produced by build_tool_catalogue(schemas) in planner.py, which
+  renders each ToolSchema as a YAML-style block the LLM can read without
+  special parsing:
+
+    ### AICodeGenTool
+      Description: Generates source code …
+      Trigger:     "generate python code"
+      Also:        "generate lua code"  /  "write code"  /  …
+      Params:
+        language   (string, optional, default=python) — Target language …
+        description (string, optional) — Plain-English description …
+      Notes:
+        - NEVER include WebSearchTool trigger words …
+        - For non-interactive scripts follow with: ensure run python code.
+
+  MCP tools discovered via tools/list are converted to ToolSchema objects by
+  build_mcp_tool_schemas() (planner.py) using the server's inputSchema, then
+  rendered as a separate "## <server_name> MCP Tools" section.  This means
+  the planner sees every MCP sub-tool name, description, and required
+  parameters — giving it the same level of accuracy as built-in tools.
+
+  The same ToolSchema.params[].type information is consumed by
+  _inject_missing_mcp_params() in session.py at retry time to coerce
+  wrong-typed entity attribute values (e.g. seed: int → str) before
+  replaying the failed step.
 ```
 
 ---
@@ -1839,21 +2026,6 @@ try:
     run_my_app(registry)
 finally:
     factory.close_all()   # clean shutdown of MCP subprocess sessions
-```
-
-**GitHub Copilot provider:**
-
-```python
-from rof_framework.llm.providers.github_copilot_provider import GitHubCopilotProvider
-
-# First time: opens browser for device-flow OAuth, caches token
-llm = GitHubCopilotProvider.authenticate(model="gpt-4o")
-
-# Subsequent runs: load token silently from cache
-llm = GitHubCopilotProvider.from_cache(model="gpt-4o")
-
-# Direct token (skip device flow)
-llm = GitHubCopilotProvider(github_token="ghu_...", model="gpt-4o")
 ```
 
 **Loan Approval pipeline** (`gather → analyse → decide`):

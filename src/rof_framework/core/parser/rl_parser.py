@@ -23,6 +23,7 @@ logger = logging.getLogger("rof.parser")
 
 __all__ = [
     "ParseError",
+    "TemplateError",
     "StatementParser",
     "DefinitionParser",
     "PredicateParser",
@@ -39,9 +40,87 @@ __all__ = [
     "RLParser",
 ]
 
+# ---------------------------------------------------------------------------
+# Template variable substitution (3.3)
+# ---------------------------------------------------------------------------
+# Matches ``{{variable_name}}`` placeholders in .rl source text.
+# Variable names may contain letters, digits, underscores, and dots
+# (dots allow snapshot-path references such as ``{{snapshot.Customer.name}}``).
+_TEMPLATE_RE = re.compile(r"\{\{([\w.]+)\}\}")
+
+
+class TemplateError(Exception):
+    """
+    Raised by :func:`render_template` when a required variable is missing
+    from the substitution mapping and no default was supplied.
+    """
+
+    def __init__(self, variable: str) -> None:
+        super().__init__(
+            f"Template variable '{{{{ {variable} }}}}' is missing from the "
+            "variables mapping.  Pass a value for it or mark it optional with "
+            "a default (e.g. variables={'variable': ''})."
+        )
+        self.variable = variable
+
+
+def render_template(source: str, variables: dict[str, Any]) -> str:
+    """
+    Substitute ``{{name}}`` placeholders in *source* with values from *variables*.
+
+    Placeholder syntax
+    ------------------
+    - Simple name:   ``{{customer_name}}``   → ``variables["customer_name"]``
+    - Dotted path:   ``{{snapshot.Customer.name}}``
+                     → nested dict lookup ``variables["snapshot"]["Customer"]["name"]``
+
+    Values are coerced to ``str`` for substitution.  Missing keys raise
+    :class:`TemplateError`.
+
+    Args:
+        source:    Raw .rl source text (may contain zero or more placeholders).
+        variables: Mapping of placeholder names to their substitution values.
+                   Nested values (for dotted paths) must be nested dicts.
+
+    Returns:
+        The source text with all ``{{…}}`` placeholders replaced.
+
+    Raises:
+        TemplateError: When a placeholder name is not found in *variables*.
+
+    Example::
+
+        src = 'Customer has name of "{{customer_name}}".'
+        rendered = render_template(src, {"customer_name": "Alice"})
+        # → 'Customer has name of "Alice".'
+
+    Snapshot late-binding example::
+
+        src = 'Customer has name of "{{snapshot.Customer.name}}".'
+        rendered = render_template(src, {"snapshot": {"Customer": {"name": "Alice"}}})
+        # → 'Customer has name of "Alice".'
+    """
+
+    def _resolve(name: str) -> str:
+        parts = name.split(".")
+        value: Any = variables
+        for part in parts:
+            if isinstance(value, dict):
+                if part not in value:
+                    raise TemplateError(name)
+                value = value[part]
+            else:
+                raise TemplateError(name)
+        return str(value)
+
+    def _replace(match: re.Match) -> str:  # type: ignore[type-arg]
+        return _resolve(match.group(1))
+
+    return _TEMPLATE_RE.sub(_replace, source)
+
 
 class ParseError(Exception):
-    """Wird bei Syntaxfehlern im .rl-Code geworfen."""
+    """Raised when a syntax error is encountered in .rl source code."""
 
     def __init__(self, msg: str, line: int = 0):
         super().__init__(f"[Line {line}] {msg}")
@@ -78,7 +157,7 @@ class PredicateParser(StatementParser):
     _RE = re.compile(r"^(\w+)\s+is\s+(.+)\.$", re.IGNORECASE)
 
     def matches(self, line: str) -> bool:
-        # Kein 'define' am Anfang, kein 'relate', kein 'if', kein 'ensure'
+        # Must not start with 'define', 'relate', 'if', or 'ensure'
         return self._RE.match(line) is not None and not line.lower().startswith(
             ("define", "relate", "if ", "ensure")
         )
@@ -379,6 +458,25 @@ class RLParser:
     Main parser. Reads .rl source text and delegates each statement
     to the registered StatementParsers.
 
+    Template variables (3.3)
+    ------------------------
+    .rl source files can contain ``{{variable}}`` placeholders that are
+    resolved before parsing.  Pass a *variables* dict to :meth:`parse` or
+    :meth:`parse_file` to enable substitution::
+
+        parser = RLParser()
+        ast = parser.parse(
+            'Customer has name of "{{customer_name}}".',
+            variables={"customer_name": "Alice"},
+        )
+
+    Dotted snapshot references are also supported::
+
+        ast = parser.parse(source, variables={"snapshot": snapshot_dict})
+
+    When *variables* is ``None`` (the default) no substitution is performed
+    and the source is parsed as-is (fully backward-compatible).
+
     Extension point:
         parser = RLParser()
         parser.register(MyCustomStatementParser())
@@ -409,7 +507,33 @@ class RLParser:
         else:
             self._parsers.insert(position, parser)
 
-    def parse(self, source: str) -> WorkflowAST:
+    def parse(
+        self,
+        source: str,
+        variables: dict[str, Any] | None = None,
+    ) -> WorkflowAST:
+        """
+        Parse *source* into a :class:`WorkflowAST`.
+
+        Args:
+            source:    Raw .rl source text.
+            variables: Optional mapping of ``{{placeholder}}`` names to their
+                       substitution values.  When provided, :func:`render_template`
+                       is called on *source* before tokenisation so the placeholders
+                       are resolved first.  Pass ``None`` (default) to skip
+                       template substitution entirely.
+
+        Returns:
+            Populated :class:`WorkflowAST` instance.
+
+        Raises:
+            TemplateError: When *variables* is provided but a placeholder in
+                           *source* is missing from the mapping.
+            ParseError:    On syntax errors in the (possibly rendered) source.
+        """
+        if variables is not None:
+            source = render_template(source, variables)
+
         ast = WorkflowAST()
         statements = self._tokenize(source)
 
@@ -422,9 +546,24 @@ class RLParser:
 
         return ast
 
-    def parse_file(self, path: str) -> WorkflowAST:
+    def parse_file(
+        self,
+        path: str,
+        variables: dict[str, Any] | None = None,
+    ) -> WorkflowAST:
+        """
+        Read *path* and parse its contents.
+
+        Args:
+            path:      Filesystem path to a .rl file.
+            variables: Forwarded verbatim to :meth:`parse`.  See that method
+                       for full documentation of template variable substitution.
+
+        Returns:
+            Populated :class:`WorkflowAST` instance.
+        """
         with open(path, encoding="utf-8") as f:
-            return self.parse(f.read())
+            return self.parse(f.read(), variables=variables)
 
     # ------------------------------------------------------------------
     # Intern

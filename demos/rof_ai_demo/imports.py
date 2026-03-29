@@ -14,7 +14,7 @@ Exports
   ParseError, RLParser, RunResult, ToolProvider, WorkflowAST
 
   # rof_llm symbols
-  AuthError, BackoffStrategy, GitHubCopilotProvider, ProviderError,
+  AuthError, BackoffStrategy, ProviderError,
   RetryConfig, RetryManager, create_provider
 
   # rof_tools symbols (only when _HAS_TOOLS is True)
@@ -121,7 +121,6 @@ from rof_framework.rof_core import (  # type: ignore
 from rof_framework.rof_llm import (  # type: ignore
     AuthError,
     BackoffStrategy,
-    GitHubCopilotProvider,
     ProviderError,
     RetryConfig,
     RetryManager,
@@ -258,7 +257,6 @@ __all__ = [
     # rof_llm
     "AuthError",
     "BackoffStrategy",
-    "GitHubCopilotProvider",
     "ProviderError",
     "RetryConfig",
     "RetryManager",

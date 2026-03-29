@@ -33,7 +33,6 @@ from console import (
 from imports import (
     AuthError,
     BackoffStrategy,
-    GitHubCopilotProvider,
     RetryConfig,
     RetryManager,
     _load_generic_providers,
@@ -48,15 +47,10 @@ _BUILTIN_PROVIDER_DEFAULTS: dict[str, tuple[str, str | None]] = {
     "anthropic": ("claude-opus-4-5", "ANTHROPIC_API_KEY"),
     "openai": ("gpt-4o", "OPENAI_API_KEY"),
     "ollama": ("deepseek-r1:8b", None),
-    "github_copilot": ("gpt-4o", "GITHUB_TOKEN"),
 }
 
 # Provider name aliases normalised before any lookup
-_PROVIDER_ALIASES: dict[str, str] = {
-    "copilot": "github_copilot",
-    "github-copilot": "github_copilot",
-    "gh-copilot": "github_copilot",
-}
+_PROVIDER_ALIASES: dict[str, str] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -170,10 +164,6 @@ def _setup_wizard(args: "argparse.Namespace") -> tuple[Any, Path]:  # noqa: F821
             ("anthropic", "Anthropic Claude  (claude-opus-4-5, claude-sonnet-4-5, \u2026)"),
             ("openai", "OpenAI GPT        (gpt-4o, gpt-4o-mini, o1, \u2026)"),
             ("ollama", "Local Ollama/vLLM (deepseek-r1:8b, mistral, \u2026)"),
-            (
-                "github_copilot",
-                "GitHub Copilot    (no key needed \u2014 browser login on first run)",
-            ),
         ]
         for _gname, _gspec in sorted(_generic_providers.items()):
             _menu_items.append((_gname, _gspec.get("description", _gspec["cls"].__name__)))
@@ -206,12 +196,6 @@ def _setup_wizard(args: "argparse.Namespace") -> tuple[Any, Path]:  # noqa: F821
     # ── Output directory ──────────────────────────────────────────────────
     output_dir = Path(args.output_dir) if args.output_dir else Path.cwd() / "rof_output"
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    # =====================================================================
-    # GitHub Copilot — device-flow auth path
-    # =====================================================================
-    if provider == "github_copilot":
-        return _setup_github_copilot(args, model, output_dir)
 
     # =====================================================================
     # Generic providers from rof_providers.PROVIDER_REGISTRY
@@ -269,104 +253,6 @@ def _setup_wizard(args: "argparse.Namespace") -> tuple[Any, Path]:  # noqa: F821
         **extra,
     )
     return llm, output_dir
-
-
-# ---------------------------------------------------------------------------
-# GitHub Copilot path
-# ---------------------------------------------------------------------------
-
-
-def _setup_github_copilot(
-    args: Any,
-    model: str,
-    output_dir: Path,
-) -> tuple[Any, Path]:
-    """Handle the full GitHub Copilot auth flow and return (llm, output_dir)."""
-    copilot_kwargs: dict[str, Any] = {}
-
-    editor_version = getattr(args, "editor_version", None) or ""
-    if editor_version:
-        copilot_kwargs["editor_version"] = editor_version
-
-    integration_id = getattr(args, "integration_id", None) or ""
-    if integration_id:
-        copilot_kwargs["integration_id"] = integration_id
-
-    token_endpoint = getattr(args, "token_endpoint", None) or ""
-    if token_endpoint:
-        copilot_kwargs["token_endpoint"] = token_endpoint
-        print(f"  Copilot token endpoint : {token_endpoint}")
-
-    copilot_api_url = getattr(args, "copilot_api_url", None) or ""
-    if copilot_api_url:
-        copilot_kwargs["api_base_url"] = copilot_api_url
-        print(f"  Copilot API base URL   : {copilot_api_url}")
-
-    ghe_base_url = getattr(args, "ghe_base_url", None) or ""
-
-    copilot_cache = getattr(args, "copilot_cache", None) or ""
-    if copilot_cache:
-        copilot_kwargs["cache_path"] = copilot_cache
-        print(f"  Copilot cache file     : {copilot_cache}")
-
-    # Invalidate cache if requested
-    if getattr(args, "invalidate_cache", False):
-        GitHubCopilotProvider.invalidate_cache(cache_path=copilot_cache or None)
-        print("  Copilot OAuth cache cleared \u2014 a fresh login will be required.")
-
-    # Token priority: --github-token > --api-key > GITHUB_TOKEN > device-flow
-    github_token = (
-        getattr(args, "github_token", None)
-        or ""
-        or (args.api_key or "")
-        or os.environ.get("GITHUB_TOKEN", "")
-    )
-
-    if github_token:
-        masked = github_token[:8] + "*" * max(0, len(github_token) - 8)
-        print()
-        _print_config_box(
-            "github_copilot",
-            model,
-            output_dir,
-            extra_rows=[
-                ("GH token", masked + "  " + dim("(direct \u2014 device-flow skipped)")),
-            ],
-        )
-        base_llm = GitHubCopilotProvider(
-            github_token=github_token,
-            model=model,
-            **copilot_kwargs,
-        )
-    else:
-        open_browser = not getattr(args, "no_browser", False)
-        auth_note = (
-            dim("(browser opens automatically)")
-            if open_browser
-            else dim("(--no-browser: URL will be printed)")
-        )
-        print()
-        _print_config_box(
-            "github_copilot",
-            model,
-            output_dir,
-            extra_rows=[
-                ("Auth", f"{cyan('device-flow OAuth')}  {auth_note}"),
-                ("Cache", str(GitHubCopilotProvider._DEFAULT_CACHE_PATH)),
-            ],
-        )
-        try:
-            base_llm = GitHubCopilotProvider.authenticate(
-                model=model,
-                open_browser=open_browser,
-                ghe_base_url=ghe_base_url or None,
-                **copilot_kwargs,
-            )
-        except AuthError as exc:
-            err(f"Copilot authentication failed: {exc}")
-            sys.exit(1)
-
-    return _wrap_retry(base_llm), output_dir
 
 
 # ---------------------------------------------------------------------------

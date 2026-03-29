@@ -895,32 +895,6 @@ class TestCreateProviderFactory:
         MockProvider.assert_called_once()
         assert isinstance(result, RetryManager)
 
-    @patch("rof_framework.llm.factory.GitHubCopilotProvider")
-    def test_github_copilot_provider_created(self, MockProvider):
-        from rof_framework.llm.factory import create_provider
-        from rof_framework.llm.retry.retry_manager import RetryManager
-
-        MockProvider.return_value = self._mock_provider()
-        result = create_provider("github_copilot", api_key="ghp_token")
-        MockProvider.assert_called_once()
-        assert isinstance(result, RetryManager)
-
-    @patch("rof_framework.llm.factory.GitHubCopilotProvider")
-    def test_copilot_alias_works(self, MockProvider):
-        from rof_framework.llm.factory import create_provider
-
-        MockProvider.return_value = self._mock_provider()
-        create_provider("copilot")
-        MockProvider.assert_called_once()
-
-    @patch("rof_framework.llm.factory.GitHubCopilotProvider")
-    def test_github_copilot_dash_alias_works(self, MockProvider):
-        from rof_framework.llm.factory import create_provider
-
-        MockProvider.return_value = self._mock_provider()
-        create_provider("github-copilot")
-        MockProvider.assert_called_once()
-
     # ── error cases ──────────────────────────────────────────────────
 
     def test_unknown_provider_raises_value_error(self):

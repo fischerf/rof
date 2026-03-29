@@ -11,7 +11,6 @@ from .base import (
     _classify_http_error,
 )
 from .gemini_provider import GeminiProvider
-from .github_copilot_provider import GitHubCopilotProvider
 from .ollama_provider import OllamaProvider
 from .openai_provider import OpenAIProvider
 
@@ -23,7 +22,6 @@ __all__ = [
     "_classify_http_error",
     "ROF_GRAPH_UPDATE_SCHEMA",
     "_ROF_TOOL_DEFINITION",
-    "GitHubCopilotProvider",
     "OpenAIProvider",
     "AnthropicProvider",
     "GeminiProvider",

@@ -730,7 +730,104 @@ class MCPClientTool(ToolProvider):
                 if attr_key.startswith("__"):
                     continue
                 merged[attr_key] = attr_val
-        return self._coerce_arguments(merged)
+        remapped = self._remap_arguments(merged, request)
+        return self._coerce_arguments(remapped)
+
+    def _remap_arguments(
+        self, args: dict[str, Any], request: ToolRequest
+    ) -> dict[str, Any]:
+        """
+        Remap entity attribute names to MCP tool parameter names when
+        the planner used synonyms instead of exact catalogue names.
+
+        For example, the planner may write ``Contact has phone_number of …``
+        but the MCP tool expects ``recipients``.  This method matches
+        unrecognised attribute names to missing required parameters using
+        keyword overlap between the attribute name and the parameter name
+        plus its JSON-Schema description.
+
+        As a final step, scalar values destined for ``"type": "array"``
+        parameters are wrapped in a single-element list.
+        """
+        if not self._mcp_tools:
+            return args
+
+        mcp_tool_name = self._resolve_mcp_tool_name(request)
+        if mcp_tool_name is None:
+            return args
+
+        tool_def = next(
+            (t for t in self._mcp_tools if t.name == mcp_tool_name), None
+        )
+        if tool_def is None:
+            return args
+
+        schema: dict[str, Any] = getattr(tool_def, "inputSchema", None) or {}
+        props: dict[str, Any] = schema.get("properties", {})
+        required: set[str] = set(schema.get("required", []))
+
+        if not props:
+            return args
+
+        # Identify args that don't match any known parameter and params
+        # that are required but absent from the supplied args.
+        unmatched_args: set[str] = {k for k in args if k not in props}
+        missing_params: set[str] = {p for p in required if p not in args}
+
+        if not unmatched_args or not missing_params:
+            # Nothing to remap — either all names already match or there
+            # are no candidates to pull from.
+            remapped = dict(args)
+        else:
+            remapped = dict(args)
+
+            # Build keyword sets for each missing parameter (name + description).
+            param_word_map: dict[str, set[str]] = {}
+            for param_name in missing_params:
+                desc = (props[param_name].get("description", "") or "").lower()
+                words = set(re.findall(r"\w{3,}", param_name.replace("_", " ") + " " + desc))
+                param_word_map[param_name] = words
+
+            # Greedy best-match: for each missing param, find the unmatched
+            # arg with the highest keyword overlap.
+            used_args: set[str] = set()
+            for param_name in sorted(missing_params):
+                best_arg: Optional[str] = None
+                best_score = 0
+                for arg_name in unmatched_args - used_args:
+                    arg_words = set(re.findall(r"\w{3,}", arg_name.replace("_", " ")))
+                    score = len(param_word_map[param_name] & arg_words)
+                    if score > best_score:
+                        best_score = score
+                        best_arg = arg_name
+                if best_arg and best_score > 0:
+                    remapped[param_name] = remapped.pop(best_arg)
+                    used_args.add(best_arg)
+
+            # Type-compatibility fallback: if exactly one missing param and one
+            # unmatched arg remain, pair them regardless of name.
+            still_missing = missing_params - set(remapped.keys())
+            still_unmatched = unmatched_args - used_args
+            if len(still_missing) == 1 and len(still_unmatched) == 1:
+                p = next(iter(still_missing))
+                a = next(iter(still_unmatched))
+                remapped[p] = remapped.pop(a)
+
+            if remapped != args:
+                logger.info(
+                    "MCPClientTool[%s]: remapped args %s → %s",
+                    self._config.name,
+                    list(args.keys()),
+                    list(remapped.keys()),
+                )
+
+        # Wrap scalar values in a list when the schema expects "array".
+        for key in list(remapped.keys()):
+            if key in props and props[key].get("type") == "array":
+                if not isinstance(remapped[key], list):
+                    remapped[key] = [remapped[key]]
+
+        return remapped
 
     def _coerce_arguments(self, args: dict[str, Any]) -> dict[str, Any]:
         """

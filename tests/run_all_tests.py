@@ -196,6 +196,13 @@ def main():
                 "test_routing.py",
             ],
         ),
+        TestDomain(
+            name="ToolProvider / Schema",
+            description="Tests for ToolParam, ToolSchema, ToolProvider.tool_schema() default and override, builtin schema patches (all 12 tools), ALL_BUILTIN_SCHEMAS list, and the index-param regression guard (card_number, pack_number, artifact_number must be REQUIRED)",
+            test_files=[
+                "test_tool_provider.py",
+            ],
+        ),
     ]
 
     # Project root

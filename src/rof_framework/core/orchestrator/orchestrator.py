@@ -18,9 +18,58 @@ from rof_framework.core.interfaces.tool_provider import ToolProvider, ToolReques
 from rof_framework.core.parser.rl_parser import ParseError, RLParser
 from rof_framework.core.state.state_manager import StateManager
 
+# ---------------------------------------------------------------------------
+# Versioned JSON schema constant (2.5)
+# ---------------------------------------------------------------------------
+# The graph-update JSON schema is stored here as a single versioned constant.
+# Both OrchestratorConfig.system_preamble_json and any external tooling that
+# needs to validate LLM responses should reference this constant rather than
+# embedding the schema inline.  When the schema evolves (e.g. a "relations"
+# key is added), update the constant and bump the version suffix.
+ROF_GRAPH_UPDATE_SCHEMA_V1 = (
+    '{"attributes": [{"entity": "...", "name": "...", "value": ...}],\n'
+    ' "predicates": [{"entity": "...", "value": "..."}],\n'
+    ' "prose": "...",\n'
+    ' "reasoning": "..."}'
+)
+
+
+def _build_json_preamble(schema: str = ROF_GRAPH_UPDATE_SCHEMA_V1) -> str:
+    """
+    Compose the JSON-mode system preamble from *schema*.
+
+    Keeping the preamble text here (rather than inlined in the dataclass
+    default) means the schema and its surrounding instructions are updated
+    together in one place.  Pass a custom *schema* string to override the
+    default without subclassing ``OrchestratorConfig``.
+    """
+    return (
+        "You are a RelateLang workflow executor. "
+        "Interpret the RelateLang context and respond ONLY with a valid JSON object — "
+        "no prose, no markdown, no text outside the JSON.\n\n"
+        f"Required schema:\n  {schema}\n\n"
+        "Field usage:\n"
+        "  attributes — structured updates: numeric values, short strings, "
+        'classification labels (e.g. {"entity":"Customer","name":"segment","value":"high_value"}).\n'
+        "  predicates — categorical conclusions, ONE per decision "
+        '(e.g. {"entity":"Customer","value":"high_value"}).\n'
+        "  prose      — ALL free-form text output: analysis reports, summaries, "
+        "recommendations, explanations, natural-language answers. "
+        "Use this field whenever the goal says 'analyse', 'write report', "
+        "'summarise', 'generate a natural language …', or similar. "
+        "Write the complete deliverable text here.\n"
+        "  reasoning  — your internal chain-of-thought scratchpad (never shown to the user).\n\n"
+        "Rules:\n"
+        "  • Leave arrays empty [] when nothing applies.\n"
+        "  • Never put report/analysis text in 'attributes' — use 'prose'.\n"
+        "  • Never enumerate all option labels in 'predicates' — pick exactly ONE conclusion."
+    )
+
+
 logger = logging.getLogger("rof.orchestrator")
 
 __all__ = [
+    "ROF_GRAPH_UPDATE_SCHEMA_V1",
     "OrchestratorConfig",
     "StepResult",
     "RunResult",
@@ -60,31 +109,15 @@ class OrchestratorConfig:
         "Example response for  ensure generate a natural language support_tier_recommendation for Customer:\n"
         '  Customer has support_tier_recommendation of "Premium support with dedicated account manager and 4-hour SLA.".'
     )
-    system_preamble_json: str = (
-        "You are a RelateLang workflow executor. "
-        "Interpret the RelateLang context and respond ONLY with a valid JSON object — "
-        "no prose, no markdown, no text outside the JSON.\n\n"
-        "Required schema:\n"
-        '  {"attributes": [{"entity": "...", "name": "...", "value": ...}],\n'
-        '   "predicates": [{"entity": "...", "value": "..."}],\n'
-        '   "prose": "...",\n'
-        '   "reasoning": "..."}\n\n'
-        "Field usage:\n"
-        "  attributes — structured updates: numeric values, short strings, "
-        'classification labels (e.g. {"entity":"Customer","name":"segment","value":"high_value"}).\n'
-        "  predicates — categorical conclusions, ONE per decision "
-        '(e.g. {"entity":"Customer","value":"high_value"}).\n'
-        "  prose      — ALL free-form text output: analysis reports, summaries, "
-        "recommendations, explanations, natural-language answers. "
-        "Use this field whenever the goal says 'analyse', 'write report', "
-        "'summarise', 'generate a natural language …', or similar. "
-        "Write the complete deliverable text here.\n"
-        "  reasoning  — your internal chain-of-thought scratchpad (never shown to the user).\n\n"
-        "Rules:\n"
-        "  • Leave arrays empty [] when nothing applies.\n"
-        "  • Never put report/analysis text in 'attributes' — use 'prose'.\n"
-        "  • Never enumerate all option labels in 'predicates' — pick exactly ONE conclusion."
-    )
+    system_preamble_json: str = ""
+
+    def __post_init__(self) -> None:
+        # If the caller did not supply system_preamble_json (empty string sentinel),
+        # compose it dynamically from ROF_GRAPH_UPDATE_SCHEMA_V1 so that schema
+        # changes only need to happen in one place.
+        # Callers who pass an explicit non-empty string keep their custom preamble.
+        if not self.system_preamble_json:
+            self.system_preamble_json = _build_json_preamble()
 
 
 @dataclass
@@ -234,12 +267,12 @@ class Orchestrator:
         self.bus.publish(Event("step.started", {"run_id": run_id, "goal": goal.goal.goal_expr}))
         graph.mark_goal(goal, GoalStatus.RUNNING)
 
-        # 1. Tool-Routing: gibt es ein passendes Tool?
+        # 1. Tool routing — is there a matching tool for this goal?
         tool = self._route_tool(goal.goal.goal_expr)
         if tool:
             return self._execute_tool_step(graph, goal, tool, run_id)
 
-        # 2. Kein Tool → LLM-Call
+        # 2. No tool match → delegate to the LLM
         return self._execute_llm_step(graph, goal, run_id)
 
     def _execute_llm_step(self, graph: WorkflowGraph, goal: GoalState, run_id: str) -> StepResult:
@@ -313,7 +346,10 @@ class Orchestrator:
             return StepResult(
                 goal_expr=goal.goal.goal_expr,
                 status=GoalStatus.ACHIEVED,
-                llm_request=request,
+                # Scrub sensitive metadata keys (API keys, tokens) before
+                # storing the request in the result — the StepResult may be
+                # serialised to JSON via --json or saved in a snapshot.
+                llm_request=request.scrub_metadata(),
                 llm_response=response,
             )
 
@@ -327,7 +363,7 @@ class Orchestrator:
             return StepResult(
                 goal_expr=goal.goal.goal_expr,
                 status=GoalStatus.FAILED,
-                llm_request=request,
+                llm_request=request.scrub_metadata(),
                 error=str(e),
             )
 
