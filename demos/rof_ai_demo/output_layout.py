@@ -51,6 +51,7 @@ import re
 import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -223,6 +224,48 @@ class _Layout:
 # ===========================================================================
 # Individual layout renderers
 # ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 0. Report  (Report.content — generated prose/markdown report)
+# ---------------------------------------------------------------------------
+
+
+def _report_cli(flat: dict, entities: dict) -> str:
+    lines: list[str] = []
+    lines.append(f"\n  {_bold('Report:')}\n")
+    content = flat.get("Report.content", "")
+    if content:
+        lines.append(content)
+    file_path = flat.get("Report.file_path", "")
+    if file_path:
+        lines.append(f"\n  {_dim('Saved to: ' + Path(file_path).name)}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _report_agent(flat: dict, entities: dict) -> str:
+    lines: list[str] = []
+    content = flat.get("Report.content", "")
+    if content:
+        lines.append(content)
+    file_path = flat.get("Report.file_path", "")
+    if file_path:
+        lines.append(f"\nSaved to: {Path(file_path).name}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _report_agent_md(flat: dict, entities: dict) -> str:
+    lines: list[str] = []
+    content = flat.get("Report.content", "")
+    if content:
+        lines.append(content)
+    file_path = flat.get("Report.file_path", "")
+    if file_path:
+        lines.append(f"\n*Saved to: {Path(file_path).name}*")
+    lines.append("")
+    return "\n".join(lines)
+
 
 # ---------------------------------------------------------------------------
 # 1. Web search  (WebSearchResults + SearchResult1…N)
@@ -1096,6 +1139,13 @@ def _generic_agent_md(flat: dict, entities: dict) -> str:
 # ===========================================================================
 
 _LAYOUTS: list[_Layout] = [
+    _Layout(
+        name="report",
+        match=lambda flat: "Report.content" in flat,
+        cli_renderer=_report_cli,
+        agent_renderer=_report_agent,
+        agent_md_renderer=_report_agent_md,
+    ),
     _Layout(
         name="web_search",
         match=lambda flat: (

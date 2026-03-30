@@ -322,7 +322,7 @@ class ROFSession:
                 [
                     _AICodeGenTool(llm=llm, output_dir=output_dir),
                     _LLMPlayerTool(llm=llm, output_dir=output_dir),
-                    _FileSaveTool(),
+                    _FileSaveTool(output_dir=output_dir),
                 ]
             )
 

@@ -80,8 +80,8 @@ class FileSaveTool(ToolProvider):
         "persist file",
     ]
 
-    def __init__(self) -> None:
-        pass
+    def __init__(self, output_dir: Optional[Path] = None) -> None:
+        self._output_dir = Path(output_dir) if output_dir is not None else None
 
     @property
     def name(self) -> str:
@@ -145,16 +145,27 @@ class FileSaveTool(ToolProvider):
         encoding: str = attrs.get("encoding", "") or encoding_fallback or "utf-8"
 
         # ── 2. Resolve destination path ───────────────────────────────────
+        if self._output_dir is None:
+            return ToolResponse(
+                success=False,
+                error=(
+                    "FileSaveTool: no output directory configured.  "
+                    "Pass --output-dir when starting the session so saved files "
+                    "have a safe destination.  File not written."
+                ),
+            )
+
+        save_dir = self._output_dir / "files"
+        save_dir.mkdir(parents=True, exist_ok=True)
+
         file_path_str: str = attrs.get("file_path", "") or file_path_fallback
         if file_path_str:
-            dest = Path(file_path_str)
-            dest.parent.mkdir(parents=True, exist_ok=True)
+            # Strip any directory component — only the filename is allowed
+            filename = Path(file_path_str).name
+            dest = save_dir / filename
         else:
-            # No path supplied — create a temp file preserving any extension hint
             suffix = Path(attrs.get("file_name", "output.txt")).suffix or ".txt"
-            tmp_fd, tmp_path = tempfile.mkstemp(suffix=suffix)
-            os.close(tmp_fd)
-            dest = Path(tmp_path)
+            dest = save_dir / f"output_{uuid.uuid4().hex[:8]}{suffix}"
 
         # ── 3. Write ───────────────────────────────────────────────────────
         try:

@@ -198,19 +198,48 @@ def _extract_artefacts(snapshot: dict) -> list[str]:
     """
     Scan *snapshot* for entity attributes named ``saved_to`` or ``output_path``
     that look like local file paths.  Returns deduplicated list of path strings.
+
+    Also scans goal results so that the absolute path returned by FileSaveTool
+    (which is not written back to entity attributes by the orchestrator) is
+    captured correctly.  Goal results take priority: they contain the resolved
+    absolute path, while entity attributes may still hold a bare filename.
     """
+    _PATH_KEYS = ("saved_to", "output_path", "file_path", "path")
+
+    def _looks_like_path(val: str) -> bool:
+        return "." in val.split("/")[-1] or "/" in val or "\\" in val
+
     artefacts: list[str] = []
     seen: set[str] = set()
-    for _ent_data in snapshot.get("entities", {}).values():
-        attrs = _ent_data.get("attributes", {})
-        for key in ("saved_to", "output_path", "file_path", "path"):
-            val = attrs.get(key, "")
-            if isinstance(val, str) and val and val not in seen:
-                # Accept anything that looks like a file path (has an extension
-                # or starts with / or contains a path separator).
-                if "." in val.split("/")[-1] or "/" in val or "\\" in val:
+
+    # Pass 1: goal results (contain the full absolute path from tool output)
+    for goal in snapshot.get("goals", []):
+        result = goal.get("result", {})
+        if isinstance(result, dict):
+            for key in _PATH_KEYS:
+                val = result.get(key, "")
+                if isinstance(val, str) and val and val not in seen and _looks_like_path(val):
                     artefacts.append(val)
                     seen.add(val)
+
+    # Pass 2: entity attributes (fallback when goal results don't have the path)
+    # Also collect basenames from Pass 1 so bare duplicates are suppressed.
+    seen_basenames: set[str] = set()
+    for p in artefacts:
+        seen_basenames.add(p.replace("\\", "/").rsplit("/", 1)[-1])
+
+    for _ent_data in snapshot.get("entities", {}).values():
+        attrs = _ent_data.get("attributes", {})
+        for key in _PATH_KEYS:
+            val = attrs.get(key, "")
+            if isinstance(val, str) and val and val not in seen and _looks_like_path(val):
+                basename = val.replace("\\", "/").rsplit("/", 1)[-1]
+                if basename in seen_basenames:
+                    continue  # absolute path already captured from goal result
+                artefacts.append(val)
+                seen.add(val)
+                seen_basenames.add(basename)
+
     return artefacts
 
 

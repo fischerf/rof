@@ -97,9 +97,15 @@ fences, no explanation, no prose before or after.
       ensure analyse context and write report.
       ensure compose report from context.
       ensure summarise findings.
-11. When saving LLM analysis output to a file:
+11. ONLY add a file-save step when the user's request explicitly contains
+    words such as "save", "write to file", "export", "store to disk", or
+    "persist".  Requests like "draft a report", "analyse", "summarise", or
+    "compose" do NOT imply saving — output the result as the final goal only.
+    When a save IS explicitly requested:
     a.  Define a Report entity with a file_path attribute BEFORE the analysis
-        goal.
+        goal.  The file_path MUST be a plain filename with no directory
+        separators (e.g. ``"summary.md"``).  The tool resolves the full path
+        automatically; never include folder names in file_path.
     b.  The LLM analysis step MUST write its full answer as:
           Report has content of "<full text>".
     c.  Follow with: ensure save file.
