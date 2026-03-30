@@ -587,9 +587,16 @@ class RLParser:
         start_line = 0
 
         for i, line in enumerate(lines, 1):
-            # Strip comments
+            # Strip comments (//) that appear OUTSIDE double-quoted strings.
+            # A naive index("//"") would break URLs like "https://example.com".
             if "//" in line:
-                line = line[: line.index("//")]
+                in_str = False
+                for j in range(len(line) - 1):
+                    if line[j] == '"':
+                        in_str = not in_str
+                    elif not in_str and line[j] == "/" and line[j + 1] == "/":
+                        line = line[:j]
+                        break
             line = line.strip()
             if not line:
                 continue

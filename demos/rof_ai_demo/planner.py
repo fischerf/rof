@@ -117,6 +117,12 @@ fences, no explanation, no prose before or after.
     reached through a messaging tool (e.g. Signal), use that tool's
     receive/polling trigger (e.g. ``ensure signal receive messages.``),
     NOT ``ensure wait for human …``.
+14. Attribute values MUST be on a single line.  Close the double-quote on
+    the SAME line it was opened.  Never place a newline inside a string value.
+    WRONG:  Entity has url of "https://example.com
+            ensure discover rss feeds".
+    RIGHT:  Entity has url of "https://example.com".
+            ensure discover rss feeds.
 """
 
 
