@@ -1,17 +1,16 @@
 """
 session.py – ROF AI Demo: ROFSession
 =====================================
-Wires together an LLMProvider, tool registry, planner, and orchestrator
+Wires together an LLMProvider, tool registry, and FunctionCallingEngine
 into a single callable session.  Call ``session.run(prompt)`` to execute
-one end-to-end request.
+one end-to-end request via the LLM function-calling loop.
 
 MCP support
 -----------
 Pass ``mcp_server_configs`` (a list of ``MCPServerConfig`` objects) to
 ``ROFSession.__init__`` to connect one or more MCP servers.  Each config
 produces one ``MCPClientTool`` that is registered alongside all built-in
-tools and whose trigger keywords are injected into the planner system
-prompt automatically.  Call ``session.close_mcp()`` (or use the context
+tools.  Call ``session.close_mcp()`` (or use the context
 manager) to cleanly shut down all MCP subprocess/HTTP sessions.
 
 Exports
@@ -21,13 +20,9 @@ Exports
 
 from __future__ import annotations
 
-import html
 import json
 import logging
-import re
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
@@ -56,12 +51,8 @@ from imports import _HAS_AUDIT, _HAS_MCP, _HAS_ROUTING, _HAS_TOOLS  # noqa: F401
 # ---------------------------------------------------------------------------
 from rof_framework.rof_core import (  # type: ignore
     EventBus,
-    Orchestrator,
-    OrchestratorConfig,
-    RLParser,
     RunResult,
     ToolProvider,
-    WorkflowAST,
 )
 
 # rof_tools symbols (guarded by _HAS_TOOLS at call-sites)
@@ -89,14 +80,10 @@ if _HAS_TOOLS:
     )
 
 # rof_routing symbols (guarded by _HAS_ROUTING at call-sites)
-_ConfidentOrchestrator: Any = None
 _RoutingMemory: Any = None
 _RoutingMemoryInspector: Any = None
 
 if _HAS_ROUTING:
-    from rof_framework.rof_routing import (  # type: ignore
-        ConfidentOrchestrator as _ConfidentOrchestrator,
-    )
     from rof_framework.rof_routing import (
         RoutingMemory as _RoutingMemory,
     )
@@ -113,107 +100,16 @@ if _HAS_MCP:
     except ImportError:
         pass
 
-from output_layout import render_result
-from planner import (
-    Planner,
+from fc_engine import (
+    FunctionCallingEngine,
+    _FC_SYSTEM_BASE,
     _make_knowledge_hint,
     build_mcp_tool_schemas,
-    build_tool_catalogue,
 )
+from output_layout import render_result
 from telemetry import _STATS, _attach_debug_hooks
 
 logger = logging.getLogger("rof.session")
-
-# ---------------------------------------------------------------------------
-# Tool-trigger keyword strip regex (used by _build_fallback_ast)
-# ---------------------------------------------------------------------------
-_TOOL_TRIGGER_STRIP = re.compile(
-    r"\b(retrieve information|retrieve web_information|rag query|knowledge base|"
-    r"retrieve knowledge|retrieve document|search web|look up|"
-    r"generate (?:python|lua|javascript|code)|write code|create code|"
-    r"run (?:python|lua|javascript|code|script)|execute code|"
-    r"call api|http request|fetch url|read file|parse file|"
-    r"query database|sql query|database lookup|execute sql|"
-    r"validate (?:output|schema|response|relatelang)|check (?:format|rl)|"
-    r"schema check|verify schema|"
-    r"analyse context(?: and write report)?|write report|"
-    r"wait for human|human approval|"
-    r"save (?:file|csv|results|data|output)|write (?:file|csv|data))\b",
-    re.IGNORECASE,
-)
-
-# URL regex used by _fetch_urls_from_snapshot
-_URL_RE = re.compile(
-    r'https?://[^\s\'"<>\]\)]+',
-    re.IGNORECASE,
-)
-
-# Max bytes to read from a fetched URL (512 KB)
-_URL_FETCH_MAX_BYTES = 524_288
-
-# Domains that are unlikely to return readable text (skip silently)
-_URL_SKIP_DOMAINS: frozenset = frozenset(
-    {
-        "localhost",
-        "127.0.0.1",
-    }
-)
-
-
-def _fetch_url_text(url: str, timeout: float = 15.0) -> str:
-    """
-    Fetch *url* and return its text content (HTML stripped to plain text).
-    Returns an empty string on any error so callers can skip silently.
-    """
-    try:
-        from urllib.parse import urlparse
-
-        host = urlparse(url).hostname or ""
-        if any(skip in host for skip in _URL_SKIP_DOMAINS):
-            return ""
-
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": ("Mozilla/5.0 (compatible; ROF-URLEnricher/1.0)"),
-                "Accept": "text/html,text/plain,*/*",
-            },
-        )
-        # Use an SSL context that doesn't verify certs so corporate proxies work
-        import ssl
-
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-            raw = resp.read(_URL_FETCH_MAX_BYTES)
-            charset = "utf-8"
-            ct = resp.headers.get_content_charset()
-            if ct:
-                charset = ct
-            text = raw.decode(charset, errors="replace")
-
-        # Strip HTML tags and decode entities
-        text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.S | re.I)
-        text = re.sub(r"<script[^>]*>.*?</script>", " ", text, flags=re.S | re.I)
-        text = re.sub(r"<[^>]+>", " ", text)
-        text = html.unescape(text)
-        # Collapse whitespace
-        text = re.sub(r"\s{3,}", "\n\n", text)
-        return text.strip()[:8000]  # keep first 8 000 chars for context
-
-    except Exception:
-        return ""
-
-
-# Language-detection heuristics used by _save_fallback
-_LANG_HINTS: dict[str, tuple[str, list[str]]] = {
-    "lua": (".lua", ["io.read", "io.write", "function ", "local ", "print("]),
-    "python": (".py", ["def ", "import ", "print(", "if __name__"]),
-    "javascript": (".js", ["function ", "const ", "let ", "console.log"]),
-    "shell": (".sh", ["#!/bin/bash", "echo ", "fi\n", "done\n"]),
-}
 
 # File extensions scanned when --knowledge-dir is given
 _KNOWLEDGE_EXTENSIONS: frozenset = frozenset({".txt", ".md", ".rst", ".html", ".json", ".csv"})
@@ -226,7 +122,7 @@ _KNOWLEDGE_EXTENSIONS: frozenset = frozenset({".txt", ".md", ".rst", ".html", ".
 
 class ROFSession:
     """
-    Holds a live LLM provider, tool registry, and orchestrator config.
+    Holds a live LLM provider, tool registry, and FunctionCallingEngine.
     Call ``run(prompt)`` to execute one request end-to-end.
 
     Parameters
@@ -240,10 +136,8 @@ class ROFSession:
     verbose:
         Enable DEBUG-level rof logging.
     use_routing:
-        Use ConfidentOrchestrator (learned routing) when rof_routing is
+        Use RoutingMemory (learned routing) when rof_routing is
         available.  Ignored when rof_routing is not installed.
-    output_mode:
-        "auto" | "json" | "rl" — forwarded to OrchestratorConfig.
     debug:
         Print full ProviderError details on every retry.
     log_comms:
@@ -258,11 +152,6 @@ class ROFSession:
         ChromaDB persistence directory (only used when rag_backend="chromadb").
     knowledge_dir:
         Directory of documents pre-loaded into RAGTool at startup.
-    step_retries:
-        How many times to retry a failed tool step before giving up.
-    llm_fallback_on_tool_failure:
-        When True, fall back to a pure-LLM goal after all step retries
-        are exhausted.
     mcp_server_configs:
         List of MCPServerConfig objects.  Each config produces one
         MCPClientTool registered alongside the built-in tools.
@@ -282,7 +171,6 @@ class ROFSession:
         output_dir: Path,
         verbose: bool = False,
         use_routing: bool = True,
-        output_mode: str = "auto",
         debug: bool = False,
         log_comms: bool = False,
         comms_log_path: Optional[Path] = None,
@@ -290,11 +178,11 @@ class ROFSession:
         rag_backend: str = "in_memory",
         rag_persist_dir: Optional[Path] = None,
         knowledge_dir: Optional[Path] = None,
-        step_retries: int = 1,
-        llm_fallback_on_tool_failure: bool = True,
         mcp_server_configs: Optional[list] = None,
         mcp_eager_connect: bool = False,
         audit_subscriber: Optional[Any] = None,
+        fc_max_turns: int = 10,
+        fc_max_tokens: int = 2048,
     ) -> None:
         self._llm = _attach_debug_hooks(llm, debug, log_comms, comms_log_path)
         self._output_dir = output_dir
@@ -422,55 +310,6 @@ class ROFSession:
             else ""
         )
 
-        # ── Tool schemas for planner catalogue (Layer 2) ──────────────────
-        # Collect ToolSchema from every registered builtin tool instance.
-        # Tools that have been patched via tools/tools/__init__.py return a
-        # rich schema; others fall back to the ABC default (name + triggers).
-        _builtin_schemas: list = []
-        for _t in self._tools:
-            try:
-                _builtin_schemas.append(_t.tool_schema())
-            except Exception:
-                pass  # defensive — never crash session init for a bad schema
-
-        # MCP schemas: one list per server, keyed by server name.
-        # build_mcp_tool_schemas() converts raw MCP Tool objects → ToolSchema.
-        _mcp_schemas: dict = {}
-        for _meta in self._mcp_tool_meta:
-            _srv_name: str = _meta[0]
-            _discovered: list = _meta[3] if len(_meta) > 3 else []
-            if _discovered:
-                _mcp_schemas[_srv_name] = build_mcp_tool_schemas(_discovered)
-            else:
-                # Eager connect not used — fall back to keyword-only schema
-                # so the planner still sees the server's trigger phrases.
-                from rof_framework.core.interfaces.tool_provider import ToolSchema as _TS
-
-                _kws: list = list(_meta[2])
-                if _kws:
-                    _mcp_schemas[_srv_name] = [
-                        _TS(
-                            name=_srv_name,
-                            description=_meta[1] or f"MCP server '{_srv_name}'",
-                            triggers=_kws[:8],
-                        )
-                    ]
-
-        # ── Step retry / fallback settings ───────────────────────────────
-        self._step_retries: int = max(0, step_retries)
-        self._llm_fallback_on_tool_failure: bool = llm_fallback_on_tool_failure
-
-        # ── Planner ───────────────────────────────────────────────────────
-        self._planner = Planner(
-            llm=self._llm,
-            tool_schemas=_builtin_schemas,
-            mcp_schemas=_mcp_schemas,
-            knowledge_hint=_knowledge_hint,
-        )
-
-        # ── URL-enrichment settings ───────────────────────────────────────
-        self._url_enrich_timeout: float = 15.0
-
         # ── Generated tools registry ──────────────────────────────────────
         # key = tool name (str), value = ToolProvider instance.
         self._generated_tools: dict[str, ToolProvider] = {}
@@ -479,54 +318,24 @@ class ROFSession:
         # Stored so close() / __exit__ can flush and close it cleanly.
         self._audit_subscriber: Optional[Any] = audit_subscriber
 
-        self._orch_config = OrchestratorConfig(
-            max_iterations=20,
-            auto_save_state=False,
-            pause_on_error=False,
-            output_mode=output_mode,
-            system_preamble=(
-                "You are a RelateLang workflow executor. "
-                "Interpret the context and respond ONLY with valid RelateLang statements — "
-                "no prose, no markdown, no explanation outside of RelateLang.\n"
-                "Rules:\n"
-                "1. Assign ALL conclusions as entity attributes using:\n"
-                '   <Entity> has <attribute> of "<value>".\n'
-                "2. When a Report or Result entity is present in the context AND the goal "
-                "   is analysis/synthesis, you MUST write the full answer as:\n"
-                '   Report has content of "<full analysis text here>".\n'
-                "   This is REQUIRED — FileSaveTool reads the `content` attribute to save "
-                "   the file. Do NOT omit it.\n"
-                "3. If UrlContent entities appear in the context, use their `text` attribute "
-                "   as additional source material for the analysis.\n"
-                "4. Keep every string value on one line (escape newlines as \\n if needed)."
-            ),
-            system_preamble_json=(
-                "You are a RelateLang workflow executor. "
-                "Interpret the RelateLang context and respond ONLY with a valid JSON "
-                "object — no prose, no markdown, no text outside the JSON.\n\n"
-                "Required schema:\n"
-                '  {"attributes": [{"entity": "...", "name": "...", "value": ...}],\n'
-                '   "predicates": [{"entity": "...", "value": "..."}],\n'
-                '   "prose": "...",\n'
-                '   "reasoning": "..."}\n\n'
-                "Field usage:\n"
-                "  attributes — structured updates: numeric values, short strings, "
-                "classification labels. Do NOT put long text here.\n"
-                "  predicates — categorical conclusions, ONE per decision "
-                '(e.g. {"entity":"Customer","value":"high_value"}).\n'
-                "  prose      — ALL free-form text output: analysis reports, summaries, "
-                "recommendations, explanations, natural-language answers. "
-                "Use this field whenever the goal says 'analyse', 'write report', "
-                "'summarise', 'generate a natural language …', or similar. "
-                "Write the COMPLETE deliverable text here — this is what gets saved to file.\n"
-                "  reasoning  — your internal chain-of-thought scratchpad (never shown to the user).\n\n"
-                "Rules:\n"
-                "  • Leave arrays empty [] when nothing applies.\n"
-                "  • NEVER put report/analysis text in 'attributes' — use 'prose'.\n"
-                "  • If UrlContent entities appear in the context, use their 'text' "
-                "attribute as source material when writing 'prose'.\n"
-                "  • Never enumerate all option labels in 'predicates' — pick exactly ONE conclusion."
-            ),
+        # ── Build FC engine system prompt ─────────────────────────────────
+        _fc_system = _FC_SYSTEM_BASE + (_knowledge_hint if _knowledge_hint else "")
+
+        # ── Function-calling engine ───────────────────────────────────────
+        # Build a ToolRegistry from self._tools so the FC engine can look up
+        # tools by name at execution time.
+        from rof_framework.tools.registry.tool_registry import ToolRegistry as _ToolRegistry  # type: ignore
+
+        self._fc_registry = _ToolRegistry()
+        for _t in self._tools:
+            self._fc_registry.register(_t, force=False)
+
+        self._fc_engine = FunctionCallingEngine(
+            llm=self._llm,
+            registry=self._fc_registry,
+            system_prompt=_fc_system,
+            max_turns=fc_max_turns,
+            max_tokens=fc_max_tokens,
         )
 
     # ======================================================================
@@ -540,8 +349,7 @@ class ROFSession:
     ) -> None:
         """
         Build MCPClientTool instances from *configs*, register them in
-        ``self._tools``, and populate ``self._mcp_tool_meta`` for the
-        planner system prompt.
+        ``self._tools``, and populate ``self._mcp_tool_meta``.
 
         Uses a temporary ToolRegistry internally so MCPToolFactory's
         duplicate-detection logic works correctly.
@@ -550,8 +358,8 @@ class ROFSession:
             (server_name, description, keywords, discovered_tools)
         where ``discovered_tools`` is the raw list of MCP Tool objects from
         ``tools/list`` (populated only when ``eager_connect=True``; empty list
-        otherwise).  The planner uses this to show the LLM each individual
-        tool name + description so it generates precise ``ensure`` goals.
+        otherwise).  These are converted to ToolSchema entries and registered
+        in the FC engine so the LLM can call them by name.
         """
         try:
             from rof_framework.tools.registry.tool_registry import ToolRegistry  # type: ignore
@@ -570,8 +378,7 @@ class ROFSession:
         for mcp_tool in mcp_tools:
             self._tools.append(mcp_tool)
 
-            # Build meta for the planner hint.
-            # If eager_connect discovered the tool list, grab per-tool info.
+            # Build meta.  If eager_connect discovered the tool list, grab per-tool info.
             cfg = mcp_tool._config
             description = getattr(cfg, "description", "") or ""
             keywords = list(mcp_tool.trigger_keywords)
@@ -580,7 +387,7 @@ class ROFSession:
             # Each element is an MCP Tool object with .name and .description.
             discovered_tools = list(mcp_tool._mcp_tools)
 
-            # Use the server name as the identifier shown to the planner.
+            # Use the server name as the identifier in tool meta.
             self._mcp_tool_meta.append((cfg.name, description, keywords, discovered_tools))
 
             info(
@@ -762,117 +569,30 @@ class ROFSession:
         # Reset last snapshot so current_snapshot reflects this run only
         self._last_snapshot = {}
 
-        # ── Stage 1: Plan ──────────────────────────────────────────────────
-        section("Stage 1  |  Planning  (NL → RelateLang)")
+        section("Executing  |  Function-calling loop")
         info(f"Prompt: {user_prompt!r}")
         print()
 
         t0 = time.perf_counter()
-        try:
-            rl_src, ast = self._planner.plan(user_prompt)
-        except RuntimeError as e:
-            err(str(e))
-            raise
-
-        plan_ms = int((time.perf_counter() - t0) * 1000)
-        _STATS.last_plan_ms = plan_ms
-        step("PLAN", f"generated in {bold(str(plan_ms))} ms")
-        print()
-
-        for line in rl_src.splitlines():
-            print(f"    {cyan(line)}")
-        print()
-        info(
-            f"AST: {len(ast.definitions)} definitions, "
-            f"{len(ast.goals)} goals, "
-            f"{len(ast.conditions)} conditions"
-        )
-
-        # ── Auto-synthesis: ensure RAG results are consumed by the LLM ────
-        if self._rag_tool is not None and ast.goals:
-            _rag_kws: set[str] = {
-                kw.lower() for kw in getattr(self._rag_tool, "trigger_keywords", [])
-            }
-            _all_tool_kws: set[str] = {
-                kw.lower() for _t in self._tools for kw in getattr(_t, "trigger_keywords", [])
-            }
-            _has_rag_goal = any(
-                any(kw in g.goal_expr.lower() for kw in _rag_kws) for g in ast.goals
-            )
-            _has_synthesis_goal = any(
-                not any(kw in g.goal_expr.lower() for kw in _all_tool_kws) for g in ast.goals
-            )
-            if _has_rag_goal and not _has_synthesis_goal:
-                _synthesis_stmt = (
-                    "ensure synthesise the retrieved knowledge documents and answer the question."
-                )
-                _patched_src = rl_src.rstrip() + "\n" + _synthesis_stmt
-                try:
-                    _patched_ast = RLParser().parse(_patched_src)
-                    rl_src = _patched_src
-                    ast = _patched_ast
-                    step("RAG", "auto-appended synthesis goal — KnowledgeDocs will be used by LLM")
-                except Exception:
-                    pass
-
-        # ── Fallback: 0 goals → LLM probably returned raw code ────────────
-        if len(ast.goals) == 0 and rl_src.strip():
-            saved = self._save_fallback(user_prompt, rl_src)
-            if saved:
-                warn("AST has 0 goals — LLM did not produce valid RelateLang.")
-                warn("Raw LLM output saved as a best-effort fallback.")
-                info(f"Saved to: {saved}")
-
-        # ── Stage 2: Execute ───────────────────────────────────────────────
-        section("Stage 2  |  Execution  (Orchestrator)")
-
-        if self._use_routing and _HAS_ROUTING and _ConfidentOrchestrator is not None:
-            orch = _ConfidentOrchestrator(
-                llm_provider=self._llm,
-                tools=self._tools,
-                config=self._orch_config,
-                bus=self._bus,
-                routing_memory=self._routing_memory,
-            )
-        else:
-            orch = Orchestrator(
-                llm_provider=self._llm,
-                tools=self._tools,
-                config=self._orch_config,
-                bus=self._bus,
-            )
-
-        t1 = time.perf_counter()
-        result = self._execute_with_retry(orch, ast)
-        exec_ms = int((time.perf_counter() - t1) * 1000)
+        result = self._fc_engine.run(user_prompt)
+        exec_ms = int((time.perf_counter() - t0) * 1000)
         _STATS.last_exec_ms = exec_ms
 
-        # ── Run summary ────────────────────────────────────────────────────
+        # ── Register any tools generated during the run ───────────────────
+        self._try_register_generated_tools(result.snapshot)
+
+        # ── Run summary ───────────────────────────────────────────────────
         section("Run summary")
 
         status_icon = green("\u2714 SUCCESS") if result.success else red("\u2717 FAILED")
-        routing_label = (
-            green("ConfidentOrchestrator") if self._use_routing else dim("Orchestrator (static)")
-        )
-        resolved_mode = self._orch_config.output_mode
-        if resolved_mode == "auto":
-            try:
-                resolved_mode = "json (auto)" if self._llm.supports_json_output() else "rl (auto)"
-            except Exception:
-                resolved_mode = "auto"
-
         rows = [
             ("Status", status_icon),
-            ("Mode", cyan(resolved_mode)),
-            ("Routing", routing_label),
+            ("Engine", cyan("FunctionCallingEngine")),
         ]
-        if self._use_routing and self._routing_memory is not None:
-            rows.append(("Memory", f"{len(self._routing_memory)} observation(s)"))
         if self._mcp_tool_meta:
             rows.append(("MCP", f"{len(self._mcp_tool_meta)} server(s) connected"))
         rows += [
             ("Steps", bold(str(len(result.steps)))),
-            ("Plan", bold(f"{plan_ms} ms")),
             ("Exec", bold(f"{exec_ms} ms")),
             (
                 "Tokens",
@@ -888,617 +608,34 @@ class ROFSession:
         for label, value in rows:
             print(f"  {dim(f'{label:<10}')}  {value}")
 
-        self._save_run_artifacts(result.run_id, rl_src, result)
+        self._save_run_artifacts(result.run_id, result)
         # Persist snapshot for current_snapshot property (used by learn phase)
         self._last_snapshot = dict(result.snapshot) if result.snapshot else {}
 
-        # ── Result (entity state + routing decisions) ──────────────────────
+        # ── Result rendering ──────────────────────────────────────────────
         print(
             render_result(
                 result.snapshot,
                 mode="cli",
                 command=user_prompt,
                 success=result.success,
-                plan_ms=plan_ms,
                 exec_ms=exec_ms,
             )
         )
 
-        return result, plan_ms, exec_ms
+        return result, 0, exec_ms
+
 
     # ======================================================================
-    # Step retry + LLM fallback
+    # Generated-tool auto-registration  (formerly below _execute_with_retry)
     # ======================================================================
 
-    def _goals_are_dependent(self, later_goal_expr: str, failed_goal_expr: str) -> bool:
-        """
-        Return True when *later_goal_expr* is likely to depend on the output
-        of *failed_goal_expr*.
-
-        Heuristic: extract all capitalised tokens (entity names) from the
-        failed goal and check whether any appear in the later goal.
-        """
-        failed_tokens = {w for w in re.findall(r"\b[A-Z][A-Za-z0-9]+\b", failed_goal_expr)}
-        if not failed_tokens:
-            return False
-        later_lower = later_goal_expr.lower()
-        return any(tok.lower() in later_lower for tok in failed_tokens)
-
-    # ======================================================================
-    # URL enrichment
-    # ======================================================================
-
-    def _collect_urls_from_snapshot(self, snapshot: dict) -> list[str]:
-        """
-        Scan all entity attributes in *snapshot* for HTTP/HTTPS URLs.
-        Returns a deduplicated list preserving first-seen order.
-        """
-        seen: set[str] = set()
-        ordered: list[str] = []
-        for ent_data in snapshot.get("entities", {}).values():
-            for val in ent_data.get("attributes", {}).values():
-                for url in _URL_RE.findall(str(val)):
-                    # Trim trailing punctuation that is not part of the URL
-                    url = url.rstrip(".,;:\"'")
-                    if url not in seen:
-                        seen.add(url)
-                        ordered.append(url)
-        return ordered
-
-    def _fetch_url_contents(self, snapshot: dict) -> dict[str, str]:
-        """
-        Fetch all URLs found in *snapshot* entity attributes.
-
-        Returns a mapping of ``url → text`` for every URL that yielded
-        non-empty content.  Empty / failed fetches are silently omitted.
-        """
-        urls = self._collect_urls_from_snapshot(snapshot)
-        results: dict[str, str] = {}
-        for idx, url in enumerate(urls, start=1):
-            info(f"Fetching URL {idx}/{len(urls)}: {url[:80]}…")
-            text = _fetch_url_text(url, timeout=self._url_enrich_timeout)
-            if text:
-                results[url] = text
-                step("URL", f"fetched {len(text)} chars from link {idx}")
-            else:
-                warn(f"  ↳ Could not fetch or empty response: {url[:80]}")
-        return results
-
-    def _build_seeded_ast(
-        self,
-        goal_expr: str,
-        snapshot: dict,
-        url_contents: dict[str, str],
-    ) -> Any:
-        """
-        Build a WorkflowAST for a single *goal_expr* retry that is pre-seeded
-        with:
-
-        * All entity attributes and predicates from *snapshot* (so the LLM
-          has the full accumulated graph state as context — including MCPResult,
-          Report, etc.)
-        * One ``UrlContent<N>`` entity per successfully fetched URL, carrying
-          the page text as a ``text`` attribute.
-
-        Because every ``orch.run()`` call creates a brand-new WorkflowGraph
-        from the AST, we must embed all context directly in the AST rather
-        than relying on a shared mutable graph.
-        """
-        from rof_framework.rof_core import Attribute as _Attr  # type: ignore
-        from rof_framework.rof_core import Definition as _Def  # type: ignore
-        from rof_framework.rof_core import Goal as _Goal  # type: ignore
-        from rof_framework.rof_core import Predicate as _Pred  # type: ignore
-        from rof_framework.rof_core import WorkflowAST as _AST  # type: ignore
-
-        ast = _AST()
-
-        # ── Replay all accumulated entity state from the snapshot ─────────
-        skip_entities = {"RoutingTrace"}  # noisy, not useful for LLM context
-        for ent_name, ent_data in snapshot.get("entities", {}).items():
-            if any(ent_name.startswith(prefix) for prefix in skip_entities):
-                continue
-            desc = ent_data.get("description", "")
-            ast.definitions.append(_Def(entity=ent_name, description=desc))
-            for attr_name, attr_val in ent_data.get("attributes", {}).items():
-                ast.attributes.append(_Attr(entity=ent_name, name=attr_name, value=attr_val))
-            for pred in ent_data.get("predicates", []):
-                ast.predicates.append(_Pred(entity=ent_name, value=pred))
-
-        # ── Inject fetched URL content as UrlContent<N> entities ──────────
-        for idx, (url, text) in enumerate(url_contents.items(), start=1):
-            ent_name = f"UrlContent{idx}"
-            # Sanitise: strip quotes and collapse newlines so the value fits
-            # safely inside a RelateLang string attribute
-            safe_text = text[:4000].replace('"', "'").replace("\n", " ").replace("\r", "")
-            safe_url = url.replace('"', "'")
-            ast.definitions.append(
-                _Def(entity=ent_name, description="Fetched content from linked URL")
-            )
-            ast.attributes.append(_Attr(entity=ent_name, name="source_url", value=safe_url))
-            ast.attributes.append(_Attr(entity=ent_name, name="text", value=safe_text))
-
-        # ── The single goal to (re-)execute ───────────────────────────────
-        ast.goals.append(_Goal(goal_expr=goal_expr))
-
-        return ast
-
-    def _build_fallback_ast(
-        self,
-        original_goal_expr: str,
-        error_msg: str,
-        graph_snapshot: dict,
-    ) -> "tuple[Optional[WorkflowAST], str]":
-        """
-        Build a minimal WorkflowAST that retries *original_goal_expr* as a
-        pure-LLM step (no tool triggers) with the failure reason injected as
-        entity context.
-        """
-        safe_error = error_msg.replace('"', "'").replace("\n", " ").strip()[:200]
-        safe_goal = original_goal_expr.replace('"', "'").strip()[:120]
-
-        llm_goal = _TOOL_TRIGGER_STRIP.sub("", original_goal_expr).strip(" ,.-")
-        if not llm_goal:
-            llm_goal = "provide the best answer based on available context"
-
-        rl_src = (
-            f'define FallbackContext as "LLM fallback after tool failure".\n'
-            f'FallbackContext has failed_goal of "{safe_goal}".\n'
-            f'FallbackContext has tool_error of "{safe_error}".\n'
-            f"ensure {llm_goal}.\n"
-        )
-        try:
-            return RLParser().parse(rl_src), rl_src
-        except Exception:
-            return None, rl_src
-
-    def _execute_with_retry(self, orch: Any, ast: Any) -> Any:
-        """
-        Run *ast* through *orch*, then retry any failed steps and optionally
-        fall back to the LLM when all retries are exhausted.
-
-        Returns the final RunResult (merged steps from all passes).
-        """
-        from rof_framework.rof_core import GoalStatus as _GoalStatus  # type: ignore
-        from rof_framework.rof_core import RunResult as _RunResult  # type: ignore
-
-        result = orch.run(ast)
-        self._try_register_generated_tools(result.snapshot, orch)
-        all_steps = list(result.steps)
-
-        achieved: set[str] = {s.goal_expr for s in all_steps if s.status == _GoalStatus.ACHIEVED}
-        blocked: set[str] = set()
-
-        # accumulated_snapshot is kept up-to-date throughout the retry loop so
-        # that each retry/fallback run sees the entity attributes written by
-        # every previously-succeeded step (e.g. AICodeGenTool writing 'saved_to'
-        # so that a subsequent LLMPlayerTool retry can find the script path).
-        accumulated_snapshot = self._deep_merge_snapshots({}, result.snapshot)
-
-        failed_steps = [s for s in all_steps if s.status == _GoalStatus.FAILED]
-        if not failed_steps:
-            return result
-
-        # ── URL enrichment: fetch any links found in the result snapshot ──
-        # We do this once up-front for the whole retry pass.  The fetched
-        # text is embedded directly into the seeded AST for each analysis
-        # retry — NOT via orch.run() — because each orch.run() creates a
-        # brand-new WorkflowGraph from the AST and throws the old graph away.
-        _analysis_keywords = {"analyse", "analysis", "write report", "summarise", "compose report"}
-        _has_analysis_retry = any(
-            any(kw in s.goal_expr.lower() for kw in _analysis_keywords) for s in failed_steps
-        )
-        _url_contents: dict[str, str] = {}
-        if _has_analysis_retry:
-            _url_contents = self._fetch_url_contents(accumulated_snapshot)
-            if _url_contents:
-                info(f"URL enrichment: {len(_url_contents)} link(s) ready for context injection")
-
-        warn(
-            f"{len(failed_steps)} step(s) failed — starting retry loop "
-            f"(max {self._step_retries} retry/step, "
-            f"llm_fallback={self._llm_fallback_on_tool_failure})"
-        )
-
-        for failed in failed_steps:
-            goal_expr = failed.goal_expr
-            error_msg = failed.error or (
-                str(failed.tool_response.error)
-                if failed.tool_response and failed.tool_response.error
-                else "unknown error"
-            )
-
-            # ── Dependency guard ─────────────────────────────────────────
-            for prev_failed in failed_steps:
-                if prev_failed.goal_expr == goal_expr:
-                    continue
-                if prev_failed.goal_expr not in achieved and self._goals_are_dependent(
-                    goal_expr, prev_failed.goal_expr
-                ):
-                    blocked.add(goal_expr)
-                    warn(
-                        f"Skipping '{goal_expr[:60]}' — depends on failed goal "
-                        f"'{prev_failed.goal_expr[:60]}'"
-                    )
-                    break
-
-            if goal_expr in blocked:
-                continue
-
-            # ── Retry loop ────────────────────────────────────────────────
-            retry_succeeded = False
-            _is_analysis = any(kw in goal_expr.lower() for kw in _analysis_keywords)
-            for attempt in range(1, self._step_retries + 1):
-                warn(f"Retry {attempt}/{self._step_retries}: '{goal_expr[:70]}'")
-
-                # ── Missing-parameter injection ───────────────────────────
-                # When the error is a Pydantic "Field required" validation
-                # failure, the retry snapshot is enriched with a default
-                # value (1 for integers, "value" for strings) for every
-                # missing required parameter extracted from the error message.
-                # This handles the common case where the planner forgets to
-                # set card_number / pack_number / artifact_number on the Task
-                # entity — the MCPClientTool then fails with
-                #   "1 validation error … <field>  Field required"
-                # and this block ensures the retry has the missing attribute.
-                retry_snapshot = accumulated_snapshot
-                _needs_param_fix = (
-                    "Field required" in error_msg or "Input should be a valid" in error_msg
-                )
-                if _needs_param_fix:
-                    retry_snapshot = self._inject_missing_mcp_params(
-                        accumulated_snapshot, error_msg
-                    )
-
-                # Always build a seeded AST so the retry receives the full
-                # accumulated entity context (including 'saved_to' written by a
-                # previously-succeeded AICodeGenTool, URL content for analysis
-                # goals, etc.).  A plain bare `ensure …` AST loses all that
-                # context and is the primary cause of LLMPlayerTool not finding
-                # the generated script on retry.
-                try:
-                    single_ast = self._build_seeded_ast(goal_expr, retry_snapshot, _url_contents)
-                except Exception as exc:
-                    warn(f"  ↳ Seeded AST build failed ({exc}), falling back to plain retry")
-                    try:
-                        single_ast = RLParser().parse(f"ensure {goal_expr}.\n")
-                    except Exception:
-                        break
-
-                retry_result = orch.run(single_ast)
-                self._try_register_generated_tools(retry_result.snapshot, orch)
-                retry_step = retry_result.steps[0] if retry_result.steps else None
-                if retry_step:
-                    all_steps.append(retry_step)
-
-                if retry_step and retry_step.status == _GoalStatus.ACHIEVED:
-                    # Merge this retry's entity output into the accumulated
-                    # snapshot so subsequent retries/fallbacks can see it.
-                    accumulated_snapshot = self._deep_merge_snapshots(
-                        accumulated_snapshot, retry_result.snapshot
-                    )
-                    step("RETRY", f"succeeded on attempt {attempt}: '{goal_expr[:60]}'")
-                    achieved.add(goal_expr)
-                    retry_succeeded = True
-                    error_msg = ""
-                    break
-                else:
-                    error_msg = (retry_step.error or error_msg) if retry_step else error_msg
-                    err(f"Retry {attempt} failed: {error_msg[:120]}")
-
-            if retry_succeeded:
-                continue
-
-            # ── LLM fallback ──────────────────────────────────────────────
-            if self._llm_fallback_on_tool_failure:
-                warn(f"All retries exhausted for '{goal_expr[:60]}' — trying LLM fallback")
-                fallback_ast, fallback_src = self._build_fallback_ast(
-                    goal_expr, error_msg, accumulated_snapshot
-                )
-                if fallback_ast is not None:
-                    step("FALLBK", f"LLM fallback: '{goal_expr[:50]}'")
-                    for line in fallback_src.splitlines():
-                        print(f"    {dim(line)}")
-                    fallback_result = orch.run(fallback_ast)
-                    self._try_register_generated_tools(fallback_result.snapshot, orch)
-                    fallback_step = fallback_result.steps[0] if fallback_result.steps else None
-                    if fallback_step:
-                        all_steps.append(fallback_step)
-                    if fallback_step and fallback_step.status == _GoalStatus.ACHIEVED:
-                        # Merge fallback entity output into the accumulated snapshot.
-                        accumulated_snapshot = self._deep_merge_snapshots(
-                            accumulated_snapshot, fallback_result.snapshot
-                        )
-                        step("FALLBK", f"LLM fallback succeeded for '{goal_expr[:50]}'")
-                        achieved.add(goal_expr)
-                    else:
-                        fb_err = fallback_step.error if fallback_step else "no step produced"
-                        err(f"LLM fallback also failed: {fb_err}")
-                else:
-                    err(f"Could not build LLM fallback AST for '{goal_expr[:60]}'")
-
-        # A goal that originally FAILED but was later recovered by a retry or
-        # LLM fallback must not count against final_success.  We keep the
-        # original steps in all_steps for audit/history purposes, but when
-        # computing success we only look at the *last* recorded step for each
-        # goal expression — that is the most-recent (and authoritative) outcome.
-        last_step_per_goal: dict[str, Any] = {}
-        for s in all_steps:
-            if s is not None:
-                last_step_per_goal[s.goal_expr] = s
-        final_success = all(s.status == _GoalStatus.ACHIEVED for s in last_step_per_goal.values())
-        return _RunResult(
-            run_id=result.run_id,
-            success=final_success,
-            steps=[s for s in all_steps if s is not None],
-            snapshot=accumulated_snapshot,
-            error=result.error,
-        )
-
-    def _inject_missing_mcp_params(self, snapshot: dict, error_msg: str) -> dict:
-        """
-        Parse Pydantic validation error messages and fix the snapshot so that
-        the retry succeeds without needing the LLM fallback.
-
-        Two classes of error are handled:
-
-        1. **Field required** — a required parameter is completely absent from
-           the entity snapshot.  A sensible default is injected (``1`` for
-           integers, ``"value"`` for strings).
-
-           Example error::
-
-               1 validation error for buy_packArguments
-               pack_number
-                 Field required [type=missing, …]
-
-        2. **Type mismatch** — the parameter *is* present in the snapshot but
-           has the wrong Python type (e.g. the planner stored ``seed = 12345``
-           as an ``int`` but the MCP tool declares ``seed: str | None``).
-           The existing value is coerced to the type required by the schema.
-
-           Example error::
-
-               1 validation error for start_gameArguments
-               seed
-                 Input should be a valid string [type=string_type,
-                 input_value=12345, input_type=int]
-
-        Returns a deep-copied snapshot with all fixups applied so the
-        original *accumulated_snapshot* is never mutated.
-        """
-        import copy
-        import re as _re
-
-        # ------------------------------------------------------------------
-        # Build a type map from connected MCP tools' inputSchema so we can
-        # inject the right type (int vs str) and coerce mismatched values.
-        # ------------------------------------------------------------------
-        param_types: dict[str, str] = {}
-        for tool_meta in self._mcp_tool_meta:
-            for tool_def in tool_meta[3]:  # discovered_tools list
-                schema: dict = getattr(tool_def, "inputSchema", None) or {}
-                for fname, fschema in schema.get("properties", {}).items():
-                    if fname not in param_types:
-                        # anyOf / oneOf handling: pick the first non-null type
-                        if "anyOf" in fschema:
-                            for sub in fschema["anyOf"]:
-                                if sub.get("type") not in (None, "null"):
-                                    param_types[fname] = sub["type"]
-                                    break
-                            else:
-                                param_types[fname] = "string"
-                        else:
-                            param_types[fname] = fschema.get("type", "integer")
-
-        # ------------------------------------------------------------------
-        # Case 1: "Field required" — parameter is entirely missing.
-        # ------------------------------------------------------------------
-        # Pydantic v2 formats errors as:
-        #   <field_name>\n  Field required [type=missing, …]
-        missing_fields: list[str] = _re.findall(
-            r"^(\w+)\s*\n\s*Field required",
-            error_msg,
-            _re.MULTILINE,
-        )
-        if not missing_fields:
-            missing_fields = _re.findall(
-                r"(\w+)\s+Field required",
-                error_msg,
-            )
-
-        # ------------------------------------------------------------------
-        # Case 2: "Input should be a valid X" — parameter present but wrong
-        # type.  Extract (field_name, bad_value, required_type) triples.
-        #
-        # Pydantic v2 format:
-        #   <field_name>
-        #     Input should be a valid string [type=string_type,
-        #     input_value=12345, input_type=int]
-        # ------------------------------------------------------------------
-        # Match: field name on its own line, followed by the error detail.
-        type_mismatch_fields: list[tuple[str, str]] = _re.findall(
-            r"^(\w+)\s*\n\s*Input should be a valid (\w+)",
-            error_msg,
-            _re.MULTILINE,
-        )
-        # Also pick up the compact single-line variant some versions emit.
-        if not type_mismatch_fields:
-            type_mismatch_fields = _re.findall(
-                r"(\w+)\s+Input should be a valid (\w+)",
-                error_msg,
-            )
-
-        if not missing_fields and not type_mismatch_fields:
-            return snapshot
-
-        new_snapshot = copy.deepcopy(snapshot)
-        entities = new_snapshot.setdefault("entities", {})
-
-        # ------------------------------------------------------------------
-        # Locate the best entity to attach / patch params on.
-        # ------------------------------------------------------------------
-        task_key: str | None = None
-        for ent_name in entities:
-            if ent_name.lower() in ("task", "game", "runtask"):
-                task_key = ent_name
-                break
-        if task_key is None:
-            for ent_name in entities:
-                if not ent_name.startswith("RoutingTrace") and not ent_name.startswith("MCP"):
-                    task_key = ent_name
-                    break
-        if task_key is None:
-            task_key = "Task"
-            entities[task_key] = {
-                "description": "Injected task entity",
-                "attributes": {},
-                "predicates": [],
-            }
-
-        task_attrs: dict = entities[task_key].setdefault("attributes", {})
-
-        # ------------------------------------------------------------------
-        # Apply Case-1 fixes: inject missing params with a default value.
-        # ------------------------------------------------------------------
-        for field in missing_fields:
-            if field in task_attrs:
-                continue  # already present — do not overwrite
-            ptype = param_types.get(field, "integer")
-            if ptype == "integer":
-                default_val: Any = 1
-            else:
-                # For string params, search entity attributes for the best
-                # matching content rather than injecting a useless "value"
-                # placeholder.  Pick the longest content/text/body/prose/
-                # message attribute across all entities — this catches the
-                # common case where an analysis step writes Report.content
-                # but the messaging tool expects "message".
-                _content_keys = {"content", "text", "body", "prose", "message"}
-                best_val: Any = None
-                best_len = 0
-                for ent_data in entities.values():
-                    attrs = ent_data.get("attributes", {})
-                    for attr_key, attr_val in attrs.items():
-                        if (
-                            isinstance(attr_val, str)
-                            and attr_key.lower() in _content_keys
-                            and len(attr_val) > best_len
-                        ):
-                            best_val = attr_val
-                            best_len = len(attr_val)
-                default_val = best_val if best_val is not None else "value"
-            task_attrs[field] = default_val
-            warn(
-                f"  ↳ Auto-injecting missing param '{field}' = {default_val!r} "
-                f"(type={ptype}) for retry"
-            )
-
-        # ------------------------------------------------------------------
-        # Apply Case-2 fixes: coerce wrong-typed values that are already in
-        # the snapshot.  The required type comes from the error message itself
-        # (most reliable) and is cross-checked against the schema map.
-        # ------------------------------------------------------------------
-        _coerce_map: dict[str, type] = {
-            "string": str,
-            "integer": int,
-            "number": float,
-            "boolean": bool,
-        }
-        for field, required_type_name in type_mismatch_fields:
-            # Prefer the schema's declared type; fall back to what the error
-            # message says (e.g. "valid string" → "string").
-            schema_type = param_types.get(field, required_type_name)
-            coerce_to = _coerce_map.get(schema_type, _coerce_map.get(required_type_name, str))
-
-            # Walk ALL entities — the bad value might not be in task_key.
-            coerced = False
-            for ent_data in entities.values():
-                attrs = ent_data.get("attributes", {})
-                if field in attrs and not isinstance(attrs[field], coerce_to):
-                    old_val = attrs[field]
-                    try:
-                        attrs[field] = coerce_to(old_val)
-                        warn(
-                            f"  ↳ Auto-coercing param '{field}' "
-                            f"{type(old_val).__name__}({old_val!r}) → "
-                            f"{coerce_to.__name__}({attrs[field]!r}) for retry"
-                        )
-                        coerced = True
-                    except (ValueError, TypeError) as exc:
-                        warn(f"  ↳ Could not coerce param '{field}' to {coerce_to.__name__}: {exc}")
-            if not coerced:
-                # Value wasn't found anywhere; inject a correctly-typed default.
-                default_val = coerce_to(1) if coerce_to in (int, float) else coerce_to("value")
-                task_attrs[field] = default_val
-                warn(
-                    f"  ↳ Auto-injecting coerced param '{field}' = {default_val!r} "
-                    f"(type={coerce_to.__name__}) for retry"
-                )
-
-        return new_snapshot
-
-    def _deep_merge_snapshots(self, base: dict, overlay: dict) -> dict:
-        """
-        Return a new snapshot dict that is *base* deep-merged with *overlay*.
-
-        Only the ``entities`` sub-dict is merged deeply (attribute-level);
-        the ``goals`` and ``relations`` lists are taken from *overlay* when
-        present, falling back to *base*.  All other top-level keys are taken
-        from *overlay* first.
-
-        This is used to accumulate entity state across multiple ``orch.run()``
-        calls inside ``_execute_with_retry`` so that attributes written by an
-        earlier step (e.g. ``saved_to`` from AICodeGenTool) are visible to
-        later retries (e.g. LLMPlayerTool looking for the script path).
-        """
-        import copy
-
-        merged: dict = copy.deepcopy(base)
-
-        for key, overlay_val in overlay.items():
-            if key == "entities" and isinstance(overlay_val, dict):
-                base_entities: dict = merged.setdefault("entities", {})
-                for ent_name, ent_data in overlay_val.items():
-                    if not isinstance(ent_data, dict):
-                        base_entities[ent_name] = copy.deepcopy(ent_data)
-                        continue
-                    if ent_name not in base_entities or not isinstance(
-                        base_entities[ent_name], dict
-                    ):
-                        base_entities[ent_name] = copy.deepcopy(ent_data)
-                        continue
-                    # Merge attributes dict
-                    base_ent = base_entities[ent_name]
-                    overlay_attrs = ent_data.get("attributes", {})
-                    if overlay_attrs:
-                        base_ent.setdefault("attributes", {}).update(copy.deepcopy(overlay_attrs))
-                    # Merge predicates list (union, preserve order)
-                    overlay_preds = ent_data.get("predicates", [])
-                    if overlay_preds:
-                        existing_preds: list = base_ent.setdefault("predicates", [])
-                        for p in overlay_preds:
-                            if p not in existing_preds:
-                                existing_preds.append(p)
-                    # Keep description from overlay if present
-                    if ent_data.get("description"):
-                        base_ent["description"] = ent_data["description"]
-            else:
-                # For goals, relations, and any other top-level key take the
-                # overlay value directly (goals list reflects the latest run).
-                merged[key] = copy.deepcopy(overlay_val)
-
-        return merged
-
-    # ======================================================================
-    # Generated-tool auto-registration
-    # ======================================================================
-
-    def _try_register_generated_tools(self, snapshot: dict, orch: Any) -> None:
+    def _try_register_generated_tools(self, snapshot: dict) -> None:
         """
         Scan *snapshot* for entities whose ``saved_to`` attribute points to a
         Python file, import the file, and register any ToolProvider subclasses
         or ``@rof_tool``-decorated FunctionTool instances into ``self._tools``
-        and the live orchestrator.
+        and the live fc_engine.
         """
         import importlib.util as _ilu
 
@@ -1570,45 +707,12 @@ class ROFSession:
 
                 self._tools.append(tool)
                 self._generated_tools[tool.name] = tool
+                self._fc_registry.register(tool)
+                self._fc_engine.update_tool_schemas()
+                step("TOOL+", f"Registered generated tool: {tool.name}")
 
-                if hasattr(orch, "tools") and isinstance(orch.tools, dict):
-                    orch.tools[tool.name] = tool
 
-                if hasattr(orch, "_confident_router") and orch._confident_router is not None:
-                    try:
-                        orch._confident_router._registry.register(tool, force=True)
-                    except Exception:
-                        try:
-                            orch._confident_router._registry.register(tool)
-                        except Exception:
-                            pass
 
-                        # Rebuild the planner system prompt so the new tool appears
-                        # in all future REPL turns.
-                        # Add the newly registered tool's schema to the builtin list.
-                        try:
-                            _new_schema = tool.tool_schema()
-                            _existing = list(self._planner._tool_schemas)
-                            if not any(s.name == _new_schema.name for s in _existing):
-                                _existing.append(_new_schema)
-                            self._planner.update_tool_catalogue(tool_schemas=_existing)
-                        except Exception:
-                            pass
-                        self._planner.rebuild_system(self._generated_tools_hint())
-
-    def _generated_tools_hint(self) -> str:
-        """Return a planner system-prompt appendix listing registered generated tools."""
-        if not self._generated_tools:
-            return ""
-        lines = [
-            "\n## Generated tools (registered this session)",
-            "These tools were created by AICodeGenTool and are now available.",
-            "You MAY route goals to them using their trigger keywords:\n",
-        ]
-        for t in self._generated_tools.values():
-            kws = "  /  ".join(f'"{k}"' for k in t.trigger_keywords[:4])
-            lines.append(f"  {t.name:<28} – {kws}")
-        return "\n".join(lines) + "\n"
 
     # ======================================================================
     # Knowledge / RAG helpers
@@ -1735,47 +839,9 @@ class ROFSession:
     # Artifact persistence helpers
     # ======================================================================
 
-    def _save_fallback(self, user_prompt: str, raw_text: str) -> Optional[Path]:
-        """
-        Called when the planner produced 0 goals.  Detects the language from
-        the raw LLM output and saves it; falls back to .txt.
-        """
-        raw_lower = raw_text.lower()
-
-        detected_lang = None
-        for lang in ("lua", "python", "javascript", "js", "shell", "bash"):
-            if lang in user_prompt.lower():
-                detected_lang = lang
-                break
-
-        if not detected_lang:
-            for lang, (_, markers) in _LANG_HINTS.items():
-                if any(m.lower() in raw_lower for m in markers):
-                    detected_lang = lang
-                    break
-
-        ext_map = {
-            "lua": ".lua",
-            "python": ".py",
-            "javascript": ".js",
-            "js": ".js",
-            "shell": ".sh",
-            "bash": ".sh",
-        }
-        ext = ext_map.get(detected_lang or "", ".txt")
-        name = f"rof_fallback_{int(time.time())}{ext}"
-        path = self._output_dir / name
-
-        cleaned = _AICodeGenTool._strip_fences(raw_text)
-        path.write_text(cleaned or raw_text, encoding="utf-8")
-        return path
-
-    def _save_run_artifacts(self, run_id: str, rl_src: str, result: Any) -> None:
-        """Save the .rl plan and a JSON run summary for every run."""
+    def _save_run_artifacts(self, run_id: str, result: Any) -> None:
+        """Save a JSON run summary for every run."""
         slug = run_id[:8]
-
-        rl_path = self._output_dir / f"rof_plan_{slug}.rl"
-        rl_path.write_text(rl_src, encoding="utf-8")
 
         summary = {
             "run_id": run_id,
@@ -1786,5 +852,4 @@ class ROFSession:
         json_path = self._output_dir / f"rof_run_{slug}.json"
         json_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
 
-        info(f"Plan  saved : {rl_path.name}")
         info(f"Run   saved : {json_path.name}")

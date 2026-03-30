@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Optional
 
@@ -15,6 +16,46 @@ from rof_framework.llm.providers.base import (
 logger = logging.getLogger("rof.llm")
 
 __all__ = ["OllamaProvider"]
+
+
+def _normalize_messages_ollama(messages: list[dict]) -> list[dict]:
+    """
+    Convert an OpenAI-format message list to Ollama /api/chat format.
+
+    OpenAI assistant messages store tool_calls as:
+        [{id, type, function: {name, arguments: JSON_STRING}}]
+
+    Ollama /api/chat expects:
+        [{function: {name, arguments: DICT}}]   (no id, no type, dict not string)
+
+    OpenAI tool-result messages have role="tool" with tool_call_id.
+    Ollama /api/chat accepts role="tool" but ignores/rejects tool_call_id.
+    """
+    normalized: list[dict] = []
+    for msg in messages:
+        role = msg.get("role", "")
+        if role == "assistant" and msg.get("tool_calls"):
+            ollama_calls = []
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function", {})
+                raw_args = fn.get("arguments", {})
+                if isinstance(raw_args, str):
+                    try:
+                        raw_args = json.loads(raw_args)
+                    except Exception:
+                        raw_args = {}
+                ollama_calls.append({"function": {"name": fn.get("name", ""), "arguments": raw_args}})
+            normalized.append({
+                "role": "assistant",
+                "content": msg.get("content", "") or "",
+                "tool_calls": ollama_calls,
+            })
+        elif role == "tool":
+            # Ollama doesn't use tool_call_id; just pass role+content
+            normalized.append({"role": "tool", "content": msg.get("content", "")})
+        else:
+            normalized.append(msg)
+    return normalized
 
 
 class OllamaProvider(LLMProvider):
@@ -40,7 +81,7 @@ class OllamaProvider(LLMProvider):
         api_key: str = "ollama",  # placeholder for vLLM compat
         default_max_tokens: int = 1024,
         default_temperature: float = 0.0,
-        timeout: float = 120.0,
+        timeout: float = 300.0,
         context_window: int = 8_192,  # set per model
         use_openai_compat: bool = False,  # use /v1/chat/completions
     ):
@@ -78,10 +119,20 @@ class OllamaProvider(LLMProvider):
         return self._complete_via_httpx(request)
 
     def _complete_via_openai(self, request: LLMRequest) -> LLMResponse:
-        messages = []
-        if request.system:
-            messages.append({"role": "system", "content": request.system})
-        messages.append({"role": "user", "content": request.prompt})
+        import json as _json
+
+        if request.messages is not None:
+            messages: list[dict] = []
+            if request.system and not (
+                request.messages and request.messages[0].get("role") == "system"
+            ):
+                messages.append({"role": "system", "content": request.system})
+            messages.extend(request.messages)
+        else:
+            messages = []
+            if request.system:
+                messages.append({"role": "system", "content": request.system})
+            messages.append({"role": "user", "content": request.prompt})
 
         params: dict[str, Any] = {
             "model": self._model,
@@ -91,11 +142,13 @@ class OllamaProvider(LLMProvider):
             if request.temperature is not None
             else self._default_temperature,
         }
-        # Ollama OpenAI-compat: send the full JSON schema via json_schema response_format.
-        # This enforces the schema at the sampler level, matching what the native httpx
-        # path does with the `format` field.  Plain `json_object` only guarantees valid
-        # JSON — it does not constrain the shape to the rof_graph_update schema.
-        if getattr(request, "output_mode", "json") == "json":
+
+        if request.tools is not None:
+            # FC mode: pass tool schemas and let the model decide (capable models only)
+            params["tools"] = request.tools
+            params["tool_choice"] = "auto"
+        elif getattr(request, "output_mode", "json") == "json":
+            # Legacy path: rof_graph_update schema enforcement
             params["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
@@ -111,7 +164,19 @@ class OllamaProvider(LLMProvider):
             raise ProviderError(f"Ollama/vLLM call failed: {e}") from e
 
         content = resp.choices[0].message.content or ""
-        return LLMResponse(content=content, raw=resp.model_dump(), tool_calls=[])
+        # Extract tool calls if present
+        tool_calls: list[dict] = []
+        raw_calls = getattr(resp.choices[0].message, "tool_calls", None) or []
+        for tc in raw_calls:
+            try:
+                tool_calls.append({
+                    "id": getattr(tc, "id", tc.function.name),
+                    "name": tc.function.name,
+                    "arguments": _json.loads(tc.function.arguments or "{}"),
+                })
+            except Exception:
+                pass
+        return LLMResponse(content=content, raw=resp.model_dump(), tool_calls=tool_calls)
 
     def _complete_via_httpx(self, request: LLMRequest) -> LLMResponse:
         """Direct Ollama API call using /api/chat (supports thinking models, system messages).
@@ -150,10 +215,18 @@ class OllamaProvider(LLMProvider):
         #   - requires `system` as a separate top-level field (ignored by some models)
         # /api/chat uses `messages` + `message.content` which works correctly for
         # all model families including thinking models (qwen3, deepseek-r1, etc.).
-        messages: list[dict[str, str]] = []
-        if request.system:
-            messages.append({"role": "system", "content": request.system})
-        messages.append({"role": "user", "content": request.prompt})
+        if request.messages is not None:
+            messages: list[dict] = []
+            if request.system and not (
+                request.messages and request.messages[0].get("role") == "system"
+            ):
+                messages.append({"role": "system", "content": request.system})
+            messages.extend(_normalize_messages_ollama(request.messages))
+        else:
+            messages = []
+            if request.system:
+                messages.append({"role": "system", "content": request.system})
+            messages.append({"role": "user", "content": request.prompt})
 
         payload: dict[str, Any] = {
             "model": self._model,
@@ -171,13 +244,19 @@ class OllamaProvider(LLMProvider):
             },
         }
 
-        # For JSON output mode use format="json" (simple string).
-        # This instructs Ollama to guarantee the output is valid JSON without
-        # grammar-constraining it to a specific schema object — the latter breaks
-        # with think=false (the model ignores the schema and returns prose instead).
-        # The rof_graph_update schema shape is already enforced through the system
-        # prompt constructed by the ROF orchestrator.
-        if getattr(request, "output_mode", "json") == "json":
+        if request.tools is not None:
+            # FC mode: pass tool schemas. Ollama /api/chat supports tools natively
+            # for capable models (qwen2.5, llama3.1, mistral-nemo, etc.).
+            # Incompatible models simply ignore the field and return prose — the
+            # FC loop handles this gracefully (no tool_calls → exit after one turn).
+            payload["tools"] = request.tools
+        elif getattr(request, "output_mode", "json") == "json":
+            # For JSON output mode use format="json" (simple string).
+            # This instructs Ollama to guarantee the output is valid JSON without
+            # grammar-constraining it to a specific schema object — the latter breaks
+            # with think=false (the model ignores the schema and returns prose instead).
+            # The rof_graph_update schema shape is already enforced through the system
+            # prompt constructed by the ROF orchestrator.
             payload["format"] = "json"
 
         try:
@@ -193,12 +272,27 @@ class OllamaProvider(LLMProvider):
             raise ProviderError(f"Ollama HTTP call failed: {e}") from e
 
         data = r.json()
-        # /api/chat response shape: {"message": {"role": "assistant", "content": "..."}}
-        content = data.get("message", {}).get("content", "")
-        return LLMResponse(content=content, raw=data, tool_calls=[])
+        # /api/chat response shape: {"message": {"role": "assistant", "content": "...",
+        #                                         "tool_calls": [{"function": {...}}]}}
+        msg = data.get("message", {})
+        content = msg.get("content", "")
+        tool_calls: list[dict] = []
+        for tc in msg.get("tool_calls", []):
+            fn = tc.get("function", {})
+            name = fn.get("name", "")
+            if name:
+                tool_calls.append({
+                    "id": name,  # Ollama doesn't provide call IDs
+                    "name": name,
+                    "arguments": fn.get("arguments", {}),
+                })
+        return LLMResponse(content=content, raw=data, tool_calls=tool_calls)
 
     def supports_tool_calling(self) -> bool:
-        return self._use_openai_compat
+        # Both paths forward tool schemas when request.tools is set.
+        # Capable models (qwen2.5, llama3.1, etc.) will use them;
+        # others fall back gracefully to a text response.
+        return True
 
     def supports_structured_output(self) -> bool:
         # Both paths produce valid JSON output when output_mode="json":

@@ -2,18 +2,46 @@
 
 ## What is it?
 
-ROF AI Demo is a **goal-driven automation agent** built on the
+ROF AI Demo is a **function-calling automation agent** built on the
 [ROF framework](../../README.md).  You describe what you want in plain English;
-the agent converts your words into a structured, auditable
-[RelateLang](../../docs/relatelang_spec.md) workflow, executes it with a
-configurable tool set, scores the outcome, and learns from the result so future
-runs route faster and more reliably.
+the agent presents your request directly to the LLM together with a catalogue of
+tools; the LLM decides which tools to call and with what arguments; tool results
+flow back as conversation turns until the task is complete.  Every run is
+quality-scored, recorded as an episode, and the **OBSERVE → DECIDE → ACT → LEARN**
+cycle runs autonomously in agent mode.
 
 Unlike a chat assistant that answers in prose, the demo treats every prompt as a
-**business-logic task**: it plans a workflow, runs tools (web search, code
-generation, file I/O, database queries, RAG knowledge retrieval, MCP servers, …),
-writes artefacts to disk, and records a quality-scored episode — all without you
-writing a single line of code.
+**business-logic task**: it calls tools (web search, code generation, file I/O,
+database queries, RAG knowledge retrieval, MCP servers, …), writes artefacts to
+disk, and records a quality-scored episode — all without you writing a single line
+of code.
+
+### How it works
+
+```
+User prompt
+    ↓
+FunctionCallingEngine (fc_engine.py)
+    ├─ Build tool schema list (ROF ToolSchema → OpenAI function format)
+    ├─ Send LLM request with tools + conversation history (ROF LLMProvider)
+    ├─ LLM responds with tool_calls
+    ├─ Execute tools via ROF ToolRegistry (FileSaveTool, WebSearchTool, …)
+    ├─ Append results to conversation history
+    └─ Repeat until LLM stops calling tools
+
+RunResult (snapshot + steps + success)
+    ↓
+agent.py LEARN phase: EpisodeMemory, quality scoring, routing memory
+```
+
+### RelateLang and the ROF Framework
+
+**RelateLang** (`.rl` files) is the ROF framework's static workflow language —
+used for lintable, version-controlled, offline-testable business-logic
+specifications run with `rof run`.  The demo does **not** generate RelateLang at
+runtime; it uses the framework's **dynamic path** — LLM native function calling
+driving ROF's `ToolProvider` and `ToolRegistry` directly.  Both paths share the
+same tool infrastructure, audit trail, and `RunResult` contract.
 
 ### What you can do with it
 
@@ -44,7 +72,7 @@ ROF AI Demo is built for a different job:
 | | ROF AI Demo | OpenClaw |
 |---|:---|:---|
 | 🎯 **Goal** | Testable business-logic workflows | Conversational assistant on 15+ channels |
-| 📋 **Logic** | RelateLang `.rl` — lintable, diff-able, offline-testable | Free-form LLM conversation |
+| 📋 **Logic** | LLM function calling → ROF ToolRegistry; `.rl` files for static workflows | Free-form LLM conversation |
 | 🔍 **Audit** | Full JSONL trail: every tool call & LLM decision | Not a focus |
 | 📈 **Learning** | Episode memory + EMA routing confidence across runs | No feedback loop |
 | 🔌 **MCP** | First-class — any MCP server becomes a named tool | Via skills extension, not native |

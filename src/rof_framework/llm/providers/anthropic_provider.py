@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Optional
 
@@ -17,6 +18,54 @@ from rof_framework.llm.providers.base import (
 logger = logging.getLogger("rof.llm")
 
 __all__ = ["AnthropicProvider"]
+
+
+def _normalize_messages_anthropic(messages: list[dict]) -> list[dict]:
+    """
+    Convert an OpenAI-format message list to Anthropic Messages API format.
+
+    OpenAI:  assistant with tool_calls → [{id, type, function:{name, arguments: JSON_STRING}}]
+    OpenAI:  tool result → {role: "tool", tool_call_id, content}
+
+    Anthropic:
+      assistant → {role: "assistant", content: [{type:"tool_use", id, name, input: DICT}, ...]}
+      tool result → {role: "user", content: [{type:"tool_result", tool_use_id, content}]}
+    """
+    normalized: list[dict] = []
+    for msg in messages:
+        role = msg.get("role", "")
+        if role == "assistant" and msg.get("tool_calls"):
+            content_blocks: list[dict] = []
+            text = msg.get("content", "") or ""
+            if text:
+                content_blocks.append({"type": "text", "text": text})
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function", {})
+                raw_args = fn.get("arguments", {})
+                if isinstance(raw_args, str):
+                    try:
+                        raw_args = json.loads(raw_args)
+                    except Exception:
+                        raw_args = {}
+                content_blocks.append({
+                    "type": "tool_use",
+                    "id": tc.get("id", fn.get("name", "tool")),
+                    "name": fn.get("name", ""),
+                    "input": raw_args,
+                })
+            normalized.append({"role": "assistant", "content": content_blocks})
+        elif role == "tool":
+            normalized.append({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": msg.get("tool_call_id", "tool"),
+                    "content": msg.get("content", ""),
+                }],
+            })
+        else:
+            normalized.append(msg)
+    return normalized
 
 
 class AnthropicProvider(LLMProvider):
@@ -71,13 +120,27 @@ class AnthropicProvider(LLMProvider):
             "temperature": request.temperature
             if request.temperature is not None
             else self._default_temperature,
-            "messages": [{"role": "user", "content": request.prompt}],
+            "messages": _normalize_messages_anthropic(request.messages) if request.messages is not None
+            else [{"role": "user", "content": request.prompt}],
         }
         if request.system:
             params["system"] = request.system
 
-        # ── JSON structured output via forced tool_use ────────────────────────
-        if getattr(request, "output_mode", "json") == "json":
+        # ── Tool calling ───────────────────────────────────────────────────────
+        if request.tools is not None:
+            # Caller-supplied schemas (FC mode): convert OpenAI format → Anthropic format
+            params["tools"] = [
+                {
+                    "name": t["function"]["name"],
+                    "description": t["function"].get("description", ""),
+                    "input_schema": t["function"].get("parameters", {"type": "object", "properties": {}}),
+                }
+                for t in request.tools
+                if t.get("type") == "function"
+            ]
+            params["tool_choice"] = {"type": "auto"}
+        elif getattr(request, "output_mode", "json") == "json":
+            # Legacy path: forced rof_graph_update structured output
             params["tools"] = [_ROF_TOOL_DEFINITION]
             params["tool_choice"] = {"type": "tool", "name": "rof_graph_update"}
 

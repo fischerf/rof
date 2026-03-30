@@ -110,8 +110,13 @@ class OpenAIProvider(LLMProvider):
             else self._default_temperature,
         }
 
-        # ── JSON structured output ────────────────────────────────────────────
-        if getattr(request, "output_mode", "json") == "json":
+        # ── Tool calling ──────────────────────────────────────────────────────
+        if request.tools is not None:
+            # Caller-supplied schemas (FC mode): pass through in OpenAI format
+            params["tools"] = request.tools
+            params["tool_choice"] = "auto"
+        elif getattr(request, "output_mode", "json") == "json":
+            # Legacy path: forced rof_graph_update structured output
             params["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
@@ -166,6 +171,14 @@ class OpenAIProvider(LLMProvider):
     # ------------------------------------------------------------------
 
     def _build_messages(self, request: LLMRequest) -> list[dict]:
+        if request.messages is not None:
+            # FC mode: caller supplies full conversation history.
+            # Prepend system message when present and not already first.
+            if request.system and not (
+                request.messages and request.messages[0].get("role") == "system"
+            ):
+                return [{"role": "system", "content": request.system}] + list(request.messages)
+            return list(request.messages)
         messages: list[dict] = []
         if request.system:
             messages.append({"role": "system", "content": request.system})

@@ -66,6 +66,14 @@ class LLMRequest:
     # "rl"   — expect RelateLang text; RetryManager re-prompts with RL hint on failure
     # "raw"  — free-form response (code, player input, prose); RetryManager skips
     #          parse-retry entirely — never emit "Response is not valid RL" warnings
+    tools: Optional[list] = None
+    # OpenAI-style function schemas [{type, function:{name, description, parameters}}].
+    # When set, providers use these instead of the built-in rof_graph_update tool.
+    # Default None preserves existing behaviour at all call sites.
+    messages: Optional[list] = None
+    # Full conversation history [{"role": ..., "content": ...}, ...].
+    # When set, providers use this instead of building a single user message from prompt.
+    # prompt is still required for telemetry and logging fallback.
 
     def scrub_metadata(self) -> "LLMRequest":
         """

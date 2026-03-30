@@ -10,8 +10,7 @@ Exports
   _HAS_AUDIT                            – True when governance.audit is available
 
   # rof_core symbols
-  EventBus, LLMProvider, LLMRequest, Orchestrator, OrchestratorConfig,
-  ParseError, RLParser, RunResult, ToolProvider, WorkflowAST
+  EventBus, LLMProvider, LLMRequest, RunResult, ToolProvider
 
   # rof_llm symbols
   AuthError, BackoffStrategy, ProviderError,
@@ -22,8 +21,7 @@ Exports
   create_default_registry
 
   # governance.audit symbols (only when _HAS_AUDIT is True)
-  AuditConfig, AuditSubscriber, AuditSink,
-  JsonLinesSink, NullSink, StdoutSink, create_sink
+  AuditConfig, AuditSubscriber, create_sink
 """
 
 from __future__ import annotations
@@ -106,13 +104,8 @@ from rof_framework.rof_core import (  # type: ignore
     EventBus,
     LLMProvider,
     LLMRequest,
-    Orchestrator,
-    OrchestratorConfig,
-    ParseError,
-    RLParser,
     RunResult,
     ToolProvider,
-    WorkflowAST,
 )
 
 # ---------------------------------------------------------------------------
@@ -172,12 +165,10 @@ _HAS_ROUTING: bool = rof_routing is not None
 
 if _HAS_ROUTING:
     from rof_framework.rof_routing import (  # type: ignore
-        ConfidentOrchestrator,
         RoutingMemory,
         RoutingMemoryInspector,
     )
 else:
-    ConfidentOrchestrator = None  # type: ignore[assignment,misc]
     RoutingMemory = None  # type: ignore[assignment,misc]
     RoutingMemoryInspector = None  # type: ignore[assignment,misc]
 
@@ -187,20 +178,12 @@ else:
 _HAS_AUDIT: bool = False
 AuditConfig = None  # type: ignore[assignment,misc]
 AuditSubscriber = None  # type: ignore[assignment,misc]
-AuditSink = None  # type: ignore[assignment,misc]
-JsonLinesSink = None  # type: ignore[assignment,misc]
-NullSink = None  # type: ignore[assignment,misc]
-StdoutSink = None  # type: ignore[assignment,misc]
 create_sink = None  # type: ignore[assignment,misc]
 
 try:
     from rof_framework.governance.audit import (  # type: ignore
         AuditConfig,
-        AuditSink,
         AuditSubscriber,
-        JsonLinesSink,
-        NullSink,
-        StdoutSink,
         create_sink,
     )
 
@@ -212,17 +195,13 @@ except ImportError:
 # MCP client layer – optional (pip install mcp>=1.0  or  pip install rof[mcp])
 # ---------------------------------------------------------------------------
 _HAS_MCP: bool = False
-MCPClientTool = None  # type: ignore[assignment,misc]
 MCPServerConfig = None  # type: ignore[assignment,misc]
 MCPToolFactory = None  # type: ignore[assignment,misc]
-MCPTransport = None  # type: ignore[assignment,misc]
 
 try:
     from rof_framework.tools.tools.mcp import (  # type: ignore
-        MCPClientTool,
         MCPServerConfig,
         MCPToolFactory,
-        MCPTransport,
     )
 
     _HAS_MCP = True
@@ -247,13 +226,8 @@ __all__ = [
     "EventBus",
     "LLMProvider",
     "LLMRequest",
-    "Orchestrator",
-    "OrchestratorConfig",
-    "ParseError",
-    "RLParser",
     "RunResult",
     "ToolProvider",
-    "WorkflowAST",
     # rof_llm
     "AuthError",
     "BackoffStrategy",
@@ -268,20 +242,13 @@ __all__ = [
     "LLMPlayerTool",
     "create_default_registry",
     # rof_routing (may be None when _HAS_ROUTING is False)
-    "ConfidentOrchestrator",
     "RoutingMemory",
     "RoutingMemoryInspector",
     # MCP (may be None when _HAS_MCP is False)
-    "MCPClientTool",
     "MCPServerConfig",
     "MCPToolFactory",
-    "MCPTransport",
     # governance.audit (may be None when _HAS_AUDIT is False)
     "AuditConfig",
     "AuditSubscriber",
-    "AuditSink",
-    "JsonLinesSink",
-    "NullSink",
-    "StdoutSink",
     "create_sink",
 ]

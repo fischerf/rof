@@ -1331,7 +1331,6 @@ def main() -> None:
         output_dir=output_dir,
         verbose=args.verbose or debug,
         use_routing=use_routing,
-        output_mode=getattr(args, "output_mode", "auto"),
         debug=debug,
         log_comms=log_comms,
         comms_log_path=comms_log_path,
@@ -1339,8 +1338,6 @@ def main() -> None:
         rag_backend=rag_backend,
         rag_persist_dir=rag_persist_dir,
         knowledge_dir=knowledge_dir,
-        step_retries=max(0, getattr(args, "step_retries", 1)),
-        llm_fallback_on_tool_failure=not getattr(args, "no_llm_fallback", False),
         mcp_server_configs=mcp_server_configs,
         mcp_eager_connect=mcp_eager_connect,
     )

@@ -1076,6 +1076,28 @@ def _mcp_agent_md(flat: dict, entities: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _turn_summary_cli(flat: dict, entities: dict) -> str:
+    text = flat.get("__response__.text", flat.get("text", ""))
+    lines = [f"\n  {_bold('Response:')}\n"]
+    if text:
+        lines.append(text)
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _turn_summary_agent(flat: dict, entities: dict) -> str:
+    return flat.get("__response__.text", flat.get("text", ""))
+
+
+def _turn_summary_agent_md(flat: dict, entities: dict) -> str:
+    text = flat.get("__response__.text", flat.get("text", ""))
+    lines = ["## Response\n"]
+    if text:
+        lines.append(text)
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _generic_cli(flat: dict, entities: dict) -> str:
     lines: list[str] = []
     lines.append(f"\n  {_bold('Result:')}")
@@ -1149,7 +1171,9 @@ _LAYOUTS: list[_Layout] = [
     _Layout(
         name="web_search",
         match=lambda flat: (
-            "WebSearchResults.query" in flat or "WebSearchResults.result_count" in flat
+            "WebSearchResults.query" in flat
+            or "WebSearchResults.result_count" in flat
+            or "WebSearchTool.query" in flat
         ),
         cli_renderer=_web_search_cli,
         agent_renderer=_web_search_agent,
@@ -1157,7 +1181,11 @@ _LAYOUTS: list[_Layout] = [
     ),
     _Layout(
         name="rag",
-        match=lambda flat: "RAGResults.query" in flat or "RAGResults.result_count" in flat,
+        match=lambda flat: (
+            "RAGResults.query" in flat
+            or "RAGResults.result_count" in flat
+            or "RAGTool.query" in flat
+        ),
         cli_renderer=_rag_cli,
         agent_renderer=_rag_agent,
         agent_md_renderer=_rag_agent_md,
@@ -1213,10 +1241,21 @@ _LAYOUTS: list[_Layout] = [
     ),
     _Layout(
         name="mcp",
-        match=lambda flat: "MCPResult.server" in flat or "MCPResult.result" in flat,
+        match=lambda flat: (
+            "MCPResult.server" in flat
+            or "MCPResult.result" in flat
+            or "MCPClientTool.server" in flat
+        ),
         cli_renderer=_mcp_cli,
         agent_renderer=_mcp_agent,
         agent_md_renderer=_mcp_agent_md,
+    ),
+    _Layout(
+        name="turn_summary",
+        match=lambda flat: "__response__.text" in flat,
+        cli_renderer=_turn_summary_cli,
+        agent_renderer=_turn_summary_agent,
+        agent_md_renderer=_turn_summary_agent_md,
     ),
     _Layout(
         name="generic",
@@ -1342,7 +1381,12 @@ def render_result(
 
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     status_str = "SUCCESS" if success else "FAILED"
-    timing_str = f"plan {plan_ms}ms  exec {exec_ms}ms" if plan_ms or exec_ms else ""
+    _timing_parts = []
+    if plan_ms:
+        _timing_parts.append(f"plan {plan_ms}ms")
+    if exec_ms:
+        _timing_parts.append(f"exec {exec_ms}ms")
+    timing_str = "  ".join(_timing_parts)
 
     # ── Markdown mode ─────────────────────────────────────────────────────
     if mode == "agent_md":
