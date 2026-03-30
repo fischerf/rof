@@ -1,0 +1,30 @@
+# ROF AI Demo — requirements
+#
+# Install the core framework first:
+#   pip install -e ../../   (from this directory)
+# or:
+#   pip install rof
+#
+# Then install the dependencies below.
+#
+# Quick install — all optional extras at once:
+#   pip install "rof[all]"
+
+# ── LLM providers ────────────────────────────────────────────────────────────
+anthropic>=0.20          # Anthropic Claude (claude-opus-4-6, claude-sonnet-4-6, …)
+openai>=1.0              # OpenAI / Azure OpenAI
+google-generativeai>=0.5 # Google Gemini
+httpx>=0.25              # Ollama (raw HTTP) + signal-cli REST API
+
+# ── Web search & HTTP tools ──────────────────────────────────────────────────
+ddgs                     # DuckDuckGo search backend for WebSearchTool (no API key needed)
+
+# ── Lua execution ────────────────────────────────────────────────────────────
+lupa                     # in-process Lua execution (fallback: lua/luajit binary on PATH)
+
+# ── MCP tool integration ─────────────────────────────────────────────────────
+mcp>=1.0                 # MCP client — connects any MCP-compatible server
+
+# ── Knowledge base (ChromaDB persistent backend) ────────────────────────────
+chromadb                 # persistent vector store for RAGTool
+sentence-transformers>=2.2  # embedding model for semantic search + learned routing
